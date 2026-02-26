@@ -618,6 +618,21 @@ if ($WebAppIdentity) {
     Write-Host "[SUCCESS] Managed identity enabled for $WebAppName" -ForegroundColor Green
 }
 
+# Content Understanding — enable system-assigned managed identity so it can access Storage blobs
+$CuIdentity = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','identity','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','principalId','-o','tsv')).Output
+if ($CuIdentity) {
+    Write-Host "[OK] Managed identity already enabled for $ContentUnderstandingName" -ForegroundColor Green
+} else {
+    Write-Host "[INFO] Enabling managed identity for $ContentUnderstandingName" -ForegroundColor Cyan
+    Invoke-AzCliSilent -Arguments @('cognitiveservices','account','identity','assign','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--output','none') | Out-Null
+    $CuIdentity = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','identity','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','principalId','-o','tsv')).Output
+    if ($CuIdentity) {
+        Write-Host "[SUCCESS] Managed identity enabled for $ContentUnderstandingName" -ForegroundColor Green
+    } else {
+        Write-Host "[WARNING] Could not enable managed identity on $ContentUnderstandingName. It may need Storage Blob Data Reader granted manually." -ForegroundColor Yellow
+    }
+}
+
 if (-not $MailboxIdentity -or -not $QueueDbIdentity -or -not $WebAppIdentity) {
     Write-Host "[ERROR] Failed to retrieve managed identity principal IDs. Cannot assign RBAC." -ForegroundColor Red
     exit 1
@@ -647,6 +662,12 @@ foreach ($identity in @($MailboxIdentity, $QueueDbIdentity)) {
     foreach ($role in @('Storage Blob Data Owner','Storage Account Contributor','Storage Queue Data Contributor','Storage Table Data Contributor')) {
         if (-not (Ensure-RoleAssignment -Assignee $identity -Role $role -Scope $StorageAccountId)) { $newAssignments++ }
     }
+}
+
+# Content Understanding needs to read blobs from Storage when given a blob URL
+if ($CuIdentity) {
+    Write-Host "[INFO] Storage Blob Data Reader for Content Understanding" -ForegroundColor Cyan
+    if (-not (Ensure-RoleAssignment -Assignee $CuIdentity -Role 'Storage Blob Data Reader' -Scope $StorageAccountId)) { $newAssignments++ }
 }
 
 # Cosmos DB access (data plane RBAC - Built-in Data Contributor)

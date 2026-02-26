@@ -620,6 +620,21 @@ else
     log_success "Managed identity enabled for $WEB_APP_NAME"
 fi
 
+# Content Understanding — enable system-assigned managed identity so it can access Storage blobs
+CU_IDENTITY=$(az cognitiveservices account identity show --name "$CONTENT_UNDERSTANDING_NAME" --resource-group "$RESOURCE_GROUP_NAME" --query principalId -o tsv 2>/dev/null || echo "")
+if [ -n "$CU_IDENTITY" ]; then
+    log_success "Managed identity already enabled for $CONTENT_UNDERSTANDING_NAME"
+else
+    log_info "Enabling managed identity for $CONTENT_UNDERSTANDING_NAME"
+    az cognitiveservices account identity assign --name "$CONTENT_UNDERSTANDING_NAME" --resource-group "$RESOURCE_GROUP_NAME" --output none 2>/dev/null
+    CU_IDENTITY=$(az cognitiveservices account identity show --name "$CONTENT_UNDERSTANDING_NAME" --resource-group "$RESOURCE_GROUP_NAME" --query principalId -o tsv 2>/dev/null || echo "")
+    if [ -n "$CU_IDENTITY" ]; then
+        log_success "Managed identity enabled for $CONTENT_UNDERSTANDING_NAME"
+    else
+        log_warning "Could not enable managed identity on $CONTENT_UNDERSTANDING_NAME. It may need Storage Blob Data Reader granted manually."
+    fi
+fi
+
 if [ -z "$MAILBOX_IDENTITY" ] || [ -z "$QUEUEDB_IDENTITY" ] || [ -z "$WEBAPP_IDENTITY" ]; then
     log_error "Failed to retrieve managed identity principal IDs. Cannot assign RBAC."
     exit 1
@@ -650,6 +665,12 @@ for identity in "$MAILBOX_IDENTITY" "$QUEUEDB_IDENTITY"; do
         ensure_role_assignment "$identity" "$role" "$STORAGE_ACCOUNT_ID" || NEW_ASSIGNMENTS=$((NEW_ASSIGNMENTS + 1))
     done
 done
+
+# Content Understanding needs to read blobs from Storage when given a blob URL
+if [ -n "$CU_IDENTITY" ]; then
+    log_info "Storage Blob Data Reader for Content Understanding"
+    ensure_role_assignment "$CU_IDENTITY" "Storage Blob Data Reader" "$STORAGE_ACCOUNT_ID" || NEW_ASSIGNMENTS=$((NEW_ASSIGNMENTS + 1))
+fi
 
 # Cosmos DB access (data plane RBAC - Built-in Data Contributor)
 COSMOS_DB_ACCOUNT_ID=$(az cosmosdb show --name "$COSMOS_DB_ACCOUNT_NAME" --resource-group "$RESOURCE_GROUP_NAME" --query id -o tsv 2>/dev/null || echo "")
