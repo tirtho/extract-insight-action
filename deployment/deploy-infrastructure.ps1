@@ -49,12 +49,32 @@ $AppServicePlanName   = if ($env:APP_SERVICE_PLAN_NAME)     { $env:APP_SERVICE_P
 $WebAppName           = if ($env:WEB_APP_NAME)              { $env:WEB_APP_NAME }              else { "app-$ProjectName-$Environment-$Suffix" }
 $ContentUnderstandingName = if ($env:CONTENT_UNDERSTANDING_NAME) { $env:CONTENT_UNDERSTANDING_NAME } else { "cu-$ProjectName-$Environment-$Suffix" }
 $AiFoundryName            = if ($env:AI_FOUNDRY_NAME)            { $env:AI_FOUNDRY_NAME }            else { "oai-$ProjectName-$Environment-$Suffix" }
-$AiFoundryDeploymentName  = "gpt-4.1"
-$AiFoundryModelName       = "gpt-4.1"
-$AiFoundryModelVersion    = "2025-04-14"
+$AiFoundryDeploymentName  = "gpt-5.1-chat"
+$AiFoundryModelName       = "gpt-5.1-chat"
+$AiFoundryModelVersion    = "2025-11-13"
 $AiFoundryApiVersion      = "2024-12-01-preview"
 $AiFoundrySkuName         = "GlobalStandard"
 $AiFoundrySkuCapacity     = "50"
+
+# Verify JAVA_HOME points to Java 21
+if (-not $env:JAVA_HOME) {
+    Write-Host "[ERROR] JAVA_HOME is not set. Please set JAVA_HOME to a JDK 21 installation." -ForegroundColor Red
+    exit 1
+}
+$JavaVersionFull = & "$env:JAVA_HOME\bin\java" -version 2>&1 | Select-Object -First 1
+if ($JavaVersionFull -match '"(\d+)') {
+    $JavaMajorVersion = $Matches[1]
+} else {
+    Write-Host "[ERROR] Could not detect Java version from JAVA_HOME ($env:JAVA_HOME)" -ForegroundColor Red
+    exit 1
+}
+if ($JavaMajorVersion -ne '21') {
+    Write-Host "[ERROR] This project requires Java 21 but JAVA_HOME points to Java $JavaMajorVersion." -ForegroundColor Red
+    Write-Host "        JAVA_HOME: $env:JAVA_HOME" -ForegroundColor Red
+    Write-Host "        Please install JDK 21 and update JAVA_HOME." -ForegroundColor Red
+    exit 1
+}
+Write-Host "[INFO] Java 21 confirmed from JAVA_HOME" -ForegroundColor Cyan
 
 # =============================================================================
 # HELPER FUNCTION
@@ -825,20 +845,6 @@ Invoke-AzCliSilent -Arguments @('functionapp','config','appsettings','delete','-
 $mailboxSettings = @{
     "AzureWebJobsStorage__accountName" = $StorageAccountName
     "AZURE_KEY_VAULT_URL"              = $KvUrl
-    "AZURE_SERVICE_BUS_URL"            = $SbUrl
-    "AZURE_SERVICE_BUS_TOPIC"          = $ServiceBusTopicName
-    "PAST_EMAIL_READ_INTERVAL_SECONDS" = "3600"
-    "AZURE_CLIENT_ID"                  = "@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=GraphClientId)"
-    "AZURE_CLIENT_SECRET"              = "@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=GraphClientSecret)"
-    "AZURE_TENANT_ID"                  = "@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=GraphTenantId)"
-    "AZURE_COSMOS_DB_ENDPOINT"         = $CosmosDbEndpoint
-    "AZURE_COSMOS_DB_DATABASE"         = $CosmosDbDatabaseName
-    "AZURE_COSMOS_DB_CONTAINER"                = $CosmosDbContainerName
-    "AZURE_CONTENT_UNDERSTANDING_ENDPOINT"     = $ContentUnderstandingEndpoint
-    "AZURE_OPENAI_ENDPOINT"                    = $AiFoundryEndpoint
-    "AZURE_OPENAI_DEPLOYMENT_NAME"             = $AiFoundryDeploymentName
-    "AZURE_OPENAI_MODEL_NAME"                  = $AiFoundryModelName
-    "AZURE_OPENAI_API_VERSION"                 = $AiFoundryApiVersion
 }
 $r1 = Set-FunctionAppSettings -FunctionAppName $FuncMailboxName -ResourceGroup $ResourceGroupName -Settings $mailboxSettings
 if ($r1.ExitCode -ne 0) {
@@ -849,17 +855,6 @@ if ($r1.ExitCode -ne 0) {
 $queueDbSettings = @{
     "AzureWebJobsStorage__accountName"  = $StorageAccountName
     "AZURE_KEY_VAULT_URL"               = $KvUrl
-    "AZURE_SERVICE_BUS_URL"             = $SbUrl
-    "AZURE_SERVICE_BUS_TOPIC"           = $ServiceBusTopicName
-    "AZURE_SERVICE_BUS_SUBSCRIPTION"    = $ServiceBusSubName
-    "AZURE_COSMOS_DB_ENDPOINT"          = $CosmosDbEndpoint
-    "AZURE_COSMOS_DB_DATABASE"          = $CosmosDbDatabaseName
-    "AZURE_COSMOS_DB_CONTAINER"                 = $CosmosDbContainerName
-    "AZURE_CONTENT_UNDERSTANDING_ENDPOINT"     = $ContentUnderstandingEndpoint
-    "AZURE_OPENAI_ENDPOINT"                    = $AiFoundryEndpoint
-    "AZURE_OPENAI_DEPLOYMENT_NAME"             = $AiFoundryDeploymentName
-    "AZURE_OPENAI_MODEL_NAME"                  = $AiFoundryModelName
-    "AZURE_OPENAI_API_VERSION"                 = $AiFoundryApiVersion
 }
 $r2 = Set-FunctionAppSettings -FunctionAppName $FuncQueueDbName -ResourceGroup $ResourceGroupName -Settings $queueDbSettings
 if ($r2.ExitCode -ne 0) {
@@ -877,16 +872,6 @@ Write-Host "[INFO] Configuring Web App settings..." -ForegroundColor Cyan
 $webAppSettingsPayload = @{
     properties = @{
         "AZURE_KEY_VAULT_URL"      = $KvUrl
-        "AZURE_COSMOS_DB_ENDPOINT" = $CosmosDbEndpoint
-        "AZURE_COSMOS_DB_DATABASE" = $CosmosDbDatabaseName
-        "AZURE_COSMOS_DB_CONTAINER"= $CosmosDbContainerName
-        "AZURE_SERVICE_BUS_URL"                    = $SbUrl
-        "AZURE_SERVICE_BUS_TOPIC"                  = $ServiceBusTopicName
-        "AZURE_CONTENT_UNDERSTANDING_ENDPOINT"     = $ContentUnderstandingEndpoint
-        "AZURE_OPENAI_ENDPOINT"                    = $AiFoundryEndpoint
-        "AZURE_OPENAI_DEPLOYMENT_NAME"             = $AiFoundryDeploymentName
-        "AZURE_OPENAI_MODEL_NAME"                  = $AiFoundryModelName
-        "AZURE_OPENAI_API_VERSION"                 = $AiFoundryApiVersion
     }
 } | ConvertTo-Json -Compress
 

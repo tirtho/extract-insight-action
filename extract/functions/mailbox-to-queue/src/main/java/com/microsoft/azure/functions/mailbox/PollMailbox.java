@@ -1,4 +1,4 @@
-package com.microsoft.azure.functions;
+package com.microsoft.azure.functions.mailbox;
 
 import com.microsoft.azure.functions.annotation.FunctionName;
 import com.microsoft.azure.functions.annotation.TimerTrigger;
@@ -13,11 +13,10 @@ import com.azure.identity.ClientSecretCredentialBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
-import com.microsoft.graph.GraphServiceClient;
+import com.microsoft.graph.requests.GraphServiceClient;
+import com.microsoft.graph.requests.MessageCollectionPage;
 import com.microsoft.graph.models.Message;
-import com.microsoft.graph.models.MessageCollectionResponse;
-import com.microsoft.graph.models.Recipient;
-import com.microsoft.graph.models.EmailAddress;
+import com.microsoft.graph.authentication.TokenCredentialAuthProvider;
 
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -111,13 +110,19 @@ public class PollMailbox {
             String tenantId = getSecretOrEnv("AZURE_TENANT_ID", "");
             
             if (!clientId.isEmpty() && !clientSecret.isEmpty() && !tenantId.isEmpty()) {
-                ClientSecretCredentialBuilder credentialBuilder = new ClientSecretCredentialBuilder()
+                var credential = new ClientSecretCredentialBuilder()
                     .clientId(clientId)
                     .clientSecret(clientSecret)
-                    .tenantId(tenantId);
-                
+                    .tenantId(tenantId)
+                    .build();
+
+                TokenCredentialAuthProvider authProvider = new TokenCredentialAuthProvider(
+                    Arrays.asList("https://graph.microsoft.com/.default"),
+                    credential
+                );
+
                 graphServiceClient = GraphServiceClient.builder()
-                    .credential(credentialBuilder.build())
+                    .authenticationProvider(authProvider)
                     .buildClient();
                 
                 logger.info("Microsoft Graph client initialized successfully");
@@ -157,19 +162,21 @@ public class PollMailbox {
             // Query messages from the mailbox
             List<Message> messages;
             if ("me".equals(targetMailbox)) {
-                MessageCollectionResponse messagesResponse = graphServiceClient.me().messages().get(requestConfig -> {
-                    requestConfig.queryParameters.filter = filter;
-                    requestConfig.queryParameters.select = new String[]{"id", "internetMessageId"};
-                    requestConfig.queryParameters.top = 1000;
-                });
-                messages = messagesResponse.getValue();
+                MessageCollectionPage messagesPage = graphServiceClient.me().messages()
+                    .buildRequest()
+                    .filter(filter)
+                    .select("id,internetMessageId")
+                    .top(1000)
+                    .get();
+                messages = messagesPage.getCurrentPage();
             } else {
-                MessageCollectionResponse messagesResponse = graphServiceClient.users().byUserId(targetMailbox).messages().get(requestConfig -> {
-                    requestConfig.queryParameters.filter = filter;
-                    requestConfig.queryParameters.select = new String[]{"id", "internetMessageId"};
-                    requestConfig.queryParameters.top = 1000;
-                });
-                messages = messagesResponse.getValue();
+                MessageCollectionPage messagesPage = graphServiceClient.users(targetMailbox).messages()
+                    .buildRequest()
+                    .filter(filter)
+                    .select("id,internetMessageId")
+                    .top(1000)
+                    .get();
+                messages = messagesPage.getCurrentPage();
             }
             
             logger.info(String.format("Found %d messages in the specified time range", messages.size()));
@@ -194,8 +201,8 @@ public class PollMailbox {
         ObjectNode emailData = objectMapper.createObjectNode();
         
         // Only include the unique identifiers
-        emailData.put("internetMessageId", message.getInternetMessageId() != null ? message.getInternetMessageId() : "");
-        emailData.put("graphMessageId", message.getId() != null ? message.getId() : "");
+        emailData.put("internetMessageId", message.internetMessageId != null ? message.internetMessageId : "");
+        emailData.put("graphMessageId", message.id != null ? message.id : "");
         
         // Add minimal processing info
         emailData.put("processedAt", LocalDateTime.now().toString());
@@ -215,7 +222,7 @@ public class PollMailbox {
             
             serviceBusSender.sendMessage(serviceBusMessage);
             logger.info("Sent email ID to Service Bus: " + 
-                (message.getInternetMessageId() != null ? message.getInternetMessageId() : message.getId()));
+                (message.internetMessageId != null ? message.internetMessageId : message.id));
         } else {
             logger.warning("Service Bus sender not configured. Email ID not sent.");
         }

@@ -1,0 +1,5 @@
+************
+Content Understanding could not be tested as it doesn't 
+support centralus for its APIs as of 02/28/2026.
+TODO : Should try testing with CU deployed in southcentralus.
+************

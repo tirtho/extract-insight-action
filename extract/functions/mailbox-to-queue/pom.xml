@@ -14,12 +14,11 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <java.version>21</java.version>
-        <maven.compiler.source>21</maven.compiler.source>
-        <maven.compiler.target>21</maven.compiler.target>
+        <maven.compiler.release>21</maven.compiler.release>
         <azure.functions.maven.plugin.version>1.31.0</azure.functions.maven.plugin.version>
         <azure.functions.java.library.version>3.1.0</azure.functions.java.library.version>
         <functionAppName>mailbox-to-queue-function</functionAppName>
+        <stagingDirectory>${project.build.directory}/azure-functions/${functionAppName}</stagingDirectory>
     </properties>
 
     <dependencies>
@@ -76,18 +75,11 @@
             <version>2.16.1</version>
         </dependency>
 
-        <!-- Microsoft Graph SDK for Java -->
+        <!-- Microsoft Graph SDK for Java (transitively includes microsoft-graph-core:2.0.21) -->
         <dependency>
             <groupId>com.microsoft.graph</groupId>
             <artifactId>microsoft-graph</artifactId>
             <version>5.80.0</version>
-        </dependency>
-
-        <!-- Microsoft Graph Core SDK -->
-        <dependency>
-            <groupId>com.microsoft.graph</groupId>
-            <artifactId>microsoft-graph-core</artifactId>
-            <version>2.1.1</version>
         </dependency>
 
         <!-- SLF4J for logging -->
@@ -121,8 +113,6 @@
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.11.0</version>
                 <configuration>
-                    <source>${java.version}</source>
-                    <target>${java.version}</target>
                     <encoding>UTF-8</encoding>
                 </configuration>
             </plugin>

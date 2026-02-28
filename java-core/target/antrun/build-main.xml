@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="maven-antrun-" default="main">
+  <target name="main">
+    <mkdir dir="C:\Users\tibarar\OneDrive - Microsoft\Desktop\MyProjects\extract-insight-action\java-core/../project-lib/java" />
+    <copy file="C:\Users\tibarar\OneDrive - Microsoft\Desktop\MyProjects\extract-insight-action\java-core\target/java-core-1.0-SNAPSHOT.jar" todir="C:\Users\tibarar\OneDrive - Microsoft\Desktop\MyProjects\extract-insight-action\java-core/../project-lib/java" overwrite="true" />
+  </target>
+</project>

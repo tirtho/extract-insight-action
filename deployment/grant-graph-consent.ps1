@@ -19,17 +19,36 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Helper: run az CLI without ErrorActionPreference=Stop interfering with stderr
+# Helper: run az CLI via .NET Process to reliably capture stdout + stderr
+# (Bypasses PowerShell's error-stream handling which can swallow native stderr)
 function Invoke-Az {
     param([string[]]$Arguments)
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = 'SilentlyContinue'
-    $output = & az @Arguments 2>&1
-    $code = $LASTEXITCODE
-    $ErrorActionPreference = $prev
-    $stdout = ($output | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
-    $stderr = ($output | ForEach-Object { $_.ToString() }) -join "`n"
-    return @{ ExitCode = $code; Output = $stdout.Trim(); Stderr = $stderr.Trim() }
+    # Escape arguments for cmd.exe: wrap in double-quotes if they contain spaces or shell meta-chars
+    $escapedArgs = foreach ($arg in $Arguments) {
+        if ($arg -match '[\s&|<>^]') { "`"$arg`"" } else { $arg }
+    }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName  = "cmd.exe"
+    $psi.Arguments = "/c az " + ($escapedArgs -join " ")
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.CreateNoWindow = $true
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    # Read one stream async to avoid deadlock when both buffers fill
+    $stderrTask    = $process.StandardError.ReadToEndAsync()
+    $stdoutContent = $process.StandardOutput.ReadToEnd()
+    $process.WaitForExit()
+    $stderrContent = $stderrTask.GetAwaiter().GetResult()
+    $code = $process.ExitCode
+    $process.Dispose()
+
+    return @{
+        ExitCode = $code
+        Output   = if ($stdoutContent) { $stdoutContent.Trim() } else { "" }
+        Stderr   = if ($stderrContent) { $stderrContent.Trim() } else { "" }
+    }
 }
 
 # =============================================================================
@@ -137,17 +156,19 @@ foreach ($roleId in $permissionIds) {
             '--uri',"https://graph.microsoft.com/v1.0/servicePrincipals/$appSpId/appRoleAssignments",
             '--body',"@$bodyFile",
             '--headers','Content-Type=application/json',
-            '-o','none')
+            '--resource','https://graph.microsoft.com',
+            '-o','json')
         $exitCode = $grantResult.ExitCode
-        $resultText = $grantResult.Stderr
+        # Combine stderr and stdout for error detection (Graph errors may appear in either)
+        $errorText = (@($grantResult.Stderr, $grantResult.Output) | Where-Object { $_ }) -join "`n"
         if ($exitCode -eq 0) {
             Write-Host "  Granted role: $roleId" -ForegroundColor Green
         } else {
-            # Check if already granted
-            if ($resultText -match "already exists") {
+            # Check if already granted (Permission being assigned already exists on the object)
+            if ($errorText -match "already exists|Permission.*already") {
                 Write-Host "  Role already granted: $roleId" -ForegroundColor Gray
             } else {
-                Write-Host "  [ERROR] Failed to grant role $roleId`: $resultText" -ForegroundColor Red
+                Write-Host "  [ERROR] Failed to grant role ${roleId}: $errorText" -ForegroundColor Red
                 $allSucceeded = $false
             }
         }
