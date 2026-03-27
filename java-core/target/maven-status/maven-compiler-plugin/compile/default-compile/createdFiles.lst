@@ -1,2 +1,3 @@
-com\core\az\AzGetConnection.class
+com\core\az\AzConnection.class
 com\core\az\AzEnvNames.class
+com\core\az\AzContentUnderstanding.class

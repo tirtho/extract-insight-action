@@ -1,0 +1,5 @@
+{
+  "description": "Integration test analyzer – extracts text content from documents",
+  "baseAnalyzerId": "prebuilt-document",
+  "scenario": "document"
+}

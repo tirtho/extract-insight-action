@@ -88,7 +88,7 @@ chmod +x deployment/deploy-infrastructure.sh
 ```cmd
 set "PROJECT_NAME=eia"
 set "ENVIRONMENT=dev"
-set "LOCATION=eastus"
+set "LOCATION=centalus"
 set "SUBSCRIPTION_ID=your-subscription-id"
 ```
 

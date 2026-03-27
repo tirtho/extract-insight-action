@@ -44,10 +44,10 @@ TENANT_ID="${TENANT_ID:-$(az account show --query tenantId -o tsv 2>/dev/null ||
 PROJ_CLEAN="${PROJECT_NAME//-/}"
 RESOURCE_GROUP_NAME="${RESOURCE_GROUP_NAME:-rg-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
 KEY_VAULT_NAME="${KEY_VAULT_NAME:-kv-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
-SERVICE_BUS_NAMESPACE="${SERVICE_BUS_NAMESPACE:-sb-${PROJECT_NAME}-${ENVIRONMENT}}"
+SERVICE_BUS_NAMESPACE="${SERVICE_BUS_NAMESPACE:-sb-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
 STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:-st${PROJ_CLEAN}${ENVIRONMENT}${SUFFIX}}"
-FUNC_MAILBOX_NAME="${FUNCTION_APP_MAILBOX_NAME:-func-mailbox-${PROJECT_NAME}-${ENVIRONMENT}}"
-FUNC_QUEUEDB_NAME="${FUNCTION_APP_QUEUE_DB_NAME:-func-queuedb-${PROJECT_NAME}-${ENVIRONMENT}}"
+FUNC_MAILBOX_NAME="${FUNCTION_APP_MAILBOX_NAME:-func-mailbox-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
+FUNC_QUEUEDB_NAME="${FUNCTION_APP_QUEUE_DB_NAME:-func-queuedb-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
 SERVICE_BUS_TOPIC_NAME="${SERVICE_BUS_TOPIC_NAME:-email-processing}"
 SERVICE_BUS_SUB_NAME="${SERVICE_BUS_SUBSCRIPTION_NAME:-email-processor}"
 GRAPH_APP_NAME="${GRAPH_APP_NAME:-${PROJECT_NAME}-graph-api-${ENVIRONMENT}}"
@@ -61,8 +61,8 @@ APP_SERVICE_PLAN_NAME="${APP_SERVICE_PLAN_NAME:-plan-${PROJECT_NAME}-${ENVIRONME
 WEB_APP_NAME="${WEB_APP_NAME:-app-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
 CONTENT_UNDERSTANDING_NAME="${CONTENT_UNDERSTANDING_NAME:-cu-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
 AI_FOUNDRY_NAME="${AI_FOUNDRY_NAME:-oai-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
-AI_FOUNDRY_DEPLOYMENT_NAME="gpt-4.1"
-AI_FOUNDRY_MODEL_NAME="gpt-4.1"
+AI_FOUNDRY_DEPLOYMENT_NAME="gpt-5.1-chat"
+AI_FOUNDRY_MODEL_NAME="gpt-5.1-chat"
 
 # Verify JAVA_HOME points to Java 21
 if [ -z "${JAVA_HOME:-}" ]; then
@@ -81,7 +81,7 @@ if [ "$JAVA_MAJOR_VERSION" != "21" ]; then
     exit 1
 fi
 echo "[INFO] Java 21 confirmed from JAVA_HOME"
-AI_FOUNDRY_MODEL_VERSION="2025-04-14"
+AI_FOUNDRY_MODEL_VERSION="2025-11-13"
 AI_FOUNDRY_API_VERSION="2024-12-01-preview"
 AI_FOUNDRY_SKU_NAME="GlobalStandard"
 AI_FOUNDRY_SKU_CAPACITY="50"
@@ -191,6 +191,76 @@ set_function_app_settings() {
 }
 
 # =============================================================================
+# LOCATION AVAILABILITY CHECK
+# =============================================================================
+declare -A SERVICE_LOCATION_CACHE
+
+get_service_location() {
+    local service_name="$1"
+    local default_location="$2"
+
+    # Return cached result if already resolved
+    if [ -n "${SERVICE_LOCATION_CACHE[$service_name]+x}" ]; then
+        echo "${SERVICE_LOCATION_CACHE[$service_name]}"
+        return
+    fi
+
+    local csv_path
+    csv_path="$(dirname "$0")/supported-service-locations.csv"
+    if [ ! -f "$csv_path" ]; then
+        SERVICE_LOCATION_CACHE[$service_name]="$default_location"
+        echo "$default_location"
+        return
+    fi
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=$(echo "$line" | tr -d '\r' | xargs)
+        [ -z "$line" ] && continue
+
+        local svc
+        svc=$(echo "$line" | cut -d',' -f1 | tr '[:upper:]' '[:lower:]' | xargs)
+        if [ "$svc" = "$(echo "$service_name" | tr '[:upper:]' '[:lower:]')" ]; then
+            # Parse supported locations from the rest of the CSV row
+            local supported_locations
+            supported_locations=$(echo "$line" | cut -d',' -f2- | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]' | grep -v '^$')
+
+            local lower_default
+            lower_default=$(echo "$default_location" | tr '[:upper:]' '[:lower:]')
+
+            if echo "$supported_locations" | grep -qx "$lower_default"; then
+                SERVICE_LOCATION_CACHE[$service_name]="$default_location"
+                echo "$default_location"
+                return
+            fi
+
+            # Location not supported - prompt user
+            echo "" >&2
+            log_warning "Location '$default_location' is not supported for service '$service_name'." >&2
+            local locations_list
+            locations_list=$(echo "$supported_locations" | tr '\n' ', ' | sed 's/,$//')
+            log_info "Supported locations: $locations_list" >&2
+
+            while true; do
+                read -rp "Enter a supported location for '$service_name': " user_input </dev/tty
+                user_input=$(echo "$user_input" | tr '[:upper:]' '[:lower:]' | xargs)
+                if [ -z "$user_input" ] || ! echo "$supported_locations" | grep -qx "$user_input"; then
+                    log_error "'$user_input' is not in the supported list. Please try again." >&2
+                else
+                    SERVICE_LOCATION_CACHE[$service_name]="$user_input"
+                    log_info "Using location '$user_input' for $service_name" >&2
+                    echo "$user_input"
+                    return
+                fi
+            done
+        fi
+    done < "$csv_path"
+
+    # No entry in CSV - assume service is available everywhere
+    SERVICE_LOCATION_CACHE[$service_name]="$default_location"
+    echo "$default_location"
+}
+
+# =============================================================================
 # BANNER
 # =============================================================================
 echo ""
@@ -232,6 +302,57 @@ log_info "Installing/upgrading required Azure CLI extensions..."
 az extension add --name application-insights --upgrade --yes 2>/dev/null || true
 log_success "Prerequisites OK"
 
+# Register required resource providers
+log_info "Registering required Azure resource providers..."
+PROVIDERS_TO_WAIT=()
+for provider in Microsoft.KeyVault Microsoft.ServiceBus Microsoft.Storage \
+    Microsoft.Web Microsoft.Insights Microsoft.OperationalInsights Microsoft.DocumentDB \
+    Microsoft.CognitiveServices; do
+    state=$(az provider show --namespace "$provider" --query registrationState -o tsv 2>/dev/null || echo "")
+    if [ "$state" = "Registered" ]; then
+        echo "  [OK] $provider already registered"
+    else
+        log_info "Registering $provider..."
+        az provider register --namespace "$provider" 2>/dev/null || true
+        PROVIDERS_TO_WAIT+=("$provider")
+    fi
+done
+if [ ${#PROVIDERS_TO_WAIT[@]} -gt 0 ]; then
+    log_info "Waiting for ${#PROVIDERS_TO_WAIT[@]} provider(s) to finish registering..."
+    for provider in "${PROVIDERS_TO_WAIT[@]}"; do
+        for i in $(seq 1 60); do
+            state=$(az provider show --namespace "$provider" --query registrationState -o tsv 2>/dev/null || echo "")
+            if [ "$state" = "Registered" ]; then
+                log_success "$provider registered"
+                break
+            fi
+            sleep 5
+        done
+        if [ "$state" != "Registered" ]; then
+            log_warning "$provider still not registered after 5 minutes — continuing anyway"
+        fi
+    done
+fi
+
+# =============================================================================
+# VALIDATE SERVICE LOCATIONS
+# =============================================================================
+echo ""
+log_info "Validating service availability in location '$LOCATION'..."
+
+LOCATION_RESOURCE_GROUP=$(get_service_location "resourcegroup" "$LOCATION")
+LOCATION_STORAGE=$(get_service_location "storageaccount" "$LOCATION")
+LOCATION_KEY_VAULT=$(get_service_location "keyvault" "$LOCATION")
+LOCATION_SERVICE_BUS=$(get_service_location "servicebus" "$LOCATION")
+LOCATION_APP_INSIGHTS=$(get_service_location "applicationinsights" "$LOCATION")
+LOCATION_COSMOS_DB=$(get_service_location "cosmosdb" "$LOCATION")
+LOCATION_CONTENT_UNDERSTANDING=$(get_service_location "contentunderstanding" "$LOCATION")
+LOCATION_AI_FOUNDRY=$(get_service_location "aifoundry" "$LOCATION")
+LOCATION_APP_SERVICE=$(get_service_location "appservice" "$LOCATION")
+LOCATION_FUNCTION_APP=$(get_service_location "functionapp" "$LOCATION")
+
+log_success "Service location validation complete"
+
 # =============================================================================
 # STEP 1/11: Resource Group
 # =============================================================================
@@ -242,7 +363,7 @@ if resource_exists group show --name "$RESOURCE_GROUP_NAME" --query name -o tsv;
     log_warning "Resource group $RESOURCE_GROUP_NAME already exists, skipping"
 else
     run_az "Creating resource group: $RESOURCE_GROUP_NAME" \
-        group create --name "$RESOURCE_GROUP_NAME" --location "$LOCATION" \
+        group create --name "$RESOURCE_GROUP_NAME" --location "$LOCATION_RESOURCE_GROUP" \
         --tags "project=$PROJECT_NAME" "environment=$ENVIRONMENT" --output table
     log_success "Resource group $RESOURCE_GROUP_NAME created"
 fi
@@ -258,7 +379,7 @@ if resource_exists storage account show --name "$STORAGE_ACCOUNT_NAME" --resourc
 else
     run_az "Creating storage account: $STORAGE_ACCOUNT_NAME" \
         storage account create --name "$STORAGE_ACCOUNT_NAME" \
-        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION" \
+        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION_STORAGE" \
         --sku Standard_LRS --kind StorageV2 --access-tier Hot \
         --tags "project=$PROJECT_NAME" "environment=$ENVIRONMENT" --output table
     log_success "Storage account $STORAGE_ACCOUNT_NAME created"
@@ -288,7 +409,7 @@ if resource_exists keyvault show --name "$KEY_VAULT_NAME" --query name -o tsv; t
 else
     run_az "Creating Key Vault: $KEY_VAULT_NAME" \
         keyvault create --name "$KEY_VAULT_NAME" \
-        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION" \
+        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION_KEY_VAULT" \
         --sku standard --enable-rbac-authorization true \
         --retention-days 7 \
         --tags "project=$PROJECT_NAME" "environment=$ENVIRONMENT" --output table
@@ -338,7 +459,18 @@ if [ -z "$GRAPH_CLIENT_SECRET" ]; then
     # Check if credentials already exist to avoid invalidating stored secrets
     EXISTING_CREDS=$(az ad app credential list --id "$GRAPH_CLIENT_ID" --query "[0].keyId" -o tsv 2>/dev/null || echo "")
     if [ -n "$EXISTING_CREDS" ]; then
-        log_success "Client secret already exists for $GRAPH_APP_NAME (stored in Key Vault)"
+        # Credential exists in Entra ID - verify the secret is also present in Key Vault
+        KV_SECRET=$(az keyvault secret show --vault-name "$KEY_VAULT_NAME" --name "GraphClientSecret" --query "value" -o tsv 2>/dev/null || echo "")
+        if [ -n "$KV_SECRET" ]; then
+            log_success "Client secret already exists for $GRAPH_APP_NAME and is stored in Key Vault"
+            GRAPH_CLIENT_SECRET="$KV_SECRET"
+        else
+            # Secret missing from Key Vault - must rotate the credential to get a new value
+            log_warning "Client secret exists in Entra ID but is missing from Key Vault. Rotating credential..."
+            GRAPH_CLIENT_SECRET=$(az ad app credential reset --id "$GRAPH_CLIENT_ID" \
+                --display-name "extract-insight-action-secret" --years 2 --query password -o tsv 2>/dev/null || echo "")
+            log_success "Client secret rotated and will be stored in Key Vault"
+        fi
     else
         GRAPH_CLIENT_SECRET=$(az ad app credential reset --id "$GRAPH_CLIENT_ID" \
             --display-name "extract-insight-action-secret" --years 2 --query password -o tsv 2>/dev/null || echo "")
@@ -359,7 +491,7 @@ if resource_exists servicebus namespace show --name "$SERVICE_BUS_NAMESPACE" --r
 else
     run_az "Creating Service Bus namespace: $SERVICE_BUS_NAMESPACE" \
         servicebus namespace create --name "$SERVICE_BUS_NAMESPACE" \
-        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION" \
+        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION_SERVICE_BUS" \
         --sku Standard \
         --tags "project=$PROJECT_NAME" "environment=$ENVIRONMENT" --output table
     log_success "Service Bus namespace $SERVICE_BUS_NAMESPACE created"
@@ -397,7 +529,7 @@ if resource_exists monitor app-insights component show --app "$APP_INSIGHTS_NAME
 else
     run_az "Creating Application Insights: $APP_INSIGHTS_NAME" \
         monitor app-insights component create --app "$APP_INSIGHTS_NAME" \
-        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION" \
+        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION_APP_INSIGHTS" \
         --kind web --application-type web \
         --tags "project=$PROJECT_NAME" "environment=$ENVIRONMENT" --output table
     log_success "Application Insights $APP_INSIGHTS_NAME created"
@@ -415,7 +547,7 @@ else
     if run_az "Creating Cosmos DB account: $COSMOS_DB_ACCOUNT_NAME" \
         cosmosdb create --name "$COSMOS_DB_ACCOUNT_NAME" \
         --resource-group "$RESOURCE_GROUP_NAME" \
-        --locations regionName="$LOCATION" failoverPriority=0 isZoneRedundant=false \
+        --locations regionName="$LOCATION_COSMOS_DB" failoverPriority=0 isZoneRedundant=false \
         --kind GlobalDocumentDB \
         --default-consistency-level Session \
         --tags "project=$PROJECT_NAME" "environment=$ENVIRONMENT" \
@@ -456,7 +588,7 @@ if resource_exists cognitiveservices account show --name "$CONTENT_UNDERSTANDING
 else
     if run_az "Creating Azure Content Understanding: $CONTENT_UNDERSTANDING_NAME" \
         cognitiveservices account create --name "$CONTENT_UNDERSTANDING_NAME" \
-        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION" \
+        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION_CONTENT_UNDERSTANDING" \
         --kind AIServices --sku S0 \
         --custom-domain "$CONTENT_UNDERSTANDING_NAME" \
         --tags "project=$PROJECT_NAME" "environment=$ENVIRONMENT" \
@@ -477,7 +609,7 @@ if resource_exists cognitiveservices account show --name "$AI_FOUNDRY_NAME" --re
 else
     if run_az "Creating Azure AI Foundry resource: $AI_FOUNDRY_NAME" \
         cognitiveservices account create --name "$AI_FOUNDRY_NAME" \
-        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION" \
+        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION_AI_FOUNDRY" \
         --kind AIServices --sku S0 \
         --custom-domain "$AI_FOUNDRY_NAME" \
         --tags "project=$PROJECT_NAME" "environment=$ENVIRONMENT" \
@@ -516,7 +648,7 @@ if resource_exists appservice plan show --name "$APP_SERVICE_PLAN_NAME" --resour
 else
     if run_az "Creating App Service Plan: $APP_SERVICE_PLAN_NAME (Linux P0v3)" \
         appservice plan create --name "$APP_SERVICE_PLAN_NAME" \
-        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION" \
+        --resource-group "$RESOURCE_GROUP_NAME" --location "$LOCATION_APP_SERVICE" \
         --sku P0v3 --is-linux \
         --tags "project=$PROJECT_NAME" "environment=$ENVIRONMENT" \
         --output table; then
@@ -548,7 +680,7 @@ APP_INSIGHTS_KEY=$(az monitor app-insights component show --app "$APP_INSIGHTS_N
     --resource-group "$RESOURCE_GROUP_NAME" --query instrumentationKey -o tsv 2>/dev/null || echo "")
 
 COMMON_FUNC_ARGS=(--resource-group "$RESOURCE_GROUP_NAME" --storage-account "$STORAGE_ACCOUNT_NAME"
-                  --flexconsumption-location "$LOCATION"
+                  --flexconsumption-location "$LOCATION_FUNCTION_APP"
                   --runtime java --runtime-version 21.0)
 if [ -n "$APP_INSIGHTS_KEY" ]; then
     COMMON_FUNC_ARGS+=(--app-insights "$APP_INSIGHTS_NAME" --app-insights-key "$APP_INSIGHTS_KEY")

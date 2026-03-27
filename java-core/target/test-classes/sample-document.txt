@@ -1,0 +1,12 @@
+Azure Content Understanding Integration Test
+
+This is a sample document used by the AzContentUnderstandingIT integration tests.
+It contains plain text that the Content Understanding service will process using
+the prebuilt-read analyzer.
+
+Key details:
+  - Project: extract-insight-action
+  - Module:  java-core
+  - Purpose: End-to-end validation of the Content Understanding REST API
+
+The quick brown fox jumps over the lazy dog. 1234567890.

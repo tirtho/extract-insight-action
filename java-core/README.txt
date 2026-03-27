@@ -21,7 +21,7 @@ Prerequisites
 
 3. Run a specific unit test class
 ---------------------------------
-  mvn test -Dtest=AzGetConnectionTest
+  mvn test -Dtest=AzConnectionTest
 
 4. Run integration tests
 ------------------------
@@ -35,28 +35,33 @@ Prerequisites
     - Active Azure credentials (az login or Managed Identity)
     - All secrets referenced in AzEnvNames present in Key Vault
 
-5. Package the JAR (skip tests)
+5. Run a specific integration test class
+-----------------------------------------
+  set KEY_VAULT_URL=https://your-vault.vault.azure.net
+  mvn clean verify -Dgroups=integration -Dit.test=AzContentUnderstandingIT
+
+6. Package the JAR (skip tests)
 -------------------------------
   mvn clean package -DskipTests
 
-6. Package and copy JAR to project-lib\java
+7. Package and copy JAR to project-lib\java
 --------------------------------------
   mvn clean package -Dlibrary
 
   Activates the "copy-to-project-lib" profile which copies the built JAR
   to ../project-lib/java/ after packaging.
 
-7. Package and copy JAR to project-lib (skip tests)
+8. Package and copy JAR to project-lib (skip tests)
 ----------------------------------------------------
   mvn clean package -Dlibrary -DskipTests
 
-8. Full build (unit tests + integration tests)
+9. Full build (unit tests + integration tests)
 -----------------------------------------------
   set KEY_VAULT_URL=https://your-vault.vault.azure.net
   mvn clean verify -Dgroups=integration
 
-9. Debug integration tests (attach VS Code debugger)
------------------------------------------------------
+10. Debug integration tests (attach VS Code debugger)
+------------------------------------------------------
   - make sure you have .vscode\launch.json file as follows:
         {
         "version": "0.2.0",
@@ -75,6 +80,6 @@ Prerequisites
 
   Then attach VS Code with a "Java Attach" launch config on port 5005.
 
-10. Clean build artifacts
+11. Clean build artifacts
 -------------------------
   mvn clean

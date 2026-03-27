@@ -106,6 +106,7 @@ RESOURCE_GROUP_NAME="${RESOURCE_GROUP_NAME:-rg-${PROJECT_NAME}-${ENVIRONMENT}-${
 STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:-st${PROJ_CLEAN}${ENVIRONMENT}${SUFFIX}}"
 COSMOS_DB_ACCOUNT_NAME="${COSMOS_DB_ACCOUNT_NAME:-cosmos-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
 CONTENT_UNDERSTANDING_NAME="${CONTENT_UNDERSTANDING_NAME:-cu-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
+AI_FOUNDRY_NAME="${AI_FOUNDRY_NAME:-oai-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
 KEY_VAULT_NAME="${KEY_VAULT_NAME:-kv-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
 
 # =============================================================================
@@ -188,8 +189,7 @@ echo -e "\033[0;32m[OK]\033[0m Your public IP: $MY_PUBLIC_IP"
 
 NETWORK_CHANGES=0
 
-# --- Cosmos DB ---
-# Desired: public-network-access=Enabled, ip-range-filter = laptop + Azure portal + Azure DCs
+# --- Gather current state (quick reads, sequential) ---
 DESIRED_COSMOS_IP_FILTER="$MY_PUBLIC_IP,104.42.195.92,40.76.54.131,52.176.6.30,52.169.50.45,52.187.184.26,0.0.0.0"
 
 log_info "Checking Cosmos DB network rules: $COSMOS_DB_ACCOUNT_NAME"
@@ -200,26 +200,11 @@ COSMOS_PUBLIC_ACCESS=$(echo "$COSMOS_STATE" | jq -r '.publicNetworkAccess // ""'
 CURRENT_COSMOS_IPS=$(echo "$COSMOS_STATE" | jq -r '(.ipRules // []) | join(",")' 2>/dev/null || echo "")
 CURRENT_COSMOS_IPS_NORM=$(normalize_ip_list "$CURRENT_COSMOS_IPS")
 DESIRED_COSMOS_IPS_NORM=$(normalize_ip_list "$DESIRED_COSMOS_IP_FILTER")
-
-if [ "$COSMOS_PUBLIC_ACCESS" = "Enabled" ] && [ "$CURRENT_COSMOS_IPS_NORM" = "$DESIRED_COSMOS_IPS_NORM" ]; then
-    log_ok "Cosmos DB network rules already configured correctly"
-else
-    log_info "  Updating Cosmos DB IP filter..."
-    COSMOS_RESULT=$(az cosmosdb update --name "$COSMOS_DB_ACCOUNT_NAME" \
-        --resource-group "$RESOURCE_GROUP_NAME" \
-        --public-network-access Enabled \
-        --ip-range-filter "$DESIRED_COSMOS_IP_FILTER" \
-        --output none 2>&1) && {
-        log_success "  Cosmos DB: access restricted to laptop IP + Azure services"
-        NETWORK_CHANGES=$((NETWORK_CHANGES + 1))
-    } || {
-        log_error "  Failed to configure Cosmos DB network rules"
-        [ -n "$COSMOS_RESULT" ] && echo "    $COSMOS_RESULT"
-    }
+COSMOS_NEEDS_UPDATE=false
+if [ "$COSMOS_PUBLIC_ACCESS" != "Enabled" ] || [ "$CURRENT_COSMOS_IPS_NORM" != "$DESIRED_COSMOS_IPS_NORM" ]; then
+    COSMOS_NEEDS_UPDATE=true
 fi
 
-# --- Storage Account ---
-# Desired: publicNetworkAccess=Enabled, defaultAction=Deny, bypass=AzureServices+Logging+Metrics, ipRules=[laptop IP only]
 log_info "Checking Storage Account network rules: $STORAGE_ACCOUNT_NAME"
 STORAGE_STATE=$(az storage account show --name "$STORAGE_ACCOUNT_NAME" \
     --resource-group "$RESOURCE_GROUP_NAME" \
@@ -229,73 +214,15 @@ STORAGE_PUBLIC_ACCESS=$(echo "$STORAGE_STATE" | jq -r '.publicNetworkAccess // "
 STORAGE_DEFAULT_ACTION=$(echo "$STORAGE_STATE" | jq -r '.defaultAction // ""')
 STORAGE_BYPASS=$(echo "$STORAGE_STATE" | jq -r '.bypass // ""')
 STORAGE_IPS=$(echo "$STORAGE_STATE" | jq -r '(.ipRules // []) | join(",")' 2>/dev/null || echo "")
-
 CURRENT_BYPASS_NORM=$(normalize_bypass "$STORAGE_BYPASS")
 DESIRED_BYPASS_NORM=$(normalize_bypass "AzureServices,Logging,Metrics")
 CURRENT_STORAGE_IPS_SORTED=$(echo "$STORAGE_IPS" | tr ',' '\n' | sort -u | paste -sd ',' - 2>/dev/null || echo "")
-
 STORAGE_NEEDS_UPDATE=false
 [ "$STORAGE_PUBLIC_ACCESS" != "Enabled" ] && STORAGE_NEEDS_UPDATE=true
 [ "$STORAGE_DEFAULT_ACTION" != "Deny" ] && STORAGE_NEEDS_UPDATE=true
 [ "$CURRENT_BYPASS_NORM" != "$DESIRED_BYPASS_NORM" ] && STORAGE_NEEDS_UPDATE=true
 [ "$CURRENT_STORAGE_IPS_SORTED" != "$MY_PUBLIC_IP" ] && STORAGE_NEEDS_UPDATE=true
 
-if [ "$STORAGE_NEEDS_UPDATE" = false ]; then
-    log_ok "Storage Account network rules already configured correctly"
-else
-    STORAGE_FAILED=false
-
-    # Update default-action / bypass / public-network-access if any differ
-    if [ "$STORAGE_PUBLIC_ACCESS" != "Enabled" ] || [ "$STORAGE_DEFAULT_ACTION" != "Deny" ] || [ "$CURRENT_BYPASS_NORM" != "$DESIRED_BYPASS_NORM" ]; then
-        log_info "  Updating Storage Account default rules..."
-        if ! az storage account update --name "$STORAGE_ACCOUNT_NAME" \
-            --resource-group "$RESOURCE_GROUP_NAME" \
-            --public-network-access Enabled \
-            --default-action Deny \
-            --bypass AzureServices Logging Metrics \
-            --output json 2>/dev/null > /dev/null; then
-            log_error "  Failed to set Storage Account default deny rule"
-            STORAGE_FAILED=true
-        fi
-    fi
-
-    # Update IP rules only if the current set doesn't already match
-    if [ "$CURRENT_STORAGE_IPS_SORTED" != "$MY_PUBLIC_IP" ]; then
-        # Remove stale IP rules that aren't the laptop IP
-        if [ -n "$STORAGE_IPS" ]; then
-            for ip in $(echo "$STORAGE_IPS" | tr ',' '\n'); do
-                if [ "$ip" != "$MY_PUBLIC_IP" ]; then
-                    az storage account network-rule remove \
-                        --account-name "$STORAGE_ACCOUNT_NAME" --resource-group "$RESOURCE_GROUP_NAME" \
-                        --ip-address "$ip" --output none 2>/dev/null || true
-                fi
-            done
-        fi
-        # Add laptop IP if not already present
-        HAS_MY_IP=false
-        if echo ",$STORAGE_IPS," | grep -q ",$MY_PUBLIC_IP,"; then
-            HAS_MY_IP=true
-        fi
-        if [ "$HAS_MY_IP" = false ]; then
-            if ! az storage account network-rule add \
-                --account-name "$STORAGE_ACCOUNT_NAME" --resource-group "$RESOURCE_GROUP_NAME" \
-                --ip-address "$MY_PUBLIC_IP" --output none 2>/dev/null; then
-                log_error "  Failed to add laptop IP to Storage Account"
-                STORAGE_FAILED=true
-            fi
-        fi
-    fi
-
-    if [ "$STORAGE_FAILED" = false ]; then
-        log_success "  Storage Account: access restricted to laptop IP + Azure services"
-        NETWORK_CHANGES=$((NETWORK_CHANGES + 1))
-    else
-        log_warning "  Storage Account network rules may be partially configured"
-    fi
-fi
-
-# --- Key Vault ---
-# Desired: publicNetworkAccess=Enabled, defaultAction=Deny, bypass=AzureServices, ipRules=[laptop IP only]
 log_info "Checking Key Vault network rules: $KEY_VAULT_NAME"
 KV_STATE=$(az keyvault show --name "$KEY_VAULT_NAME" \
     --resource-group "$RESOURCE_GROUP_NAME" \
@@ -305,63 +232,120 @@ KV_PUBLIC_ACCESS=$(echo "$KV_STATE" | jq -r '.publicNetworkAccess // ""')
 KV_DEFAULT_ACTION=$(echo "$KV_STATE" | jq -r '.defaultAction // ""')
 KV_BYPASS=$(echo "$KV_STATE" | jq -r '.bypass // ""')
 KV_IPS=$(echo "$KV_STATE" | jq -r '(.ipRules // []) | join(",")' 2>/dev/null || echo "")
-
 CURRENT_KV_BYPASS_NORM=$(normalize_bypass "$KV_BYPASS")
 DESIRED_KV_BYPASS_NORM=$(normalize_bypass "AzureServices")
 CURRENT_KV_IPS_SORTED=$(echo "$KV_IPS" | tr ',' '\n' | sort -u | paste -sd ',' - 2>/dev/null || echo "")
-# Key Vault IP rules use CIDR notation — append /32 for single IPs
 DESIRED_KV_IP="$MY_PUBLIC_IP/32"
-
 KV_NEEDS_UPDATE=false
 [ "$KV_PUBLIC_ACCESS" != "Enabled" ] && KV_NEEDS_UPDATE=true
 [ "$KV_DEFAULT_ACTION" != "Deny" ] && KV_NEEDS_UPDATE=true
 [ "$CURRENT_KV_BYPASS_NORM" != "$DESIRED_KV_BYPASS_NORM" ] && KV_NEEDS_UPDATE=true
 [ "$CURRENT_KV_IPS_SORTED" != "$DESIRED_KV_IP" ] && KV_NEEDS_UPDATE=true
 
+# --- Launch updates in parallel (these are the slow operations) ---
+PIDS=()
+PID_NAMES=()
+TMPDIR_NET=$(mktemp -d)
+
+if [ "$COSMOS_NEEDS_UPDATE" = false ]; then
+    log_ok "Cosmos DB network rules already configured correctly"
+else
+    log_info "  Updating Cosmos DB IP filter in background... (slowest, typically 2-5 min)"
+    (
+        az cosmosdb update --name "$COSMOS_DB_ACCOUNT_NAME" \
+            --resource-group "$RESOURCE_GROUP_NAME" \
+            --public-network-access Enabled \
+            --ip-range-filter "$DESIRED_COSMOS_IP_FILTER" \
+            --output none 2>"$TMPDIR_NET/cosmos.err" && touch "$TMPDIR_NET/cosmos.ok"
+    ) &
+    PIDS+=($!)
+    PID_NAMES+=("CosmosDB-Network")
+fi
+
+if [ "$STORAGE_NEEDS_UPDATE" = false ]; then
+    log_ok "Storage Account network rules already configured correctly"
+else
+    log_info "  Updating Storage Account network rules in background..."
+    (
+        if [ "$STORAGE_PUBLIC_ACCESS" != "Enabled" ] || [ "$STORAGE_DEFAULT_ACTION" != "Deny" ] || [ "$CURRENT_BYPASS_NORM" != "$DESIRED_BYPASS_NORM" ]; then
+            az storage account update --name "$STORAGE_ACCOUNT_NAME" \
+                --resource-group "$RESOURCE_GROUP_NAME" \
+                --public-network-access Enabled \
+                --default-action Deny \
+                --bypass AzureServices Logging Metrics \
+                --output none 2>/dev/null || { echo "default rules failed" > "$TMPDIR_NET/storage.err"; exit 1; }
+        fi
+        if [ "$CURRENT_STORAGE_IPS_SORTED" != "$MY_PUBLIC_IP" ]; then
+            if [ -n "$STORAGE_IPS" ]; then
+                for ip in $(echo "$STORAGE_IPS" | tr ',' '\n'); do
+                    [ "$ip" != "$MY_PUBLIC_IP" ] && az storage account network-rule remove \
+                        --account-name "$STORAGE_ACCOUNT_NAME" --resource-group "$RESOURCE_GROUP_NAME" \
+                        --ip-address "$ip" --output none 2>/dev/null || true
+                done
+            fi
+            HAS_MY_IP=false
+            echo ",$STORAGE_IPS," | grep -q ",$MY_PUBLIC_IP," && HAS_MY_IP=true
+            if [ "$HAS_MY_IP" = false ]; then
+                az storage account network-rule add \
+                    --account-name "$STORAGE_ACCOUNT_NAME" --resource-group "$RESOURCE_GROUP_NAME" \
+                    --ip-address "$MY_PUBLIC_IP" --output none 2>/dev/null || { echo "IP add failed" > "$TMPDIR_NET/storage.err"; exit 1; }
+            fi
+        fi
+        touch "$TMPDIR_NET/storage.ok"
+    ) &
+    PIDS+=($!)
+    PID_NAMES+=("Storage-Network")
+fi
+
 if [ "$KV_NEEDS_UPDATE" = false ]; then
     log_ok "Key Vault network rules already configured correctly"
 else
-    # Update default-action / bypass / public-network-access
-    if [ "$KV_PUBLIC_ACCESS" != "Enabled" ] || [ "$KV_DEFAULT_ACTION" != "Deny" ] || [ "$CURRENT_KV_BYPASS_NORM" != "$DESIRED_KV_BYPASS_NORM" ]; then
-        log_info "  Updating Key Vault default rules..."
-        if ! az keyvault update --name "$KEY_VAULT_NAME" \
-            --resource-group "$RESOURCE_GROUP_NAME" \
-            --public-network-access Enabled \
-            --default-action Deny \
-            --bypass AzureServices \
-            --output none 2>/dev/null; then
-            log_error "  Failed to set Key Vault default deny rule"
+    log_info "  Updating Key Vault network rules in background..."
+    (
+        if [ "$KV_PUBLIC_ACCESS" != "Enabled" ] || [ "$KV_DEFAULT_ACTION" != "Deny" ] || [ "$CURRENT_KV_BYPASS_NORM" != "$DESIRED_KV_BYPASS_NORM" ]; then
+            az keyvault update --name "$KEY_VAULT_NAME" \
+                --resource-group "$RESOURCE_GROUP_NAME" \
+                --public-network-access Enabled \
+                --default-action Deny \
+                --bypass AzureServices \
+                --output none 2>/dev/null || { echo "default rules failed" > "$TMPDIR_NET/kv.err"; exit 1; }
         fi
-    fi
-
-    # Update IP rules only if the current set doesn't match
-    if [ "$CURRENT_KV_IPS_SORTED" != "$DESIRED_KV_IP" ]; then
-        # Remove stale IP rules
-        if [ -n "$KV_IPS" ]; then
-            for ip in $(echo "$KV_IPS" | tr ',' '\n'); do
-                if [ "$ip" != "$DESIRED_KV_IP" ]; then
-                    az keyvault network-rule remove --name "$KEY_VAULT_NAME" \
+        if [ "$CURRENT_KV_IPS_SORTED" != "$DESIRED_KV_IP" ]; then
+            if [ -n "$KV_IPS" ]; then
+                for ip in $(echo "$KV_IPS" | tr ',' '\n'); do
+                    [ "$ip" != "$DESIRED_KV_IP" ] && az keyvault network-rule remove --name "$KEY_VAULT_NAME" \
                         --resource-group "$RESOURCE_GROUP_NAME" \
                         --ip-address "$ip" --output none 2>/dev/null || true
-                fi
-            done
-        fi
-        # Add laptop IP if not already present
-        HAS_MY_KV_IP=false
-        if echo ",$KV_IPS," | grep -q ",$DESIRED_KV_IP,"; then
-            HAS_MY_KV_IP=true
-        fi
-        if [ "$HAS_MY_KV_IP" = false ]; then
-            if ! az keyvault network-rule add --name "$KEY_VAULT_NAME" \
-                --resource-group "$RESOURCE_GROUP_NAME" \
-                --ip-address "$DESIRED_KV_IP" --output none 2>/dev/null; then
-                log_error "  Failed to add laptop IP to Key Vault"
+                done
+            fi
+            HAS_MY_KV_IP=false
+            echo ",$KV_IPS," | grep -q ",$DESIRED_KV_IP," && HAS_MY_KV_IP=true
+            if [ "$HAS_MY_KV_IP" = false ]; then
+                az keyvault network-rule add --name "$KEY_VAULT_NAME" \
+                    --resource-group "$RESOURCE_GROUP_NAME" \
+                    --ip-address "$DESIRED_KV_IP" --output none 2>/dev/null || { echo "IP add failed" > "$TMPDIR_NET/kv.err"; exit 1; }
             fi
         fi
-    fi
+        touch "$TMPDIR_NET/kv.ok"
+    ) &
+    PIDS+=($!)
+    PID_NAMES+=("KeyVault-Network")
+fi
 
-    log_success "  Key Vault: access restricted to laptop IP + Azure services"
-    NETWORK_CHANGES=$((NETWORK_CHANGES + 1))
+# --- Wait for all parallel jobs to complete ---
+if [ ${#PIDS[@]} -gt 0 ]; then
+    log_info "Waiting for ${#PIDS[@]} network update(s) to complete in parallel..."
+    for i in "${!PIDS[@]}"; do
+        pid=${PIDS[$i]}
+        name=${PID_NAMES[$i]}
+        if wait "$pid" 2>/dev/null; then
+            log_success "  $name: done"
+            NETWORK_CHANGES=$((NETWORK_CHANGES + 1))
+        else
+            log_error "  $name failed"
+        fi
+    done
+    rm -rf "$TMPDIR_NET"
 fi
 
 # =============================================================================
@@ -370,87 +354,134 @@ fi
 echo ""
 echo ">>> Step 2: Grant RBAC Roles to Current User"
 
-NEW_ASSIGNMENTS=0
-
-# --- Storage Account roles ---
+# --- Gather resource IDs (quick reads) ---
 STORAGE_ACCOUNT_ID=$(az storage account show --name "$STORAGE_ACCOUNT_NAME" --resource-group "$RESOURCE_GROUP_NAME" --query id -o tsv 2>/dev/null || echo "")
-
-STORAGE_ROLES=(
-    "Storage Blob Data Contributor"
-    "Storage Blob Data Reader"
-    "Storage Queue Data Contributor"
-    "Storage Table Data Contributor"
-    "Storage Account Contributor"
-    "Storage Blob Data Owner"
-)
-
-log_info "Assigning Storage Account roles to current user..."
-for role in "${STORAGE_ROLES[@]}"; do
-    if ensure_role_assignment "$CURRENT_USER_ID" "$role" "$STORAGE_ACCOUNT_ID"; then
-        log_ok "$role - already assigned"
-    else
-        log_success "  $role - assigned"
-        NEW_ASSIGNMENTS=$((NEW_ASSIGNMENTS + 1))
-    fi
-done
-
-# --- Cosmos DB roles ---
 COSMOS_DB_ACCOUNT_ID=$(az cosmosdb show --name "$COSMOS_DB_ACCOUNT_NAME" --resource-group "$RESOURCE_GROUP_NAME" --query id -o tsv 2>/dev/null || echo "")
+KEY_VAULT_ID=$(az keyvault show --name "$KEY_VAULT_NAME" --resource-group "$RESOURCE_GROUP_NAME" --query id -o tsv 2>/dev/null || echo "")
+CONTENT_UNDERSTANDING_ID=$(az cognitiveservices account show --name "$CONTENT_UNDERSTANDING_NAME" --resource-group "$RESOURCE_GROUP_NAME" --query id -o tsv 2>/dev/null || echo "")
+AI_FOUNDRY_ID=$(az cognitiveservices account show --name "$AI_FOUNDRY_NAME" --resource-group "$RESOURCE_GROUP_NAME" --query id -o tsv 2>/dev/null || echo "")
 
-# ARM-level Cosmos DB roles (portal/management access)
-COSMOS_ARM_ROLES=(
-    "Cosmos DB Account Reader Role"
-    "DocumentDB Account Contributor"
-)
-
-log_info "Assigning Cosmos DB ARM roles to current user..."
-for role in "${COSMOS_ARM_ROLES[@]}"; do
-    if ensure_role_assignment "$CURRENT_USER_ID" "$role" "$COSMOS_DB_ACCOUNT_ID"; then
-        log_ok "$role - already assigned"
-    else
-        log_success "  $role - assigned"
-        NEW_ASSIGNMENTS=$((NEW_ASSIGNMENTS + 1))
-    fi
-done
-
-# Cosmos DB data-plane roles (read/write data)
-# 00000000-0000-0000-0000-000000000001 = Built-in Data Reader
-# 00000000-0000-0000-0000-000000000002 = Built-in Data Contributor
-declare -A COSMOS_DATA_ROLES=(
-    ["00000000-0000-0000-0000-000000000001"]="Cosmos DB Built-in Data Reader"
-    ["00000000-0000-0000-0000-000000000002"]="Cosmos DB Built-in Data Contributor"
-)
-
-log_info "Assigning Cosmos DB data-plane roles to current user..."
-for role_id in "${!COSMOS_DATA_ROLES[@]}"; do
-    role_name="${COSMOS_DATA_ROLES[$role_id]}"
-    if ensure_cosmos_role_assignment "$COSMOS_DB_ACCOUNT_NAME" "$RESOURCE_GROUP_NAME" "$role_id" "$CURRENT_USER_ID" "$COSMOS_DB_ACCOUNT_ID"; then
-        log_ok "$role_name - already assigned"
-    else
-        log_success "  $role_name - assigned"
-        NEW_ASSIGNMENTS=$((NEW_ASSIGNMENTS + 1))
-    fi
-done
-
-# --- Content Understanding: Storage Blob Data Reader ---
-# CU needs to read blobs from Storage when given a blob URL
-log_info "Ensuring Content Understanding has Storage Blob Data Reader..."
+# Resolve Content Understanding managed identity
 CU_IDENTITY=$(az cognitiveservices account identity show --name "$CONTENT_UNDERSTANDING_NAME" --resource-group "$RESOURCE_GROUP_NAME" --query principalId -o tsv 2>/dev/null || echo "")
 if [ -z "$CU_IDENTITY" ]; then
     log_info "  Enabling managed identity for $CONTENT_UNDERSTANDING_NAME"
     az cognitiveservices account identity assign --name "$CONTENT_UNDERSTANDING_NAME" --resource-group "$RESOURCE_GROUP_NAME" --output none 2>/dev/null || true
     CU_IDENTITY=$(az cognitiveservices account identity show --name "$CONTENT_UNDERSTANDING_NAME" --resource-group "$RESOURCE_GROUP_NAME" --query principalId -o tsv 2>/dev/null || echo "")
 fi
+
+# --- Build assignment list and launch all in parallel ---
+# Each background task writes result to a temp file: "exists" or "created" or "error"
+TMPDIR_RBAC=$(mktemp -d)
+RBAC_PIDS=()
+RBAC_LABELS=()
+
+# Helper: launch an ARM role assignment in background
+launch_arm_role() {
+    local assignee="$1" role="$2" scope="$3" label="$4" idx="$5"
+    (
+        existing=$(az role assignment list --assignee "$assignee" --role "$role" --scope "$scope" --query "[0].id" -o tsv 2>/dev/null || echo "")
+        if [ -n "$existing" ]; then
+            echo "exists" > "$TMPDIR_RBAC/$idx.result"
+        else
+            az role assignment create --assignee "$assignee" --role "$role" --scope "$scope" --output none 2>/dev/null || true
+            echo "created" > "$TMPDIR_RBAC/$idx.result"
+        fi
+    ) &
+    RBAC_PIDS+=($!)
+    RBAC_LABELS+=("$label")
+}
+
+# Helper: launch a Cosmos data-plane role assignment in background
+launch_cosmos_role() {
+    local account="$1" rg="$2" role_id="$3" principal="$4" scope="$5" label="$6" idx="$7"
+    (
+        existing=$(az cosmosdb sql role assignment list --account-name "$account" --resource-group "$rg" \
+            --query "[?principalId=='$principal' && contains(roleDefinitionId, '$role_id')] | [0].id" --output tsv 2>/dev/null || echo "")
+        if [ -n "$existing" ]; then
+            echo "exists" > "$TMPDIR_RBAC/$idx.result"
+        else
+            az cosmosdb sql role assignment create --account-name "$account" --resource-group "$rg" \
+                --role-definition-id "$role_id" --principal-id "$principal" --scope "$scope" --output none 2>/dev/null || true
+            echo "created" > "$TMPDIR_RBAC/$idx.result"
+        fi
+    ) &
+    RBAC_PIDS+=($!)
+    RBAC_LABELS+=("$label")
+}
+
+IDX=0
+
+# Storage Account ARM roles
+for role in "Storage Blob Data Contributor" "Storage Blob Data Reader" \
+            "Storage Queue Data Contributor" "Storage Table Data Contributor" \
+            "Storage Account Contributor" "Storage Blob Data Owner"; do
+    launch_arm_role "$CURRENT_USER_ID" "$role" "$STORAGE_ACCOUNT_ID" "$role" "$IDX"
+    IDX=$((IDX + 1))
+done
+
+# Cosmos DB ARM roles
+for role in "Cosmos DB Account Reader Role" "DocumentDB Account Contributor"; do
+    launch_arm_role "$CURRENT_USER_ID" "$role" "$COSMOS_DB_ACCOUNT_ID" "$role" "$IDX"
+    IDX=$((IDX + 1))
+done
+
+# Cosmos DB data-plane roles
+launch_cosmos_role "$COSMOS_DB_ACCOUNT_NAME" "$RESOURCE_GROUP_NAME" \
+    "00000000-0000-0000-0000-000000000001" "$CURRENT_USER_ID" "$COSMOS_DB_ACCOUNT_ID" \
+    "Cosmos DB Built-in Data Reader" "$IDX"
+IDX=$((IDX + 1))
+launch_cosmos_role "$COSMOS_DB_ACCOUNT_NAME" "$RESOURCE_GROUP_NAME" \
+    "00000000-0000-0000-0000-000000000002" "$CURRENT_USER_ID" "$COSMOS_DB_ACCOUNT_ID" \
+    "Cosmos DB Built-in Data Contributor" "$IDX"
+IDX=$((IDX + 1))
+
+# Key Vault roles
+for role in "Key Vault Secrets User" "Key Vault Secrets Officer" \
+            "Key Vault Certificates Officer" "Key Vault Crypto Officer"; do
+    launch_arm_role "$CURRENT_USER_ID" "$role" "$KEY_VAULT_ID" "$role" "$IDX"
+    IDX=$((IDX + 1))
+done
+
+# Content Understanding roles for current user (data-plane access: create/read/delete analyzers, analyze documents)
+for role in "Cognitive Services User" "Cognitive Services Contributor"; do
+    launch_arm_role "$CURRENT_USER_ID" "$role" "$CONTENT_UNDERSTANDING_ID" "$role (Content Understanding)" "$IDX"
+    IDX=$((IDX + 1))
+done
+
+# AI Foundry / Azure OpenAI roles for current user (data-plane access: chat completions, embeddings, etc.)
+for role in "Cognitive Services User" "Cognitive Services Contributor" \
+            "Cognitive Services OpenAI User" "Cognitive Services OpenAI Contributor"; do
+    launch_arm_role "$CURRENT_USER_ID" "$role" "$AI_FOUNDRY_ID" "$role (AI Foundry)" "$IDX"
+    IDX=$((IDX + 1))
+done
+
+# Content Understanding -> Storage Blob Data Reader
 if [ -n "$CU_IDENTITY" ]; then
-    if ensure_role_assignment "$CU_IDENTITY" "Storage Blob Data Reader" "$STORAGE_ACCOUNT_ID"; then
-        log_ok "Storage Blob Data Reader (Content Understanding) - already assigned"
-    else
-        log_success "  Storage Blob Data Reader (Content Understanding) - assigned"
-        NEW_ASSIGNMENTS=$((NEW_ASSIGNMENTS + 1))
-    fi
+    launch_arm_role "$CU_IDENTITY" "Storage Blob Data Reader" "$STORAGE_ACCOUNT_ID" \
+        "Storage Blob Data Reader (Content Understanding)" "$IDX"
+    IDX=$((IDX + 1))
 else
     log_warning "Content Understanding '$CONTENT_UNDERSTANDING_NAME' identity not found. Skipping."
 fi
+
+log_info "Assigning $IDX RBAC roles in parallel..."
+
+# --- Wait for all RBAC jobs ---
+NEW_ASSIGNMENTS=0
+for i in "${!RBAC_PIDS[@]}"; do
+    wait "${RBAC_PIDS[$i]}" 2>/dev/null || true
+    label="${RBAC_LABELS[$i]}"
+    result=$(cat "$TMPDIR_RBAC/$i.result" 2>/dev/null || echo "error")
+    if [ "$result" = "exists" ]; then
+        log_ok "$label - already assigned"
+    elif [ "$result" = "created" ]; then
+        log_success "  $label - assigned"
+        NEW_ASSIGNMENTS=$((NEW_ASSIGNMENTS + 1))
+    else
+        log_error "  $label - failed"
+    fi
+done
+rm -rf "$TMPDIR_RBAC"
 
 # =============================================================================
 # SUMMARY
@@ -472,3 +503,11 @@ echo "  Key Vault       : $KEY_VAULT_NAME (firewall: laptop IP + Azure services)
 echo "  Allowed IP      : $MY_PUBLIC_IP"
 echo "  User            : $CURRENT_USER_NAME"
 echo ""
+
+# =============================================================================
+# GENERATE env.bat
+# =============================================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_BAT_PATH="$SCRIPT_DIR/../env.bat"
+printf '@echo off\r\nset KEY_VAULT_URL=https://%s.vault.azure.net\r\n' "$KEY_VAULT_NAME" > "$ENV_BAT_PATH"
+echo -e "\033[0;32m[OK]\033[0m Created $ENV_BAT_PATH"

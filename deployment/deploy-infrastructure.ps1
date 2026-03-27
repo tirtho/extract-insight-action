@@ -31,11 +31,11 @@ $TenantId       = if ($env:TENANT_ID)       { $env:TENANT_ID }       else { (az 
 # Resource names (Suffix is a required command-line argument)
 $ResourceGroupName    = if ($env:RESOURCE_GROUP_NAME)       { $env:RESOURCE_GROUP_NAME }       else { "rg-$ProjectName-$Environment-$Suffix" }
 $KeyVaultName         = if ($env:KEY_VAULT_NAME)            { $env:KEY_VAULT_NAME }            else { "kv-$ProjectName-$Environment-$Suffix" }
-$ServiceBusNamespace  = if ($env:SERVICE_BUS_NAMESPACE)     { $env:SERVICE_BUS_NAMESPACE }     else { "sb-$ProjectName-$Environment" }
+$ServiceBusNamespace  = if ($env:SERVICE_BUS_NAMESPACE)     { $env:SERVICE_BUS_NAMESPACE }     else { "sb-$ProjectName-$Environment-$Suffix" }
 $ProjClean            = $ProjectName -replace '-',''
 $StorageAccountName   = if ($env:STORAGE_ACCOUNT_NAME)      { $env:STORAGE_ACCOUNT_NAME }      else { "st$ProjClean$Environment$Suffix" }
-$FuncMailboxName      = if ($env:FUNCTION_APP_MAILBOX_NAME) { $env:FUNCTION_APP_MAILBOX_NAME } else { "func-mailbox-$ProjectName-$Environment" }
-$FuncQueueDbName      = if ($env:FUNCTION_APP_QUEUE_DB_NAME){ $env:FUNCTION_APP_QUEUE_DB_NAME }else { "func-queuedb-$ProjectName-$Environment" }
+$FuncMailboxName      = if ($env:FUNCTION_APP_MAILBOX_NAME) { $env:FUNCTION_APP_MAILBOX_NAME } else { "func-mailbox-$ProjectName-$Environment-$Suffix" }
+$FuncQueueDbName      = if ($env:FUNCTION_APP_QUEUE_DB_NAME){ $env:FUNCTION_APP_QUEUE_DB_NAME }else { "func-queuedb-$ProjectName-$Environment-$Suffix" }
 $ServiceBusTopicName  = if ($env:SERVICE_BUS_TOPIC_NAME)    { $env:SERVICE_BUS_TOPIC_NAME }    else { "email-processing" }
 $ServiceBusSubName    = if ($env:SERVICE_BUS_SUBSCRIPTION_NAME) { $env:SERVICE_BUS_SUBSCRIPTION_NAME } else { "email-processor" }
 $GraphAppName         = if ($env:GRAPH_APP_NAME)            { $env:GRAPH_APP_NAME }            else { "$ProjectName-graph-api-$Environment" }
@@ -56,12 +56,23 @@ $AiFoundryApiVersion      = "2024-12-01-preview"
 $AiFoundrySkuName         = "GlobalStandard"
 $AiFoundrySkuCapacity     = "50"
 
+# Content Understanding requires a supported completion model (separate from the main LLM deployment).
+# Supported: gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-5.2
+$CuCompletionDeploymentName = "gpt-4.1"
+$CuCompletionModelName      = "gpt-4.1"
+$CuCompletionModelVersion   = "2025-04-14"
+$CuCompletionSkuCapacity    = "50"
+$CuEmbeddingDeploymentName  = "text-embedding-3-large"
+$CuEmbeddingModelName       = "text-embedding-3-large"
+$CuEmbeddingModelVersion    = "1"
+$CuEmbeddingSkuCapacity     = "50"
+
 # Verify JAVA_HOME points to Java 21
 if (-not $env:JAVA_HOME) {
     Write-Host "[ERROR] JAVA_HOME is not set. Please set JAVA_HOME to a JDK 21 installation." -ForegroundColor Red
     exit 1
 }
-$JavaVersionFull = & "$env:JAVA_HOME\bin\java" -version 2>&1 | Select-Object -First 1
+$JavaVersionFull = cmd /c "`"$env:JAVA_HOME\bin\java`" -version 2>&1" | Select-Object -First 1
 if ($JavaVersionFull -match '"(\d+)') {
     $JavaMajorVersion = $Matches[1]
 } else {
@@ -84,8 +95,11 @@ $script:DeploymentErrors = [System.Collections.Generic.List[string]]::new()
 function Invoke-AzCli {
     param([string]$Description, [string[]]$Arguments)
     Write-Host "[INFO] $Description" -ForegroundColor Cyan
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
     $output = & az @Arguments 2>&1
     $exitCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
     if ($exitCode -ne 0) {
         $errorText = ($output | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }) -join "`n"
         Write-Host "[ERROR] $Description failed (exit code $exitCode)" -ForegroundColor Red
@@ -179,6 +193,62 @@ function Set-FunctionAppSettings {
 }
 
 # =============================================================================
+# LOCATION AVAILABILITY CHECK
+# =============================================================================
+$script:ServiceLocationCache = @{}
+
+function Get-ServiceLocation {
+    param(
+        [Parameter(Mandatory=$true)][string]$ServiceName,
+        [Parameter(Mandatory=$true)][string]$DefaultLocation
+    )
+
+    # Return cached result if already resolved
+    if ($script:ServiceLocationCache.ContainsKey($ServiceName)) {
+        return $script:ServiceLocationCache[$ServiceName]
+    }
+
+    $csvPath = Join-Path $PSScriptRoot "supported-service-locations.csv"
+    if (-not (Test-Path $csvPath)) {
+        $script:ServiceLocationCache[$ServiceName] = $DefaultLocation
+        return $DefaultLocation
+    }
+
+    $lines = Get-Content $csvPath
+    foreach ($line in $lines) {
+        $line = $line.Trim()
+        if (-not $line) { continue }
+        $parts = $line -split ','
+        if ($parts[0].Trim().ToLower() -eq $ServiceName.ToLower()) {
+            $supportedLocations = $parts[1..($parts.Length-1)] | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ -ne '' }
+            if ($supportedLocations -contains $DefaultLocation.ToLower()) {
+                $script:ServiceLocationCache[$ServiceName] = $DefaultLocation
+                return $DefaultLocation
+            }
+            # Location not supported - prompt user to choose from supported list
+            Write-Host "" 
+            Write-Host "[WARNING] Location '$DefaultLocation' is not supported for service '$ServiceName'." -ForegroundColor Yellow
+            Write-Host "[INFO] Supported locations: $($supportedLocations -join ', ')" -ForegroundColor Cyan
+            do {
+                $userInput = Read-Host "Enter a supported location for '$ServiceName'"
+                $userInput = $userInput.Trim().ToLower()
+                if ($userInput -eq '' -or $supportedLocations -notcontains $userInput) {
+                    Write-Host "[ERROR] '$userInput' is not in the supported list. Please try again." -ForegroundColor Red
+                }
+            } while ($userInput -eq '' -or $supportedLocations -notcontains $userInput)
+
+            $script:ServiceLocationCache[$ServiceName] = $userInput
+            Write-Host "[INFO] Using location '$userInput' for $ServiceName" -ForegroundColor Cyan
+            return $userInput
+        }
+    }
+
+    # No entry in CSV - assume service is available everywhere
+    $script:ServiceLocationCache[$ServiceName] = $DefaultLocation
+    return $DefaultLocation
+}
+
+# =============================================================================
 # BANNER
 # =============================================================================
 Write-Host ""
@@ -207,7 +277,7 @@ if ($acctState -ne "Enabled") {
 }
 
 if ($SubscriptionId) {
-    az account set --subscription $SubscriptionId
+    Invoke-AzCliSilent -Arguments @('account','set','--subscription',$SubscriptionId) | Out-Null
     Write-Host "[SUCCESS] Subscription set to: $SubscriptionId" -ForegroundColor Green
 }
 
@@ -219,6 +289,58 @@ az extension add --name application-insights --upgrade --yes 2>$null
 $ErrorActionPreference = $prevEAP
 Write-Host "[SUCCESS] Prerequisites OK" -ForegroundColor Green
 
+# Register required resource providers
+Write-Host "[INFO] Registering required Azure resource providers..." -ForegroundColor Cyan
+$requiredProviders = @('Microsoft.KeyVault','Microsoft.ServiceBus','Microsoft.Storage',
+    'Microsoft.Web','Microsoft.Insights','Microsoft.OperationalInsights','Microsoft.DocumentDB',
+    'Microsoft.CognitiveServices')
+$providersToWait = [System.Collections.Generic.List[string]]::new()
+foreach ($provider in $requiredProviders) {
+    $state = (Invoke-AzCliSilent -Arguments @('provider','show','--namespace',$provider,'--query','registrationState','-o','tsv')).Output
+    if ($state -eq 'Registered') {
+        Write-Host "  [OK] $provider already registered" -ForegroundColor Green
+    } else {
+        Write-Host "  [INFO] Registering $provider..." -ForegroundColor Cyan
+        Invoke-AzCliSilent -Arguments @('provider','register','--namespace',$provider) | Out-Null
+        $providersToWait.Add($provider)
+    }
+}
+if ($providersToWait.Count -gt 0) {
+    Write-Host "[INFO] Waiting for $($providersToWait.Count) provider(s) to finish registering..." -ForegroundColor Cyan
+    foreach ($provider in $providersToWait) {
+        for ($i = 1; $i -le 60; $i++) {
+            $state = (Invoke-AzCliSilent -Arguments @('provider','show','--namespace',$provider,'--query','registrationState','-o','tsv')).Output
+            if ($state -eq 'Registered') {
+                Write-Host "  [SUCCESS] $provider registered" -ForegroundColor Green
+                break
+            }
+            Start-Sleep -Seconds 5
+        }
+        if ($state -ne 'Registered') {
+            Write-Host "  [WARNING] $provider still not registered after 5 minutes - continuing anyway" -ForegroundColor Yellow
+        }
+    }
+}
+
+# =============================================================================
+# VALIDATE SERVICE LOCATIONS
+# =============================================================================
+Write-Host ""
+Write-Host "[INFO] Validating service availability in location '$Location'..." -ForegroundColor Cyan
+
+$LocationResourceGroup        = Get-ServiceLocation -ServiceName "resourcegroup"        -DefaultLocation $Location
+$LocationStorage              = Get-ServiceLocation -ServiceName "storageaccount"       -DefaultLocation $Location
+$LocationKeyVault             = Get-ServiceLocation -ServiceName "keyvault"             -DefaultLocation $Location
+$LocationServiceBus           = Get-ServiceLocation -ServiceName "servicebus"           -DefaultLocation $Location
+$LocationAppInsights          = Get-ServiceLocation -ServiceName "applicationinsights"  -DefaultLocation $Location
+$LocationCosmosDb             = Get-ServiceLocation -ServiceName "cosmosdb"             -DefaultLocation $Location
+$LocationContentUnderstanding = Get-ServiceLocation -ServiceName "contentunderstanding" -DefaultLocation $Location
+$LocationAiFoundry            = Get-ServiceLocation -ServiceName "aifoundry"            -DefaultLocation $Location
+$LocationAppService           = Get-ServiceLocation -ServiceName "appservice"           -DefaultLocation $Location
+$LocationFunctionApp          = Get-ServiceLocation -ServiceName "functionapp"          -DefaultLocation $Location
+
+Write-Host "[SUCCESS] Service location validation complete" -ForegroundColor Green
+
 # =============================================================================
 # STEP 1: Resource Group
 # =============================================================================
@@ -228,10 +350,12 @@ Write-Host ">>> Step 1/12: Resource Group" -ForegroundColor White
 if (Test-AzResource -Arguments @('group','show','--name',$ResourceGroupName,'--query','name','-o','tsv')) {
     Write-Host "[WARNING] Resource group $ResourceGroupName already exists, skipping" -ForegroundColor Yellow
 } else {
-    Invoke-AzCli -Description "Creating resource group: $ResourceGroupName" `
-        -Arguments @('group','create','--name',$ResourceGroupName,'--location',$Location,
+    $result = Invoke-AzCli -Description "Creating resource group: $ResourceGroupName" `
+        -Arguments @('group','create','--name',$ResourceGroupName,'--location',$LocationResourceGroup,
                      '--tags',"project=$ProjectName","environment=$Environment",'--output','table')
-    Write-Host "[SUCCESS] Resource group $ResourceGroupName created" -ForegroundColor Green
+    if ($null -ne $result) {
+        Write-Host "[SUCCESS] Resource group $ResourceGroupName created" -ForegroundColor Green
+    }
 }
 
 # =============================================================================
@@ -243,12 +367,14 @@ Write-Host ">>> Step 2/12: Storage Account" -ForegroundColor White
 if (Test-AzResource -Arguments @('storage','account','show','--name',$StorageAccountName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')) {
     Write-Host "[WARNING] Storage account $StorageAccountName already exists, skipping" -ForegroundColor Yellow
 } else {
-    Invoke-AzCli -Description "Creating storage account: $StorageAccountName" `
+    $result = Invoke-AzCli -Description "Creating storage account: $StorageAccountName" `
         -Arguments @('storage','account','create','--name',$StorageAccountName,
-                     '--resource-group',$ResourceGroupName,'--location',$Location,
+                     '--resource-group',$ResourceGroupName,'--location',$LocationStorage,
                      '--sku','Standard_LRS','--kind','StorageV2','--access-tier','Hot',
                      '--tags',"project=$ProjectName","environment=$Environment",'--output','table')
-    Write-Host "[SUCCESS] Storage account $StorageAccountName created" -ForegroundColor Green
+    if ($null -ne $result) {
+        Write-Host "[SUCCESS] Storage account $StorageAccountName created" -ForegroundColor Green
+    }
 }
 
 # Disable soft-delete for blobs, containers, and file shares
@@ -274,13 +400,15 @@ Write-Host ">>> Step 3/12: Key Vault" -ForegroundColor White
 if (Test-AzResource -Arguments @('keyvault','show','--name',$KeyVaultName,'--query','name','-o','tsv')) {
     Write-Host "[WARNING] Key Vault $KeyVaultName already exists, skipping creation" -ForegroundColor Yellow
 } else {
-    Invoke-AzCli -Description "Creating Key Vault: $KeyVaultName" `
+    $result = Invoke-AzCli -Description "Creating Key Vault: $KeyVaultName" `
         -Arguments @('keyvault','create','--name',$KeyVaultName,
-                     '--resource-group',$ResourceGroupName,'--location',$Location,
+                     '--resource-group',$ResourceGroupName,'--location',$LocationKeyVault,
                      '--sku','standard','--enable-rbac-authorization','true',
                      '--retention-days','7',
                      '--tags',"project=$ProjectName","environment=$Environment",'--output','table')
-    Write-Host "[SUCCESS] Key Vault $KeyVaultName created" -ForegroundColor Green
+    if ($null -ne $result) {
+        Write-Host "[SUCCESS] Key Vault $KeyVaultName created" -ForegroundColor Green
+    }
 }
 
 # Ensure minimum soft-delete retention (7 days), no purge protection, and public network access
@@ -327,7 +455,17 @@ if (-not $GraphClientSecret) {
     # Check if credentials already exist to avoid invalidating stored secrets
     $existingCreds = (Invoke-AzCliSilent -Arguments @('ad','app','credential','list','--id',$GraphClientId,'--query','[0].keyId','-o','tsv')).Output
     if ($existingCreds) {
-        Write-Host "[OK] Client secret already exists for $GraphAppName (stored in Key Vault)" -ForegroundColor Green
+        # Credential exists in Entra ID - verify the secret is also present in Key Vault
+        $kvSecret = (Invoke-AzCliSilent -Arguments @('keyvault','secret','show','--vault-name',$KeyVaultName,'--name','GraphClientSecret','--query','value','-o','tsv')).Output
+        if ($kvSecret) {
+            Write-Host "[OK] Client secret already exists for $GraphAppName and is stored in Key Vault" -ForegroundColor Green
+            $GraphClientSecret = $kvSecret
+        } else {
+            # Secret missing from Key Vault - must rotate the credential to get a new value
+            Write-Host "[WARNING] Client secret exists in Entra ID but is missing from Key Vault. Rotating credential..." -ForegroundColor Yellow
+            $GraphClientSecret = (Invoke-AzCliSilent -Arguments @('ad','app','credential','reset','--id',$GraphClientId,'--display-name','extract-insight-action-secret','--years','2','--query','password','-o','tsv')).Output
+            Write-Host "[SUCCESS] Client secret rotated and will be stored in Key Vault" -ForegroundColor Green
+        }
     } else {
         $GraphClientSecret = (Invoke-AzCliSilent -Arguments @('ad','app','credential','reset','--id',$GraphClientId,'--display-name','extract-insight-action-secret','--years','2','--query','password','-o','tsv')).Output
         Write-Host "[SUCCESS] Client secret created for Graph API" -ForegroundColor Green
@@ -345,35 +483,41 @@ Write-Host ">>> Step 5/12: Service Bus" -ForegroundColor White
 if (Test-AzResource -Arguments @('servicebus','namespace','show','--name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')) {
     Write-Host "[WARNING] Service Bus namespace $ServiceBusNamespace already exists, skipping" -ForegroundColor Yellow
 } else {
-    Invoke-AzCli -Description "Creating Service Bus namespace: $ServiceBusNamespace" `
+    $result = Invoke-AzCli -Description "Creating Service Bus namespace: $ServiceBusNamespace" `
         -Arguments @('servicebus','namespace','create','--name',$ServiceBusNamespace,
-                     '--resource-group',$ResourceGroupName,'--location',$Location,
+                     '--resource-group',$ResourceGroupName,'--location',$LocationServiceBus,
                      '--sku','Standard',
                      '--tags',"project=$ProjectName","environment=$Environment",'--output','table')
-    Write-Host "[SUCCESS] Service Bus namespace $ServiceBusNamespace created" -ForegroundColor Green
+    if ($null -ne $result) {
+        Write-Host "[SUCCESS] Service Bus namespace $ServiceBusNamespace created" -ForegroundColor Green
+    }
 }
 
 # Topic
 if (Test-AzResource -Arguments @('servicebus','topic','show','--name',$ServiceBusTopicName,'--namespace-name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')) {
     Write-Host "[WARNING] Service Bus topic $ServiceBusTopicName already exists, skipping" -ForegroundColor Yellow
 } else {
-    Invoke-AzCli -Description "Creating Service Bus topic: $ServiceBusTopicName" `
+    $result = Invoke-AzCli -Description "Creating Service Bus topic: $ServiceBusTopicName" `
         -Arguments @('servicebus','topic','create','--name',$ServiceBusTopicName,
                      '--namespace-name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,
                      '--max-size','1024','--default-message-time-to-live','P14D','--output','table')
-    Write-Host "[SUCCESS] Service Bus topic $ServiceBusTopicName created" -ForegroundColor Green
+    if ($null -ne $result) {
+        Write-Host "[SUCCESS] Service Bus topic $ServiceBusTopicName created" -ForegroundColor Green
+    }
 }
 
 # Subscription
 if (Test-AzResource -Arguments @('servicebus','topic','subscription','show','--name',$ServiceBusSubName,'--topic-name',$ServiceBusTopicName,'--namespace-name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')) {
     Write-Host "[WARNING] Service Bus subscription $ServiceBusSubName already exists, skipping" -ForegroundColor Yellow
 } else {
-    Invoke-AzCli -Description "Creating Service Bus subscription: $ServiceBusSubName" `
+    $result = Invoke-AzCli -Description "Creating Service Bus subscription: $ServiceBusSubName" `
         -Arguments @('servicebus','topic','subscription','create','--name',$ServiceBusSubName,
                      '--topic-name',$ServiceBusTopicName,'--namespace-name',$ServiceBusNamespace,
                      '--resource-group',$ResourceGroupName,
                      '--max-delivery-count','10','--default-message-time-to-live','P14D','--output','table')
-    Write-Host "[SUCCESS] Service Bus subscription $ServiceBusSubName created" -ForegroundColor Green
+    if ($null -ne $result) {
+        Write-Host "[SUCCESS] Service Bus subscription $ServiceBusSubName created" -ForegroundColor Green
+    }
 }
 
 # =============================================================================
@@ -385,12 +529,14 @@ Write-Host ">>> Step 6/12: Application Insights" -ForegroundColor White
 if (Test-AzResource -Arguments @('monitor','app-insights','component','show','--app',$AppInsightsName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')) {
     Write-Host "[WARNING] Application Insights $AppInsightsName already exists, skipping" -ForegroundColor Yellow
 } else {
-    Invoke-AzCli -Description "Creating Application Insights: $AppInsightsName" `
+    $result = Invoke-AzCli -Description "Creating Application Insights: $AppInsightsName" `
         -Arguments @('monitor','app-insights','component','create','--app',$AppInsightsName,
-                     '--resource-group',$ResourceGroupName,'--location',$Location,
+                     '--resource-group',$ResourceGroupName,'--location',$LocationAppInsights,
                      '--kind','web','--application-type','web',
                      '--tags',"project=$ProjectName","environment=$Environment",'--output','table')
-    Write-Host "[SUCCESS] Application Insights $AppInsightsName created" -ForegroundColor Green
+    if ($null -ne $result) {
+        Write-Host "[SUCCESS] Application Insights $AppInsightsName created" -ForegroundColor Green
+    }
 }
 
 # =============================================================================
@@ -405,7 +551,7 @@ if (Test-AzResource -Arguments @('cosmosdb','show','--name',$CosmosDbAccountName
     $result = Invoke-AzCli -Description "Creating Cosmos DB account: $CosmosDbAccountName" `
         -Arguments @('cosmosdb','create','--name',$CosmosDbAccountName,
                      '--resource-group',$ResourceGroupName,
-                     '--locations',"regionName=$Location","failoverPriority=0","isZoneRedundant=false",
+                     '--locations',"regionName=$LocationCosmosDb","failoverPriority=0","isZoneRedundant=false",
                      '--kind','GlobalDocumentDB',
                      '--default-consistency-level','Session',
                      '--tags',"project=$ProjectName","environment=$Environment",
@@ -449,7 +595,7 @@ if (Test-AzResource -Arguments @('cognitiveservices','account','show','--name',$
 } else {
     $result = Invoke-AzCli -Description "Creating Azure Content Understanding: $ContentUnderstandingName" `
         -Arguments @('cognitiveservices','account','create','--name',$ContentUnderstandingName,
-                     '--resource-group',$ResourceGroupName,'--location',$Location,
+                     '--resource-group',$ResourceGroupName,'--location',$LocationContentUnderstanding,
                      '--kind','AIServices','--sku','S0',
                      '--custom-domain',$ContentUnderstandingName,
                      '--tags',"project=$ProjectName","environment=$Environment",
@@ -471,7 +617,7 @@ if (Test-AzResource -Arguments @('cognitiveservices','account','show','--name',$
 } else {
     $result = Invoke-AzCli -Description "Creating Azure AI Foundry resource: $AiFoundryName" `
         -Arguments @('cognitiveservices','account','create','--name',$AiFoundryName,
-                     '--resource-group',$ResourceGroupName,'--location',$Location,
+                     '--resource-group',$ResourceGroupName,'--location',$LocationAiFoundry,
                      '--kind','AIServices','--sku','S0',
                      '--custom-domain',$AiFoundryName,
                      '--tags',"project=$ProjectName","environment=$Environment",
@@ -481,7 +627,7 @@ if (Test-AzResource -Arguments @('cognitiveservices','account','show','--name',$
     }
 }
 
-# Deploy LLM model (gpt-4.1, GlobalStandard, 50K TPM)
+# Deploy main LLM model (gpt-5.1-chat, GlobalStandard, 50K TPM)
 $deploymentExists = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','deployment','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--deployment-name',$AiFoundryDeploymentName,'--query','name','-o','tsv')).Output
 if ($deploymentExists) {
     Write-Host "[WARNING] Model deployment $AiFoundryDeploymentName already exists, skipping" -ForegroundColor Yellow
@@ -501,9 +647,103 @@ if ($deploymentExists) {
     }
 }
 
+# Deploy CU-compatible completion model on the CU resource itself (gpt-4.1)
+# The PATCH /contentunderstanding/defaults resolves deployments from the CU
+# resource, not from a separate AI Foundry resource.
+$cuDeploymentExists = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','deployment','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--deployment-name',$CuCompletionDeploymentName,'--query','name','-o','tsv')).Output
+if ($cuDeploymentExists) {
+    Write-Host "[WARNING] CU completion model deployment $CuCompletionDeploymentName already exists on $ContentUnderstandingName, skipping" -ForegroundColor Yellow
+} else {
+    $result = Invoke-AzCli -Description "Deploying CU completion model $CuCompletionModelName on $ContentUnderstandingName ($AiFoundrySkuName, ${CuCompletionSkuCapacity}K TPM)" `
+        -Arguments @('cognitiveservices','account','deployment','create',
+                     '--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,
+                     '--deployment-name',$CuCompletionDeploymentName,
+                     '--model-name',$CuCompletionModelName,
+                     '--model-version',$CuCompletionModelVersion,
+                     '--model-format','OpenAI',
+                     '--sku-name',$AiFoundrySkuName,
+                     '--sku-capacity',$CuCompletionSkuCapacity,
+                     '--output','table')
+    if ($result -ne $null) {
+        Write-Host "[SUCCESS] CU completion model $CuCompletionModelName deployed as $CuCompletionDeploymentName on $ContentUnderstandingName" -ForegroundColor Green
+    }
+}
+
+# Deploy CU embedding model on the CU resource (text-embedding-3-large)
+$cuEmbedDeploymentExists = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','deployment','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--deployment-name',$CuEmbeddingDeploymentName,'--query','name','-o','tsv')).Output
+if ($cuEmbedDeploymentExists) {
+    Write-Host "[WARNING] CU embedding model deployment $CuEmbeddingDeploymentName already exists on $ContentUnderstandingName, skipping" -ForegroundColor Yellow
+} else {
+    $result = Invoke-AzCli -Description "Deploying CU embedding model $CuEmbeddingModelName on $ContentUnderstandingName ($AiFoundrySkuName, ${CuEmbeddingSkuCapacity}K TPM)" `
+        -Arguments @('cognitiveservices','account','deployment','create',
+                     '--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,
+                     '--deployment-name',$CuEmbeddingDeploymentName,
+                     '--model-name',$CuEmbeddingModelName,
+                     '--model-version',$CuEmbeddingModelVersion,
+                     '--model-format','OpenAI',
+                     '--sku-name',$AiFoundrySkuName,
+                     '--sku-capacity',$CuEmbeddingSkuCapacity,
+                     '--output','table')
+    if ($result -ne $null) {
+        Write-Host "[SUCCESS] CU embedding model $CuEmbeddingModelName deployed as $CuEmbeddingDeploymentName on $ContentUnderstandingName" -ForegroundColor Green
+    }
+}
+
 # =============================================================================
 # STEP 10/12: App Service (Java Spring Boot Web App)
 # =============================================================================
+
+# --- Content Understanding: set completion model defaults --------------------
+# The CU service requires PATCH /contentunderstanding/defaults before custom
+# analyzers can be created. This is idempotent; re-running is harmless.
+Write-Host ""
+Write-Host ">>> Configuring Content Understanding completion model defaults" -ForegroundColor White
+
+$CuEndpoint = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','properties.endpoint','-o','tsv')).Output
+
+if (-not $CuEndpoint) {
+    Write-Host "[WARNING] Cannot configure CU defaults - CU endpoint not available" -ForegroundColor Yellow
+} else {
+    $cuDefaultsUrl = "${CuEndpoint}contentunderstanding/defaults?api-version=2025-11-01"
+
+    # Check if defaults are already set to the correct deployments
+    $existingDefaults = Invoke-AzCliSilent -Arguments @('rest','--method','GET','--url',$cuDefaultsUrl,'--resource','https://cognitiveservices.azure.com')
+    $needsUpdate = $true
+    if ($existingDefaults.ExitCode -eq 0 -and $existingDefaults.Output) {
+        $parsed = $existingDefaults.Output | ConvertFrom-Json -ErrorAction SilentlyContinue
+        $currentCompletion = $parsed.modelDeployments."$CuCompletionModelName"
+        $currentEmbedding  = $parsed.modelDeployments."$CuEmbeddingModelName"
+        if ($currentCompletion -eq $CuCompletionDeploymentName -and $currentEmbedding -eq $CuEmbeddingDeploymentName) {
+            Write-Host "[OK] Content Understanding defaults already configured ($CuCompletionModelName -> $CuCompletionDeploymentName, $CuEmbeddingModelName -> $CuEmbeddingDeploymentName)" -ForegroundColor Green
+            $needsUpdate = $false
+        } else {
+            Write-Host "[INFO] Content Understanding defaults need updating" -ForegroundColor Cyan
+        }
+    }
+
+    if ($needsUpdate) {
+        $defaultsBody = @{
+            modelDeployments = @{
+                $CuCompletionModelName = $CuCompletionDeploymentName
+                $CuEmbeddingModelName  = $CuEmbeddingDeploymentName
+            }
+        } | ConvertTo-Json -Depth 5 -Compress
+
+        $tempDefaultsFile = [System.IO.Path]::GetTempFileName()
+        [System.IO.File]::WriteAllText($tempDefaultsFile, $defaultsBody, [System.Text.Encoding]::UTF8)
+
+        $setResult = Invoke-AzCliSilent -Arguments @('rest','--method','PATCH','--url',$cuDefaultsUrl,'--resource','https://cognitiveservices.azure.com','--body',"@$tempDefaultsFile",'--headers','Content-Type=application/json')
+        Remove-Item $tempDefaultsFile -Force -ErrorAction SilentlyContinue
+
+        if ($setResult.ExitCode -eq 0) {
+            Write-Host "[SUCCESS] Content Understanding defaults set ($CuCompletionModelName -> $CuCompletionDeploymentName on $ContentUnderstandingName)" -ForegroundColor Green
+        } else {
+            Write-Host "[ERROR] Failed to set Content Understanding defaults" -ForegroundColor Red
+            if ($setResult.Error) { Write-Host "  $($setResult.Error)" -ForegroundColor Red }
+            $script:DeploymentErrors.Add("Content Understanding defaults")
+        }
+    }
+}
 Write-Host ""
 Write-Host ">>> Step 10/12: App Service (Java Spring Boot Web App)" -ForegroundColor White
 
@@ -513,7 +753,7 @@ if (Test-AzResource -Arguments @('appservice','plan','show','--name',$AppService
 } else {
     $result = Invoke-AzCli -Description "Creating App Service Plan: $AppServicePlanName (Linux P0v3)" `
         -Arguments @('appservice','plan','create','--name',$AppServicePlanName,
-                     '--resource-group',$ResourceGroupName,'--location',$Location,
+                     '--resource-group',$ResourceGroupName,'--location',$LocationAppService,
                      '--sku','P0v3','--is-linux',
                      '--tags',"project=$ProjectName","environment=$Environment",
                      '--output','table')
@@ -548,7 +788,7 @@ $AppInsightsKey = (Invoke-AzCliSilent -Arguments @('monitor','app-insights','com
 
 # Build common args for Flex Consumption function app creation
 $CommonFuncArgs = @('--resource-group',$ResourceGroupName,'--storage-account',$StorageAccountName,
-                    '--flexconsumption-location',$Location,
+                    '--flexconsumption-location',$LocationFunctionApp,
                     '--runtime','java','--runtime-version','21.0')
 if ($AppInsightsKey) {
     $CommonFuncArgs += @('--app-insights',$AppInsightsName,'--app-insights-key',$AppInsightsKey)
@@ -613,7 +853,7 @@ if ($MailboxIdentity) {
     Write-Host "[OK] Managed identity already enabled for $FuncMailboxName" -ForegroundColor Green
 } else {
     Write-Host "[INFO] Enabling managed identity for $FuncMailboxName" -ForegroundColor Cyan
-    az functionapp identity assign --name $FuncMailboxName --resource-group $ResourceGroupName --output none 2>$null
+    Invoke-AzCliSilent -Arguments @('functionapp','identity','assign','--name',$FuncMailboxName,'--resource-group',$ResourceGroupName,'--output','none') | Out-Null
     $MailboxIdentity = (Invoke-AzCliSilent -Arguments @('functionapp','identity','show','--name',$FuncMailboxName,'--resource-group',$ResourceGroupName,'--query','principalId','-o','tsv')).Output
     Write-Host "[SUCCESS] Managed identity enabled for $FuncMailboxName" -ForegroundColor Green
 }
@@ -623,7 +863,7 @@ if ($QueueDbIdentity) {
     Write-Host "[OK] Managed identity already enabled for $FuncQueueDbName" -ForegroundColor Green
 } else {
     Write-Host "[INFO] Enabling managed identity for $FuncQueueDbName" -ForegroundColor Cyan
-    az functionapp identity assign --name $FuncQueueDbName --resource-group $ResourceGroupName --output none 2>$null
+    Invoke-AzCliSilent -Arguments @('functionapp','identity','assign','--name',$FuncQueueDbName,'--resource-group',$ResourceGroupName,'--output','none') | Out-Null
     $QueueDbIdentity = (Invoke-AzCliSilent -Arguments @('functionapp','identity','show','--name',$FuncQueueDbName,'--resource-group',$ResourceGroupName,'--query','principalId','-o','tsv')).Output
     Write-Host "[SUCCESS] Managed identity enabled for $FuncQueueDbName" -ForegroundColor Green
 }
@@ -633,7 +873,7 @@ if ($WebAppIdentity) {
     Write-Host "[OK] Managed identity already enabled for $WebAppName" -ForegroundColor Green
 } else {
     Write-Host "[INFO] Enabling managed identity for $WebAppName" -ForegroundColor Cyan
-    az webapp identity assign --name $WebAppName --resource-group $ResourceGroupName --output none 2>$null
+    Invoke-AzCliSilent -Arguments @('webapp','identity','assign','--name',$WebAppName,'--resource-group',$ResourceGroupName,'--output','none') | Out-Null
     $WebAppIdentity = (Invoke-AzCliSilent -Arguments @('webapp','identity','show','--name',$WebAppName,'--resource-group',$ResourceGroupName,'--query','principalId','-o','tsv')).Output
     Write-Host "[SUCCESS] Managed identity enabled for $WebAppName" -ForegroundColor Green
 }
@@ -808,6 +1048,7 @@ $kvSecrets = @{
     "CosmosDbDatabaseName"       = $CosmosDbDatabaseName
     "CosmosDbContainerName"               = $CosmosDbContainerName
     "ContentUnderstandingEndpoint"          = $ContentUnderstandingEndpoint
+    "ContentUnderstandingCompletionModel"     = $CuCompletionModelName
     "AiFoundryEndpoint"                     = $AiFoundryEndpoint
     "AiFoundryDeploymentName"               = $AiFoundryDeploymentName
     "AiFoundryModelName"                    = $AiFoundryModelName

@@ -1,3 +1,6 @@
-com\core\az\AzGetConnectionIT$1.class
-com\core\az\AzGetConnectionIT.class
-com\core\az\AzGetConnectionTest.class
+com\core\az\AzContentUnderstandingTest.class
+com\core\az\AzConnectionTest.class
+com\core\az\AzContentUnderstandingIT.class
+com\core\az\AzContentUnderstandingIT$1.class
+com\core\az\AzConnectionIT.class
+com\core\az\AzConnectionIT$1.class
