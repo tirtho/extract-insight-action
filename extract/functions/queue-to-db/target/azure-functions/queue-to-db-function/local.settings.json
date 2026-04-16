@@ -1,0 +1,18 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "java",
+    "FUNCTIONS_EXTENSION_VERSION": "~4",
+    "AZURE_KEY_VAULT_URL": "https://kv-eia-dev-1.vault.azure.net",
+    "ServiceBusConnection__fullyQualifiedNamespace": "sb-eia-dev-1.servicebus.windows.net",
+    "ServiceBusTopicName": "email-processing",
+    "ServiceBusSubscriptionName": "email-processor"
+  },
+  "ConnectionStrings": {},
+  "Host": {
+    "LocalHttpPort": 7072,
+    "CORS": "*",
+    "CORSCredentials": false
+  }
+}

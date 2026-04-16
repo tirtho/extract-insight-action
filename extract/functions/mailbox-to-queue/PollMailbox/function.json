@@ -1,0 +1,12 @@
+{
+  "scriptFile": "../mailbox-to-queue-1.0.0.jar",
+  "entryPoint": "com.microsoft.azure.functions.mailbox.PollMailbox.run",
+  "bindings": [
+    {
+      "type": "timerTrigger",
+      "direction": "in",
+      "name": "timerInfo",
+      "schedule": "%MailboxPollingSchedule%"
+    }
+  ]
+}

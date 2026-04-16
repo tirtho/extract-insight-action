@@ -44,9 +44,13 @@ Prerequisites
 -------------------------------
   mvn clean package -DskipTests
 
-7. Package and copy JAR to project-lib\java
---------------------------------------
-  mvn clean package -Dlibrary
+7. Install JAR to local Maven repo and copy to project-lib\java
+---------------------------------------------------------------
+  mvn clean install -Dlibrary
+
+  This installs the JAR into ~/.m2/repository (so downstream projects
+  like mailbox-to-queue and queue-to-db pick up the latest version)
+  and copies it to project-lib\java.
 
   Activates the "copy-to-project-lib" profile which copies the built JAR
   to ../project-lib/java/ after packaging.

@@ -75,7 +75,7 @@ public class AzConnection implements AutoCloseable {
     /**
      * Reads a secret value from Key Vault, caching the result for subsequent calls.
      */
-    private String getSecret(String secretName) {
+    public String getSecret(String secretName) {
         return secretCache.computeIfAbsent(secretName, name -> {
             LOG.info("Reading secret '{}' from Key Vault", name);
             try {
@@ -223,7 +223,8 @@ public class AzConnection implements AutoCloseable {
     public ServiceBusSenderClient getServiceBusSenderClient() {
         if (senderClient == null) {
             LOG.info("Creating ServiceBusSenderClient");
-            String serviceBusUrl = getSecret(AzEnvNames.KV_SERVICE_BUS_URL);
+            String serviceBusUrl = getSecret(AzEnvNames.KV_SERVICE_BUS_URL)
+                    .replaceFirst("^https?://", "").replaceFirst("/$", "");
             String topicName = getSecret(AzEnvNames.KV_SERVICE_BUS_TOPIC_NAME);
 
             senderClient = new ServiceBusClientBuilder()
@@ -244,7 +245,8 @@ public class AzConnection implements AutoCloseable {
     public ServiceBusReceiverClient getServiceBusReceiverClient() {
         if (receiverClient == null) {
             LOG.info("Creating ServiceBusReceiverClient");
-            String serviceBusUrl = getSecret(AzEnvNames.KV_SERVICE_BUS_URL);
+            String serviceBusUrl = getSecret(AzEnvNames.KV_SERVICE_BUS_URL)
+                    .replaceFirst("^https?://", "").replaceFirst("/$", "");
             String topicName = getSecret(AzEnvNames.KV_SERVICE_BUS_TOPIC_NAME);
             String subscriptionName = getSecret(AzEnvNames.KV_SERVICE_BUS_SUBSCRIPTION_NAME);
 

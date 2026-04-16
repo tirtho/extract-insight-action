@@ -72,6 +72,7 @@ $CosmosDbAccountName = if ($env:COSMOS_DB_ACCOUNT_NAME) { $env:COSMOS_DB_ACCOUNT
 $ContentUnderstandingName = if ($env:CONTENT_UNDERSTANDING_NAME) { $env:CONTENT_UNDERSTANDING_NAME } else { "cu-$ProjectName-$Environment-$Suffix" }
 $AiFoundryName       = if ($env:AI_FOUNDRY_NAME)     { $env:AI_FOUNDRY_NAME }     else { "oai-$ProjectName-$Environment-$Suffix" }
 $KeyVaultName        = if ($env:KEY_VAULT_NAME)      { $env:KEY_VAULT_NAME }      else { "kv-$ProjectName-$Environment-$Suffix" }
+$ServiceBusNamespace = if ($env:SERVICE_BUS_NAMESPACE) { $env:SERVICE_BUS_NAMESPACE } else { "sb-$ProjectName-$Environment-$Suffix" }
 
 # =============================================================================
 # BANNER
@@ -179,10 +180,7 @@ $storageState = Invoke-AzCliSilent -Arguments @('storage','account','show','--na
     '--query','{publicNetworkAccess:publicNetworkAccess, defaultAction:networkRuleSet.defaultAction, bypass:networkRuleSet.bypass, ipRules:networkRuleSet.ipRules[].ipAddressOrRange}',
     '-o','json')
 $storageJson = $storageState.Output | ConvertFrom-Json
-$currentBypass = Normalize-Bypass $storageJson.bypass
-$desiredBypass = Normalize-Bypass 'AzureServices,Logging,Metrics'
-$currentStorageIps = if ($storageJson.ipRules) { ($storageJson.ipRules | Sort-Object -Unique) -join ',' } else { '' }
-$storageNeedsUpdate = ($storageJson.publicNetworkAccess -ne 'Enabled' -or $storageJson.defaultAction -ne 'Deny' -or $currentBypass -ne $desiredBypass -or $currentStorageIps -ne $MyPublicIp)
+$storageNeedsUpdate = ($storageJson.publicNetworkAccess -ne 'Enabled' -or $storageJson.defaultAction -ne 'Allow')
 
 Write-Host "[INFO] Checking Key Vault network rules: $KeyVaultName" -ForegroundColor Cyan
 $kvState = Invoke-AzCliSilent -Arguments @('keyvault','show','--name',$KeyVaultName,
@@ -216,32 +214,15 @@ if (-not $storageNeedsUpdate) {
 } else {
     Write-Host "  [INFO] Updating Storage Account network rules in background..." -ForegroundColor Cyan
     $jobs += Start-Job -Name 'Storage-Network' -ScriptBlock {
-        param($AccountName, $RG, $MyIp, $NeedDefaultUpdate, $NeedIpUpdate, $CurrentIps)
-        if ($NeedDefaultUpdate) {
-            az storage account update --name $AccountName --resource-group $RG `
-                --public-network-access Enabled --default-action Deny `
-                --bypass AzureServices Logging Metrics --output none 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "Storage default rules update failed" }
-        }
-        if ($NeedIpUpdate) {
-            # Remove stale IPs
-            if ($CurrentIps) {
-                foreach ($ip in ($CurrentIps -split ',')) {
-                    if ($ip -ne $MyIp) {
-                        az storage account network-rule remove --account-name $AccountName --resource-group $RG --ip-address $ip --output none 2>&1 | Out-Null
-                    }
-                }
-            }
-            # Add laptop IP if not present
-            if (-not ($CurrentIps -and ($CurrentIps -split ',' | Where-Object { $_ -eq $MyIp }))) {
-                az storage account network-rule add --account-name $AccountName --resource-group $RG --ip-address $MyIp --output none 2>&1 | Out-Null
-                if ($LASTEXITCODE -ne 0) { throw "Storage IP rule add failed" }
-            }
-        }
-    } -ArgumentList $StorageAccountName, $ResourceGroupName, $MyPublicIp, `
-        ($storageJson.publicNetworkAccess -ne 'Enabled' -or $storageJson.defaultAction -ne 'Deny' -or $currentBypass -ne $desiredBypass), `
-        ($currentStorageIps -ne $MyPublicIp), `
-        $currentStorageIps
+        param($AccountName, $RG)
+        # Flex Consumption function hosts need direct access to the storage account
+        # public endpoint for both AzureWebJobsStorage and blobContainer deployments.
+        # Deny-by-default storage firewall rules prevent the host from starting and
+        # result in zero indexed functions in the portal.
+        az storage account update --name $AccountName --resource-group $RG `
+            --public-network-access Enabled --default-action Allow --output none 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Storage default rules update failed" }
+    } -ArgumentList $StorageAccountName, $ResourceGroupName
 }
 
 if (-not $kvNeedsUpdate) {
@@ -306,6 +287,7 @@ $CosmosDbAccountId = (Invoke-AzCliSilent -Arguments @('cosmosdb','show','--name'
 $KeyVaultId = (Invoke-AzCliSilent -Arguments @('keyvault','show','--name',$KeyVaultName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 $ContentUnderstandingId = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 $AiFoundryId = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
+$ServiceBusId = (Invoke-AzCliSilent -Arguments @('servicebus','namespace','show','--name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 
 # Resolve Content Understanding managed identity (may need to enable it first)
 $CuIdentity = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','identity','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','principalId','-o','tsv')).Output
@@ -322,7 +304,8 @@ $allAssignments = [System.Collections.Generic.List[hashtable]]::new()
 # Storage Account ARM roles
 foreach ($role in @('Storage Blob Data Contributor','Storage Blob Data Reader',
                     'Storage Queue Data Contributor','Storage Table Data Contributor',
-                    'Storage Account Contributor','Storage Blob Data Owner')) {
+                    'Storage Account Contributor','Storage Blob Data Owner',
+                    'Storage Blob Delegator')) {
     $allAssignments.Add(@{ Assignee=$CurrentUserId; Role=$role; Scope=$StorageAccountId; Label=$role; Type='arm' })
 }
 
@@ -356,6 +339,15 @@ if ($CuIdentity) {
     $allAssignments.Add(@{ Assignee=$CuIdentity; Role='Storage Blob Data Reader'; Scope=$StorageAccountId; Label='Storage Blob Data Reader (Content Understanding)'; Type='arm' })
 } else {
     Write-Host "  [WARNING] Content Understanding '$ContentUnderstandingName' identity not found. Skipping." -ForegroundColor Yellow
+}
+
+# Service Bus roles for local dev (send + receive for testing both functions locally)
+if ($ServiceBusId) {
+    foreach ($role in @('Azure Service Bus Data Sender','Azure Service Bus Data Receiver')) {
+        $allAssignments.Add(@{ Assignee=$CurrentUserId; Role=$role; Scope=$ServiceBusId; Label="$role (Service Bus)"; Type='arm' })
+    }
+} else {
+    Write-Host "  [WARNING] Service Bus namespace '$ServiceBusNamespace' not found. Skipping Service Bus roles." -ForegroundColor Yellow
 }
 
 # --- Launch all role assignments in parallel ---

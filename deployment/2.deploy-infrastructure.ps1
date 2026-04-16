@@ -133,12 +133,22 @@ function Test-AzResource {
 # Returns $true if the role assignment was already in place
 function Ensure-RoleAssignment {
     param([string]$Assignee, [string]$Role, [string]$Scope)
+    if (-not $Scope) {
+        Write-Host "[ERROR] Ensure-RoleAssignment: Scope is empty for role '$Role' on assignee '$Assignee'" -ForegroundColor Red
+        $script:DeploymentErrors.Add("RBAC: '$Role' for '$Assignee' - empty scope")
+        return $false
+    }
     $existing = Invoke-AzCliSilent -Arguments @('role','assignment','list','--assignee',$Assignee,'--role',$Role,'--scope',$Scope,'--query','[0].id','-o','tsv')
     if ($existing.ExitCode -eq 0 -and $existing.Output) {
         return $true  # already exists
     }
-    Invoke-AzCliSilent -Arguments @('role','assignment','create','--assignee',$Assignee,'--role',$Role,'--scope',$Scope,'--output','none') | Out-Null
-    return $false  # newly created
+    $result = Invoke-AzCliSilent -Arguments @('role','assignment','create','--assignee',$Assignee,'--role',$Role,'--scope',$Scope,'--output','none')
+    if ($result.ExitCode -ne 0) {
+        Write-Host "[ERROR] Failed to assign role '$Role' to '$Assignee' on scope '$Scope'" -ForegroundColor Red
+        if ($result.Error) { Write-Host "  $($result.Error)" -ForegroundColor Red }
+        $script:DeploymentErrors.Add("RBAC: '$Role' for '$Assignee'")
+    }
+    return $false  # newly created (or failed - caller increments counter; errors logged above)
 }
 
 # Returns $true if the Cosmos DB role assignment was already in place
@@ -463,13 +473,31 @@ if (-not $GraphClientSecret) {
         } else {
             # Secret missing from Key Vault - must rotate the credential to get a new value
             Write-Host "[WARNING] Client secret exists in Entra ID but is missing from Key Vault. Rotating credential..." -ForegroundColor Yellow
-            $GraphClientSecret = (Invoke-AzCliSilent -Arguments @('ad','app','credential','reset','--id',$GraphClientId,'--display-name','extract-insight-action-secret','--years','2','--query','password','-o','tsv')).Output
-            Write-Host "[SUCCESS] Client secret rotated and will be stored in Key Vault" -ForegroundColor Green
+            $credResult = Invoke-AzCliSilent -Arguments @('ad','app','credential','reset','--id',$GraphClientId,'--display-name','extract-insight-action-secret','--years','2','--query','password','-o','tsv')
+            if ($credResult.ExitCode -eq 0 -and $credResult.Output) {
+                $GraphClientSecret = $credResult.Output
+                Write-Host "[SUCCESS] Client secret rotated and will be stored in Key Vault" -ForegroundColor Green
+            } else {
+                Write-Host "[ERROR] Failed to rotate client secret for $GraphAppName" -ForegroundColor Red
+                if ($credResult.Error) { Write-Host "  $($credResult.Error)" -ForegroundColor Red }
+                $script:DeploymentErrors.Add("Graph API client secret rotation")
+            }
         }
     } else {
-        $GraphClientSecret = (Invoke-AzCliSilent -Arguments @('ad','app','credential','reset','--id',$GraphClientId,'--display-name','extract-insight-action-secret','--years','2','--query','password','-o','tsv')).Output
-        Write-Host "[SUCCESS] Client secret created for Graph API" -ForegroundColor Green
+        $credResult = Invoke-AzCliSilent -Arguments @('ad','app','credential','reset','--id',$GraphClientId,'--display-name','extract-insight-action-secret','--years','2','--query','password','-o','tsv')
+        if ($credResult.ExitCode -eq 0 -and $credResult.Output) {
+            $GraphClientSecret = $credResult.Output
+            Write-Host "[SUCCESS] Client secret created for Graph API" -ForegroundColor Green
+        } else {
+            Write-Host "[ERROR] Failed to create client secret for $GraphAppName" -ForegroundColor Red
+            if ($credResult.Error) { Write-Host "  $($credResult.Error)" -ForegroundColor Red }
+            $script:DeploymentErrors.Add("Graph API client secret creation")
+        }
     }
+}
+if (-not $GraphClientSecret) {
+    Write-Host "[WARNING] GraphClientSecret is empty - the 'GraphClientSecret' Key Vault secret will be skipped." -ForegroundColor Yellow
+    Write-Host "[WARNING] You can set it manually: az keyvault secret set --vault-name $KeyVaultName --name GraphClientSecret --value '<secret>'" -ForegroundColor Yellow
 }
 
 Write-Host "[INFO] Run .\grant-graph-consent.ps1 -Suffix $Suffix to grant admin consent (requires tenant admin role)" -ForegroundColor Cyan
@@ -500,7 +528,9 @@ if (Test-AzResource -Arguments @('servicebus','topic','show','--name',$ServiceBu
     $result = Invoke-AzCli -Description "Creating Service Bus topic: $ServiceBusTopicName" `
         -Arguments @('servicebus','topic','create','--name',$ServiceBusTopicName,
                      '--namespace-name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,
-                     '--max-size','1024','--default-message-time-to-live','P14D','--output','table')
+                     '--max-size','1024','--default-message-time-to-live','P14D',
+                     '--enable-duplicate-detection','true','--duplicate-detection-history-time-window','PT10M',
+                     '--output','table')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Service Bus topic $ServiceBusTopicName created" -ForegroundColor Green
     }
@@ -696,14 +726,30 @@ if ($cuEmbedDeploymentExists) {
 # --- Content Understanding: set completion model defaults --------------------
 # The CU service requires PATCH /contentunderstanding/defaults before custom
 # analyzers can be created. This is idempotent; re-running is harmless.
+# The deploying user needs "Cognitive Services User" (data-plane role) to write defaults.
+# "Cognitive Services Contributor" is management-plane only and lacks the required
+# dataAction Microsoft.CognitiveServices/accounts/analyzers/defaults/write.
 Write-Host ""
 Write-Host ">>> Configuring Content Understanding completion model defaults" -ForegroundColor White
 
 $CuEndpoint = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','properties.endpoint','-o','tsv')).Output
+$CuResourceId = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 
 if (-not $CuEndpoint) {
     Write-Host "[WARNING] Cannot configure CU defaults - CU endpoint not available" -ForegroundColor Yellow
 } else {
+    # Ensure current user has Cognitive Services User on CU (data-plane role required for PATCH defaults)
+    $cuRbacWait = $false
+    if ($CurrentUserId -and $CuResourceId) {
+        $cuRoleAlready = Ensure-RoleAssignment -Assignee $CurrentUserId -Role 'Cognitive Services User' -Scope $CuResourceId
+        if (-not $cuRoleAlready) {
+            Write-Host "[INFO] Granted Cognitive Services User to current user on $ContentUnderstandingName" -ForegroundColor Cyan
+            $cuRbacWait = $true
+            Write-Host "[INFO] Waiting 60 seconds for RBAC propagation..." -ForegroundColor Cyan
+            Start-Sleep -Seconds 60
+        }
+    }
+
     $cuDefaultsUrl = "${CuEndpoint}contentunderstanding/defaults?api-version=2025-11-01"
 
     # Check if defaults are already set to the correct deployments
@@ -732,12 +778,24 @@ if (-not $CuEndpoint) {
         $tempDefaultsFile = [System.IO.Path]::GetTempFileName()
         [System.IO.File]::WriteAllText($tempDefaultsFile, $defaultsBody, [System.Text.Encoding]::UTF8)
 
-        $setResult = Invoke-AzCliSilent -Arguments @('rest','--method','PATCH','--url',$cuDefaultsUrl,'--resource','https://cognitiveservices.azure.com','--body',"@$tempDefaultsFile",'--headers','Content-Type=application/json')
+        # Retry up to 3 times in case RBAC propagation is still in-flight
+        $cuDefaultsSet = $false
+        $maxRetries = 3
+        for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+            $setResult = Invoke-AzCliSilent -Arguments @('rest','--method','PATCH','--url',$cuDefaultsUrl,'--resource','https://cognitiveservices.azure.com','--body',"@$tempDefaultsFile",'--headers','Content-Type=application/json')
+            if ($setResult.ExitCode -eq 0) {
+                Write-Host "[SUCCESS] Content Understanding defaults set ($CuCompletionModelName -> $CuCompletionDeploymentName on $ContentUnderstandingName)" -ForegroundColor Green
+                $cuDefaultsSet = $true
+                break
+            }
+            if ($attempt -lt $maxRetries -and $setResult.Error -match 'PermissionDenied') {
+                Write-Host "[INFO] Permission not yet propagated, retrying in 30 seconds (attempt $attempt/$maxRetries)..." -ForegroundColor Cyan
+                Start-Sleep -Seconds 30
+            }
+        }
         Remove-Item $tempDefaultsFile -Force -ErrorAction SilentlyContinue
 
-        if ($setResult.ExitCode -eq 0) {
-            Write-Host "[SUCCESS] Content Understanding defaults set ($CuCompletionModelName -> $CuCompletionDeploymentName on $ContentUnderstandingName)" -ForegroundColor Green
-        } else {
+        if (-not $cuDefaultsSet) {
             Write-Host "[ERROR] Failed to set Content Understanding defaults" -ForegroundColor Red
             if ($setResult.Error) { Write-Host "  $($setResult.Error)" -ForegroundColor Red }
             $script:DeploymentErrors.Add("Content Understanding defaults")
@@ -902,16 +960,21 @@ $newAssignments = 0
 
 # Key Vault access (RBAC)
 $KeyVaultId = (Invoke-AzCliSilent -Arguments @('keyvault','show','--name',$KeyVaultName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
-Write-Host "[INFO] Key Vault Secrets User role for function apps and web app" -ForegroundColor Cyan
-foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $WebAppIdentity)) {
-    if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Key Vault Secrets User' -Scope $KeyVaultId)) { $newAssignments++ }
+if (-not $KeyVaultId) {
+    Write-Host "[ERROR] Could not retrieve Key Vault resource ID for '$KeyVaultName'. RBAC assignments for Key Vault will be skipped." -ForegroundColor Red
+    $script:DeploymentErrors.Add("Key Vault RBAC: could not retrieve resource ID for $KeyVaultName")
+} else {
+    Write-Host "[INFO] Key Vault Secrets User role for function apps and web app" -ForegroundColor Cyan
+    foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $WebAppIdentity)) {
+        if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Key Vault Secrets User' -Scope $KeyVaultId)) { $newAssignments++ }
+    }
 }
 
 # Service Bus access
 $ServiceBusId = (Invoke-AzCliSilent -Arguments @('servicebus','namespace','show','--name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 
 Write-Host "[INFO] Service Bus roles for function apps" -ForegroundColor Cyan
-if (-not (Ensure-RoleAssignment -Assignee $MailboxIdentity -Role 'Azure Service Bus Data Owner' -Scope $ServiceBusId)) { $newAssignments++ }
+if (-not (Ensure-RoleAssignment -Assignee $MailboxIdentity -Role 'Azure Service Bus Data Sender' -Scope $ServiceBusId)) { $newAssignments++ }
 if (-not (Ensure-RoleAssignment -Assignee $QueueDbIdentity -Role 'Azure Service Bus Data Receiver' -Scope $ServiceBusId)) { $newAssignments++ }
 
 # Storage account access (managed identity for AzureWebJobsStorage)
@@ -1033,8 +1096,11 @@ $CosmosDbEndpoint = (Invoke-AzCliSilent -Arguments @('cosmosdb','show','--name',
 $ContentUnderstandingEndpoint = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','properties.endpoint','-o','tsv')).Output
 $AiFoundryEndpoint = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--query','properties.endpoint','-o','tsv')).Output
 
+$MailboxPollingSchedule = if ($env:MAILBOX_POLLING_SCHEDULE) { $env:MAILBOX_POLLING_SCHEDULE } else { "0 */5 * * * *" }
+
 $kvSecrets = @{
     "ServiceBusConnectionString" = $SbConn
+    "MailboxPollingSchedule"     = $MailboxPollingSchedule
     "KeyVaultUrl"                = $KvUrl
     "ServiceBusUrl"              = $SbUrl
     "ServiceBusTopicName"        = $ServiceBusTopicName
@@ -1083,23 +1149,34 @@ Write-Host "[INFO] Switching function apps to identity-based storage access" -Fo
 Invoke-AzCliSilent -Arguments @('functionapp','config','appsettings','delete','--name',$FuncMailboxName,'--resource-group',$ResourceGroupName,'--setting-names','AzureWebJobsStorage','--output','none') | Out-Null
 Invoke-AzCliSilent -Arguments @('functionapp','config','appsettings','delete','--name',$FuncQueueDbName,'--resource-group',$ResourceGroupName,'--setting-names','AzureWebJobsStorage','--output','none') | Out-Null
 
+# Note: FUNCTIONS_WORKER_RUNTIME and FUNCTIONS_EXTENSION_VERSION are managed by the platform
+# on Flex Consumption plans and must NOT be set as app settings.
 $mailboxSettings = @{
     "AzureWebJobsStorage__accountName" = $StorageAccountName
     "AZURE_KEY_VAULT_URL"              = $KvUrl
+    "MailboxPollingSchedule"           = "@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=MailboxPollingSchedule)"
 }
 $r1 = Set-FunctionAppSettings -FunctionAppName $FuncMailboxName -ResourceGroup $ResourceGroupName -Settings $mailboxSettings
 if ($r1.ExitCode -ne 0) {
     Write-Host "[ERROR] Failed to configure settings for $FuncMailboxName" -ForegroundColor Red
+    if ($r1.Error) { Write-Host "  $($r1.Error)" -ForegroundColor Red }
     $script:DeploymentErrors.Add("Function app settings: $FuncMailboxName")
 }
 
+$ServiceBusHostname = "$ServiceBusNamespace.servicebus.windows.net"
 $queueDbSettings = @{
-    "AzureWebJobsStorage__accountName"  = $StorageAccountName
-    "AZURE_KEY_VAULT_URL"               = $KvUrl
+    "AzureWebJobsStorage__accountName"          = $StorageAccountName
+    "AZURE_KEY_VAULT_URL"                       = $KvUrl
+    # Identity-based Service Bus connection for the @ServiceBusTopicTrigger binding
+    "ServiceBusConnection__fullyQualifiedNamespace" = $ServiceBusHostname
+    # Binding expressions used in the @ServiceBusTopicTrigger annotation
+    "ServiceBusTopicName"                       = $ServiceBusTopicName
+    "ServiceBusSubscriptionName"                = $ServiceBusSubName
 }
 $r2 = Set-FunctionAppSettings -FunctionAppName $FuncQueueDbName -ResourceGroup $ResourceGroupName -Settings $queueDbSettings
 if ($r2.ExitCode -ne 0) {
     Write-Host "[ERROR] Failed to configure settings for $FuncQueueDbName" -ForegroundColor Red
+    if ($r2.Error) { Write-Host "  $($r2.Error)" -ForegroundColor Red }
     $script:DeploymentErrors.Add("Function app settings: $FuncQueueDbName")
 }
 

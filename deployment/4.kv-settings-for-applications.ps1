@@ -37,7 +37,7 @@ $MailboxPollingSchedule = if ($env:MAILBOX_POLLING_SCHEDULE) { $env:MAILBOX_POLL
 # Add PollingMailboxName, but we can default to "Inbox" if not set, since that's a common scenario.
 $PollingMailboxName = if ($env:POLLING_MAILBOX_NAME) { $env:POLLING_MAILBOX_NAME } else { "Inbox" }
 # Add ReadMailboxForPastNSeconds, defaulting to 60 seconds if not set, which is a reasonable default for many scenarios.
-$ReadMailboxForPastNSeconds = if ($env:READ_MAILBOX_FOR_PAST_N_SECONDS) { $env:READ_MAILBOX_FOR_PAST_N_SECONDS } else { "60" }  
+$ReadMailboxForPastNSeconds = if ($env:READ_MAILBOX_FOR_PAST_N_SECONDS) { $env:READ_MAILBOX_FOR_PAST_N_SECONDS } else { "3600" }  
 
 # =============================================================================
 # HELPER FUNCTION

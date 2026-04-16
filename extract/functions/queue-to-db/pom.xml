@@ -5,19 +5,19 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.microsoft.azure.functions</groupId>
-    <artifactId>mailbox-to-queue</artifactId>
+    <artifactId>queue-to-db</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>
 
-    <name>Mailbox to Queue Function</name>
-    <description>Azure Function to poll email mailbox and send metadata to Service Bus</description>
+    <name>Queue to DB Function</name>
+    <description>Azure Function to read email metadata from Service Bus and store extracted data in Cosmos DB</description>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>21</maven.compiler.release>
         <azure.functions.maven.plugin.version>1.41.0</azure.functions.maven.plugin.version>
         <azure.functions.java.library.version>3.1.0</azure.functions.java.library.version>
-        <functionAppName>mailbox-to-queue-function</functionAppName>
+        <functionAppName>queue-to-db-function</functionAppName>
         <stagingDirectory>${project.build.directory}/azure-functions/${functionAppName}</stagingDirectory>
     </properties>
 
@@ -34,6 +34,13 @@
             <groupId>com.core</groupId>
             <artifactId>java-core</artifactId>
             <version>1.0-SNAPSHOT</version>
+        </dependency>
+
+        <!-- Microsoft Graph SDK for Java (must match java-core's v6 API) -->
+        <dependency>
+            <groupId>com.microsoft.graph</groupId>
+            <artifactId>microsoft-graph</artifactId>
+            <version>6.23.0</version>
         </dependency>
 
         <!-- Azure Service Bus -->
@@ -55,6 +62,19 @@
             <groupId>com.azure</groupId>
             <artifactId>azure-identity</artifactId>
             <version>1.13.2</version>
+        </dependency>
+
+        <!-- Azure Cosmos DB
+             Marked 'provided' so azure-functions-maven-plugin's Step 1 classpath
+             scan does NOT load Cosmos SDK's ~200 transitive JARs (Netty, Reactor,
+             Project Reactor Netty, …), which causes that step to hang indefinitely.
+             The maven-dependency-plugin execution below re-copies it + its
+             transitive closure into the staging lib dir so it is available at runtime. -->
+        <dependency>
+            <groupId>com.azure</groupId>
+            <artifactId>azure-cosmos</artifactId>
+            <version>4.60.0</version>
+            <scope>provided</scope>
         </dependency>
 
         <!-- Jackson for JSON processing -->
@@ -80,13 +100,6 @@
             <groupId>com.fasterxml.jackson.datatype</groupId>
             <artifactId>jackson-datatype-jsr310</artifactId>
             <version>2.16.1</version>
-        </dependency>
-
-        <!-- Microsoft Graph SDK for Java (must match java-core's v6 API) -->
-        <dependency>
-            <groupId>com.microsoft.graph</groupId>
-            <artifactId>microsoft-graph</artifactId>
-            <version>6.23.0</version>
         </dependency>
 
         <!-- SLF4J for logging -->
@@ -139,28 +152,18 @@
                  Retained for 'az functionapp deploy' / direct-deploy usage.
                  The package execution is REMOVED because its Step 1
                  (classpath reflection) hangs on large transitive dependency
-                 trees (microsoft-graph, etc).  function.json files are now
+                 trees (azure-cosmos, etc).  function.json files are now
                  source-controlled and copied by maven-resources-plugin. -->
             <plugin>
                 <groupId>com.microsoft.azure</groupId>
                 <artifactId>azure-functions-maven-plugin</artifactId>
                 <version>${azure.functions.maven.plugin.version}</version>
                 <configuration>
-                    <!-- function app name -->
                     <appName>${functionAppName}</appName>
-                    <!-- function app resource group -->
                     <resourceGroup>java-functions-group</resourceGroup>
-                    <!-- function app service plan name -->
                     <appServicePlanName>java-functions-app-service-plan</appServicePlanName>
-                    <!-- function app region -->
                     <region>westus2</region>
-                    <!-- function pricingTier, default to be consumption if not specified -->
-                    <!-- <pricingTier></pricingTier> -->
-
-                    <!-- Whether to disable application insights, default is false -->
-                    <!-- <disableAppInsights></disableAppInsights> -->
                     <runtime>
-                        <!-- runtime os, could be windows, linux or docker-->
                         <os>windows</os>
                         <javaVersion>21</javaVersion>
                     </runtime>
@@ -221,7 +224,7 @@
                                     <includes>
                                         <include>host.json</include>
                                         <include>local.settings.json</include>
-                                        <include>PollMailbox/function.json</include>
+                                        <include>ExtractMail/function.json</include>
                                     </includes>
                                 </resource>
                             </resources>
@@ -251,6 +254,22 @@
                             <excludeArtifactIds>azure-functions-java-library</excludeArtifactIds>
                         </configuration>
                     </execution>
+                    <execution>
+                        <!-- Copy azure-cosmos + its transitive deps to staging lib.
+                             azure-cosmos is 'provided' scope so azure-functions-maven-plugin
+                             skips it in Step 1 (avoiding the ~200-JAR reflection hang),
+                             but we still need it at runtime inside the function host. -->
+                        <id>copy-provided-cosmos-to-staging</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>copy-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${stagingDirectory}/lib</outputDirectory>
+                            <includeScope>provided</includeScope>
+                            <overWriteIfNewer>true</overWriteIfNewer>
+                        </configuration>
+                    </execution>
                 </executions>
             </plugin>
 
@@ -266,47 +285,6 @@
                     </filesets>
                 </configuration>
             </plugin>
-
-            <!-- Maven Surefire Plugin for running tests -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.2.2</version>
-                <configuration>
-                    <includes>
-                        <include>**/*Test.java</include>
-                        <include>**/*Tests.java</include>
-                    </includes>
-                </configuration>
-            </plugin>
         </plugins>
     </build>
-
-    <repositories>
-        <repository>
-            <id>maven.snapshots</id>
-            <name>Maven Central Snapshot Repository</name>
-            <url>https://oss.sonatype.org/content/repositories/snapshots/</url>
-            <releases>
-                <enabled>false</enabled>
-            </releases>
-            <snapshots>
-                <enabled>true</enabled>
-            </snapshots>
-        </repository>
-    </repositories>
-
-    <pluginRepositories>
-        <pluginRepository>
-            <id>maven.snapshots</id>
-            <name>Maven Central Snapshot Repository</name>
-            <url>https://oss.sonatype.org/content/repositories/snapshots/</url>
-            <releases>
-                <enabled>false</enabled>
-            </releases>
-            <snapshots>
-                <enabled>true</enabled>
-            </snapshots>
-        </pluginRepository>
-    </pluginRepositories>
 </project>
