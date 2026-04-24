@@ -1,0 +1,13 @@
+{
+  "description": "Image analyzer – extracts visual content, captions, and text from images (JPEG, PNG, TIFF, BMP, etc.)",
+  "baseAnalyzerId": "prebuilt-image",
+  "scenario": "image",
+  "fieldSchema": {
+    "fields": {
+      "Description": {
+        "type": "string",
+        "description": "A detailed description of the image content"
+      }
+    }
+  }
+}

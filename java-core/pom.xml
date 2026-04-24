@@ -54,6 +54,12 @@
             <artifactId>azure-messaging-servicebus</artifactId>
         </dependency>
 
+        <!-- Azure Blob Storage -->
+        <dependency>
+            <groupId>com.azure</groupId>
+            <artifactId>azure-storage-blob</artifactId>
+        </dependency>
+
         <!-- Azure OpenAI (AI Foundry / model chat completions) -->
         <dependency>
             <groupId>com.azure</groupId>
@@ -138,6 +144,9 @@
                     <argLine>-XX:+EnableDynamicAgentLoading</argLine>
                     <forkedProcessExitTimeoutInSeconds>5</forkedProcessExitTimeoutInSeconds>
                     <shutdown>kill</shutdown>
+                    <environmentVariables>
+                        <KEY_VAULT_URL>${key.vault.url}</KEY_VAULT_URL>
+                    </environmentVariables>
                 </configuration>
                 <executions>
                     <execution>

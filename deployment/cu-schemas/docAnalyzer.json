@@ -1,0 +1,5 @@
+{
+  "description": "Document analyzer – extracts text, structure, and key-value pairs from documents (PDF, DOCX, etc.)",
+  "baseAnalyzerId": "prebuilt-document",
+  "scenario": "document"
+}

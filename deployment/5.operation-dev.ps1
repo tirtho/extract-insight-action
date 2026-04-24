@@ -185,14 +185,17 @@ $storageNeedsUpdate = ($storageJson.publicNetworkAccess -ne 'Enabled' -or $stora
 Write-Host "[INFO] Checking Key Vault network rules: $KeyVaultName" -ForegroundColor Cyan
 $kvState = Invoke-AzCliSilent -Arguments @('keyvault','show','--name',$KeyVaultName,
     '--resource-group',$ResourceGroupName,
-    '--query','{publicNetworkAccess:properties.publicNetworkAccess, defaultAction:properties.networkAcls.defaultAction, bypass:properties.networkAcls.bypass, ipRules:properties.networkAcls.ipRules[].value}',
+    '--query','{publicNetworkAccess:properties.publicNetworkAccess, defaultAction:properties.networkAcls.defaultAction, bypass:properties.networkAcls.bypass}',
     '-o','json')
 $kvJson = $kvState.Output | ConvertFrom-Json
 $currentKvBypass = Normalize-Bypass $kvJson.bypass
 $desiredKvBypass = Normalize-Bypass 'AzureServices'
-$currentKvIps = if ($kvJson.ipRules) { ($kvJson.ipRules | Sort-Object -Unique) -join ',' } else { '' }
-$desiredKvIp = "$MyPublicIp/32"
-$kvNeedsUpdate = ($kvJson.publicNetworkAccess -ne 'Enabled' -or $kvJson.defaultAction -ne 'Deny' -or $currentKvBypass -ne $desiredKvBypass -or $currentKvIps -ne $desiredKvIp)
+# Allow-by-default: Flex Consumption function apps have dynamic outbound IPs that
+# cannot be predicted, and the AzureServices bypass does NOT cover App Service /
+# Functions Key Vault references or SDK calls.  Until VNet integration + private
+# endpoints are in place, the KV firewall must allow all networks.  Access is
+# still restricted by RBAC (Key Vault Secrets User role).
+$kvNeedsUpdate = ($kvJson.publicNetworkAccess -ne 'Enabled' -or $kvJson.defaultAction -ne 'Allow' -or $currentKvBypass -ne $desiredKvBypass)
 
 # --- Launch updates in parallel (these are the slow operations) ---
 $jobs = @()
@@ -230,32 +233,12 @@ if (-not $kvNeedsUpdate) {
 } else {
     Write-Host "  [INFO] Updating Key Vault network rules in background..." -ForegroundColor Cyan
     $jobs += Start-Job -Name 'KeyVault-Network' -ScriptBlock {
-        param($VaultName, $RG, $DesiredIp, $NeedDefaultUpdate, $NeedIpUpdate, $CurrentIps)
-        if ($NeedDefaultUpdate) {
-            az keyvault update --name $VaultName --resource-group $RG `
-                --public-network-access Enabled --default-action Deny `
-                --bypass AzureServices --output none 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "Key Vault default rules update failed" }
-        }
-        if ($NeedIpUpdate) {
-            # Remove stale IPs
-            if ($CurrentIps) {
-                foreach ($ip in ($CurrentIps -split ',')) {
-                    if ($ip -ne $DesiredIp) {
-                        az keyvault network-rule remove --name $VaultName --resource-group $RG --ip-address $ip --output none 2>&1 | Out-Null
-                    }
-                }
-            }
-            # Add laptop IP if not present
-            if (-not ($CurrentIps -and ($CurrentIps -split ',' | Where-Object { $_ -eq $DesiredIp }))) {
-                az keyvault network-rule add --name $VaultName --resource-group $RG --ip-address $DesiredIp --output none 2>&1 | Out-Null
-                if ($LASTEXITCODE -ne 0) { throw "Key Vault IP rule add failed" }
-            }
-        }
-    } -ArgumentList $KeyVaultName, $ResourceGroupName, $desiredKvIp, `
-        ($kvJson.publicNetworkAccess -ne 'Enabled' -or $kvJson.defaultAction -ne 'Deny' -or $currentKvBypass -ne $desiredKvBypass), `
-        ($currentKvIps -ne $desiredKvIp), `
-        $currentKvIps
+        param($VaultName, $RG)
+        az keyvault update --name $VaultName --resource-group $RG `
+            --public-network-access Enabled --default-action Allow `
+            --bypass AzureServices --output none 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Key Vault default rules update failed" }
+    } -ArgumentList $KeyVaultName, $ResourceGroupName
 }
 
 # --- Wait for all parallel jobs to complete ---

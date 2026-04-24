@@ -25,9 +25,15 @@ Prerequisites
 
 4. Run integration tests
 ------------------------
-  Either set the Key Vault URL as below, or run the 
-  ..\deployment\config.cmd (or .ps1 or .sh)
+  Option A: Pass Key Vault URL as a Maven argument (recommended)
+  mvn clean verify -Dgroups=integration -Dkey.vault.url=https://your-vault.vault.azure.net
+
+  Option B: Set the Key Vault URL as an environment variable
   set KEY_VAULT_URL=https://your-vault.vault.azure.net
+  mvn clean verify -Dgroups=integration
+
+  Option C: Run ..\deployment\1.config.ps1 (or .cmd or .sh) first,
+  which sets KEY_VAULT_URL from env.config, then run:
   mvn clean verify -Dgroups=integration
 
   Integration tests are run by the Failsafe plugin and require:
@@ -37,8 +43,7 @@ Prerequisites
 
 5. Run a specific integration test class
 -----------------------------------------
-  set KEY_VAULT_URL=https://your-vault.vault.azure.net
-  mvn clean verify -Dgroups=integration -Dit.test=AzContentUnderstandingIT
+  mvn clean verify -Dgroups=integration -Dkey.vault.url=https://your-vault.vault.azure.net -Dit.test=AzContentUnderstandingIT
 
 6. Package the JAR (skip tests)
 -------------------------------
@@ -61,8 +66,7 @@ Prerequisites
 
 9. Full build (unit tests + integration tests)
 -----------------------------------------------
-  set KEY_VAULT_URL=https://your-vault.vault.azure.net
-  mvn clean verify -Dgroups=integration
+  mvn clean verify -Dgroups=integration -Dkey.vault.url=https://your-vault.vault.azure.net
 
 10. Debug integration tests (attach VS Code debugger)
 ------------------------------------------------------
@@ -79,8 +83,7 @@ Prerequisites
             }
         ]
         }
-  - set KEY_VAULT_URL=https://your-vault.vault.azure.net
-  - mvn verify -Dgroups=integration "-Dmaven.failsafe.debug=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005"
+  - mvn verify -Dgroups=integration -Dkey.vault.url=https://your-vault.vault.azure.net "-Dmaven.failsafe.debug=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005"
 
   Then attach VS Code with a "Java Attach" launch config on port 5005.
 

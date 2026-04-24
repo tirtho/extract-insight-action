@@ -77,6 +77,17 @@
             <scope>provided</scope>
         </dependency>
 
+        <!-- Azure Blob Storage
+             Marked 'provided' for the same reason as azure-cosmos: the extra
+             JARs cause the Flex Consumption deployment validator to reject the
+             package (status 5/6). Copied to staging by maven-dependency-plugin. -->
+        <dependency>
+            <groupId>com.azure</groupId>
+            <artifactId>azure-storage-blob</artifactId>
+            <version>12.29.0</version>
+            <scope>provided</scope>
+        </dependency>
+
         <!-- Jackson for JSON processing -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>

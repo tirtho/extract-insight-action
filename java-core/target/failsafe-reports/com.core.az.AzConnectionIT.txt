@@ -1,4 +1,0 @@
--------------------------------------------------------------------------------
-Test set: com.core.az.AzConnectionIT
--------------------------------------------------------------------------------
-Tests run: 9, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 22.31 s -- in com.core.az.AzConnectionIT

@@ -28,9 +28,12 @@ public class AzEnvNames {
     public static final String KV_COSMOS_DB_CONTAINER_NAME = "CosmosDbContainerName";
     public static final String KV_CONTENT_UNDERSTANDING_ENDPOINT = "ContentUnderstandingEndpoint";
     public static final String KV_CONTENT_UNDERSTANDING_COMPLETION_MODEL = "ContentUnderstandingCompletionModel";
+    public static final String KV_CONTENT_UNDERSTANDING_ANALYZERS = "ContentUnderstandingAnalyzers";
     public static final String KV_AI_FOUNDRY_ENDPOINT = "AiFoundryEndpoint";
     public static final String KV_AI_FOUNDRY_DEPLOYMENT_NAME = "AiFoundryDeploymentName";
     public static final String KV_AI_FOUNDRY_MODEL_NAME = "AiFoundryModelName";
     public static final String KV_AI_FOUNDRY_API_VERSION = "AiFoundryApiVersion";
+    public static final String KV_STORAGE_ENDPOINT = "StorageEndpoint";
+    public static final String KV_STORAGE_CONTAINER_NAME = "StorageContainerName";
 
 }

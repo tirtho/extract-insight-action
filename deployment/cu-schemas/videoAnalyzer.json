@@ -1,0 +1,5 @@
+{
+  "description": "Video analyzer – extracts scenes, transcripts, and visual content from video files (MP4, MOV, AVI, etc.)",
+  "baseAnalyzerId": "prebuilt-video",
+  "scenario": "video"
+}

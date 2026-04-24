@@ -1,0 +1,5 @@
+{
+  "description": "Audio analyzer – transcribes and extracts insights from audio files (WAV, MP3, OGG, FLAC, etc.)",
+  "baseAnalyzerId": "prebuilt-audio",
+  "scenario": "audio"
+}

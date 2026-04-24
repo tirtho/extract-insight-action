@@ -401,6 +401,33 @@ Invoke-AzCli -Description "Disabling file share soft-delete" `
                  '--output','none')
 Write-Host "[SUCCESS] Soft-delete disabled on storage account" -ForegroundColor Green
 
+# Derive container name from USER_EMAIL_ADDRESS (username part, lowercased, alphanumeric+hyphens)
+$UserEmail = if ($env:USER_EMAIL_ADDRESS) { $env:USER_EMAIL_ADDRESS } else { "" }
+if (-not $UserEmail) {
+    Write-Host "[WARNING] USER_EMAIL_ADDRESS is not set – skipping storage container creation" -ForegroundColor Yellow
+} else {
+    # Extract username part (before @), lowercase, replace invalid chars with hyphens
+    $StorageContainerName = ($UserEmail.Split('@')[0]).ToLower() -replace '[^a-z0-9-]', '-' -replace '-+', '-' -replace '^-|-$', ''
+    Write-Host "[INFO] Storage container name derived from email: $StorageContainerName" -ForegroundColor Cyan
+
+    # Get the blob endpoint
+    $StorageBlobEndpoint = (Invoke-AzCliSilent -Arguments @('storage','account','show','--name',$StorageAccountName,'--resource-group',$ResourceGroupName,'--query','primaryEndpoints.blob','-o','tsv')).Output
+    Write-Host "[INFO] Storage blob endpoint: $StorageBlobEndpoint" -ForegroundColor Cyan
+
+    # Create the container (idempotent – skip if exists)
+    $existing = Invoke-AzCliSilent -Arguments @('storage','container','show','--name',$StorageContainerName,'--account-name',$StorageAccountName,'--auth-mode','login','--query','name','-o','tsv')
+    if ($existing.ExitCode -eq 0 -and $existing.Output) {
+        Write-Host "[WARNING] Storage container '$StorageContainerName' already exists, skipping" -ForegroundColor Yellow
+    } else {
+        $r = Invoke-AzCli -Description "Creating storage container: $StorageContainerName" `
+            -Arguments @('storage','container','create','--name',$StorageContainerName,
+                         '--account-name',$StorageAccountName,'--auth-mode','login','--output','none')
+        if ($null -ne $r) {
+            Write-Host "[SUCCESS] Storage container '$StorageContainerName' created" -ForegroundColor Green
+        }
+    }
+}
+
 # =============================================================================
 # STEP 3: Key Vault
 # =============================================================================
@@ -987,6 +1014,12 @@ foreach ($identity in @($MailboxIdentity, $QueueDbIdentity)) {
     }
 }
 
+# Admin user needs blob access for container creation and direct blob operations
+if ($CurrentUserId) {
+    Write-Host "[INFO] Storage Blob Data Contributor for admin user" -ForegroundColor Cyan
+    if (-not (Ensure-RoleAssignment -Assignee $CurrentUserId -Role 'Storage Blob Data Contributor' -Scope $StorageAccountId)) { $newAssignments++ }
+}
+
 # Content Understanding needs to read blobs from Storage when given a blob URL
 if ($CuIdentity) {
     Write-Host "[INFO] Storage Blob Data Reader for Content Understanding" -ForegroundColor Cyan
@@ -1119,6 +1152,8 @@ $kvSecrets = @{
     "AiFoundryDeploymentName"               = $AiFoundryDeploymentName
     "AiFoundryModelName"                    = $AiFoundryModelName
     "AiFoundryApiVersion"                   = $AiFoundryApiVersion
+    "StorageEndpoint"                       = $StorageBlobEndpoint
+    "StorageContainerName"                  = $StorageContainerName
 }
 foreach ($entry in $kvSecrets.GetEnumerator()) {
     if (-not $entry.Value) {

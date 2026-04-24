@@ -13,6 +13,9 @@ import com.azure.messaging.servicebus.ServiceBusReceiverClient;
 import com.azure.messaging.servicebus.models.ServiceBusReceiveMode;
 import com.azure.security.keyvault.secrets.SecretClient;
 import com.azure.security.keyvault.secrets.SecretClientBuilder;
+import com.azure.storage.blob.BlobContainerClient;
+import com.azure.storage.blob.BlobServiceClient;
+import com.azure.storage.blob.BlobServiceClientBuilder;
 import com.azure.ai.openai.OpenAIClient;
 import com.azure.ai.openai.OpenAIClientBuilder;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
@@ -43,6 +46,7 @@ public class AzConnection implements AutoCloseable {
     private HttpClient contentUnderstandingHttpClient;
     private ClientSecretCredential graphCredential;
     private GraphServiceClient graphClient;
+    private BlobContainerClient blobContainerClient;
 
     /**
      * Constructs a new AzConnection using DefaultAzureCredential (Managed Identity).
@@ -306,6 +310,36 @@ public class AzConnection implements AutoCloseable {
         return graphClient;
     }
 
+    /**
+     * Creates a Azure Storage Blob Container client for the configured mailbox container.
+     * This is using managed Identity authentication against the Storage account endpoint.
+     * Using the latest Azure Storage SDK which supports token credentials. 
+     * The Storage account endpoint is obtained from Key Vault, 
+     * and the container name is also obtained from Key Vault.
+     * The Storage account endpoint key name is from AzEnvNames.KV_STORAGE_ENDPOINT
+     * The corresponding value in Key Vault should be the Storage account Blob service 
+     * endpoint, e.g. "https://{accountName}.blob.core.windows.net". 
+     * The container name key in Key Vault is AzEnvNames.KV_STORAGE_CONTAINER_NAME, 
+     * and the value should be the name of the container to use for data read/write.
+     */
+    public BlobContainerClient getStorageBlobContainerClient() {
+        if (blobContainerClient == null) {
+            LOG.info("Creating BlobContainerClient");
+            String endpoint = getSecret(AzEnvNames.KV_STORAGE_ENDPOINT);
+            String containerName = getSecret(AzEnvNames.KV_STORAGE_CONTAINER_NAME);
+
+            BlobServiceClient blobServiceClient = new BlobServiceClientBuilder()
+                    .endpoint(endpoint)
+                    .credential(defaultCredential)
+                    .buildClient();
+
+            blobContainerClient = blobServiceClient.getBlobContainerClient(containerName);
+            LOG.info("BlobContainerClient created – endpoint: {}, container: {}", endpoint, containerName);
+        }
+        return blobContainerClient;
+    }
+
+
     // ---------------------------------------------------------------
     //  Resource cleanup
     // ---------------------------------------------------------------
@@ -347,6 +381,8 @@ public class AzConnection implements AutoCloseable {
         // GraphServiceClient and ClientSecretCredential do not implement Closeable
         graphClient = null;
         graphCredential = null;
+        // BlobContainerClient does not implement Closeable; release the reference
+        blobContainerClient = null;
         if (contentUnderstandingHttpClient != null) {
             try {
                 contentUnderstandingHttpClient.close();
