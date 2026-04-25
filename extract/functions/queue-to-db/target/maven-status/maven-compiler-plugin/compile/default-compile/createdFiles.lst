@@ -1,1 +1,6 @@
+com\microsoft\azure\functions\mailbox\model\EmailData.class
+com\microsoft\azure\functions\mailbox\model\AttachmentInfo.class
 com\microsoft\azure\functions\mailbox\ExtractMail.class
+com\microsoft\azure\functions\mailbox\model\AttachmentResult.class
+com\microsoft\azure\functions\mailbox\model\StoreDocumentInput.class
+com\microsoft\azure\functions\mailbox\model\ProcessAttachmentInput.class

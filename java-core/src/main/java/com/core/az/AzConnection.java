@@ -16,6 +16,8 @@ import com.azure.security.keyvault.secrets.SecretClientBuilder;
 import com.azure.storage.blob.BlobContainerClient;
 import com.azure.storage.blob.BlobServiceClient;
 import com.azure.storage.blob.BlobServiceClientBuilder;
+import com.azure.storage.queue.QueueClient;
+import com.azure.storage.queue.QueueClientBuilder;
 import com.azure.ai.openai.OpenAIClient;
 import com.azure.ai.openai.OpenAIClientBuilder;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
@@ -47,6 +49,7 @@ public class AzConnection implements AutoCloseable {
     private ClientSecretCredential graphCredential;
     private GraphServiceClient graphClient;
     private BlobContainerClient blobContainerClient;
+    private QueueClient queueClient;
 
     /**
      * Constructs a new AzConnection using DefaultAzureCredential (Managed Identity).
@@ -340,6 +343,30 @@ public class AzConnection implements AutoCloseable {
     }
 
 
+    /**
+     * Returns an authenticated {@link QueueClient} for the Storage Queue
+     * configured in Key Vault (keys {@code StorageEndpoint} and {@code StorageQueueName}).
+     *
+     * <p>The queue endpoint is derived from the blob endpoint by replacing
+     * ".blob." with ".queue.". Uses DefaultAzureCredential (Managed Identity).</p>
+     */
+    public QueueClient getStorageQueueClient() {
+        if (queueClient == null) {
+            LOG.info("Creating QueueClient");
+            String blobEndpoint = getSecret(AzEnvNames.KV_STORAGE_ENDPOINT);
+            String queueEndpoint = blobEndpoint.replace(".blob.", ".queue.");
+            String queueName = getSecret(AzEnvNames.KV_STORAGE_QUEUE_NAME);
+
+            queueClient = new QueueClientBuilder()
+                    .endpoint(queueEndpoint)
+                    .queueName(queueName)
+                    .credential(defaultCredential)
+                    .buildClient();
+            LOG.info("QueueClient created \u2013 endpoint: {}, queue: {}", queueEndpoint, queueName);
+        }
+        return queueClient;
+    }
+
     // ---------------------------------------------------------------
     //  Resource cleanup
     // ---------------------------------------------------------------
@@ -383,6 +410,8 @@ public class AzConnection implements AutoCloseable {
         graphCredential = null;
         // BlobContainerClient does not implement Closeable; release the reference
         blobContainerClient = null;
+        // QueueClient does not implement Closeable; release the reference
+        queueClient = null;
         if (contentUnderstandingHttpClient != null) {
             try {
                 contentUnderstandingHttpClient.close();

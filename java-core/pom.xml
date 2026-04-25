@@ -60,6 +60,12 @@
             <artifactId>azure-storage-blob</artifactId>
         </dependency>
 
+        <!-- Azure Queue Storage -->
+        <dependency>
+            <groupId>com.azure</groupId>
+            <artifactId>azure-storage-queue</artifactId>
+        </dependency>
+
         <!-- Azure OpenAI (AI Foundry / model chat completions) -->
         <dependency>
             <groupId>com.azure</groupId>

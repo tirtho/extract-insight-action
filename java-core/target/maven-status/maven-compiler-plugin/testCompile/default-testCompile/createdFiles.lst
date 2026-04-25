@@ -1,5 +1,6 @@
 com\core\az\AzContentUnderstandingTest.class
-com\core\az\AzConnectionTest.class
+com\core\az\AzStorageQueueIT$1.class
+com\core\az\AzStorageQueueTest.class
 com\core\az\AzContentUnderstandingIT.class
 com\core\az\AzStorageBlobTest.class
 com\core\az\AzContentUnderstandingIT$1.class
@@ -7,3 +8,5 @@ com\core\az\AzConnectionIT.class
 com\core\az\AzConnectionIT$1.class
 com\core\az\AzStorageBlobIT$1.class
 com\core\az\AzStorageBlobIT.class
+com\core\az\AzStorageQueueIT.class
+com\core\az\AzConnectionTest.class

@@ -36,6 +36,7 @@ $ProjClean            = $ProjectName -replace '-',''
 $StorageAccountName   = if ($env:STORAGE_ACCOUNT_NAME)      { $env:STORAGE_ACCOUNT_NAME }      else { "st$ProjClean$Environment$Suffix" }
 $FuncMailboxName      = if ($env:FUNCTION_APP_MAILBOX_NAME) { $env:FUNCTION_APP_MAILBOX_NAME } else { "func-mailbox-$ProjectName-$Environment-$Suffix" }
 $FuncQueueDbName      = if ($env:FUNCTION_APP_QUEUE_DB_NAME){ $env:FUNCTION_APP_QUEUE_DB_NAME }else { "func-queuedb-$ProjectName-$Environment-$Suffix" }
+$FuncCuQueueDbName    = if ($env:FUNCTION_APP_CU_QUEUE_DB_NAME){ $env:FUNCTION_APP_CU_QUEUE_DB_NAME }else { "func-cuqueuedb-$ProjectName-$Environment-$Suffix" }
 $ServiceBusTopicName  = if ($env:SERVICE_BUS_TOPIC_NAME)    { $env:SERVICE_BUS_TOPIC_NAME }    else { "email-processing" }
 $ServiceBusSubName    = if ($env:SERVICE_BUS_SUBSCRIPTION_NAME) { $env:SERVICE_BUS_SUBSCRIPTION_NAME } else { "email-processor" }
 $GraphAppName         = if ($env:GRAPH_APP_NAME)            { $env:GRAPH_APP_NAME }            else { "$ProjectName-graph-api-$Environment" }
@@ -43,6 +44,8 @@ $GraphClientId        = $env:GRAPH_CLIENT_ID
 $GraphClientSecret    = $env:GRAPH_CLIENT_SECRET
 $AppInsightsName      = if ($env:APP_INSIGHTS_NAME)         { $env:APP_INSIGHTS_NAME }         else { "ai-$ProjectName-$Environment" }
 $CosmosDbAccountName  = if ($env:COSMOS_DB_ACCOUNT_NAME)    { $env:COSMOS_DB_ACCOUNT_NAME }    else { "cosmos-$ProjectName-$Environment-$Suffix" }
+$StorageQueueName     = if ($env:STORAGE_QUEUE_NAME)        { $env:STORAGE_QUEUE_NAME }        else { "cu-analyze-ops-$ProjectName-$Environment-$Suffix" }
+$StorageQueuePollingSchedule = if ($env:STORAGE_QUEUE_POLLING_SCHEDULE) { $env:STORAGE_QUEUE_POLLING_SCHEDULE } else { "0 */1 * * * *" }
 $CosmosDbDatabaseName = "DocAIDatabase"
 $CosmosDbContainerName = "EmailExtracts"
 $AppServicePlanName   = if ($env:APP_SERVICE_PLAN_NAME)     { $env:APP_SERVICE_PLAN_NAME }     else { "plan-$ProjectName-$Environment" }
@@ -425,6 +428,20 @@ if (-not $UserEmail) {
         if ($null -ne $r) {
             Write-Host "[SUCCESS] Storage container '$StorageContainerName' created" -ForegroundColor Green
         }
+    }
+}
+
+# Create the storage queue (idempotent – skip if exists)
+Write-Host "[INFO] Creating storage queue: $StorageQueueName" -ForegroundColor Cyan
+$existingQueue = Invoke-AzCliSilent -Arguments @('storage','queue','show','--name',$StorageQueueName,'--account-name',$StorageAccountName,'--auth-mode','login','--query','name','-o','tsv')
+if ($existingQueue.ExitCode -eq 0 -and $existingQueue.Output) {
+    Write-Host "[WARNING] Storage queue '$StorageQueueName' already exists, skipping" -ForegroundColor Yellow
+} else {
+    $r = Invoke-AzCli -Description "Creating storage queue: $StorageQueueName" `
+        -Arguments @('storage','queue','create','--name',$StorageQueueName,
+                     '--account-name',$StorageAccountName,'--auth-mode','login','--output','none')
+    if ($null -ne $r) {
+        Write-Host "[SUCCESS] Storage queue '$StorageQueueName' created" -ForegroundColor Green
     }
 }
 
@@ -908,6 +925,19 @@ if (Test-AzResource -Arguments @('functionapp','show','--name',$FuncQueueDbName,
     }
 }
 
+# CU-Queue-to-DB function
+if (Test-AzResource -Arguments @('functionapp','show','--name',$FuncCuQueueDbName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')) {
+    Write-Host "[WARNING] Function app $FuncCuQueueDbName already exists, skipping" -ForegroundColor Yellow
+} else {
+    $result = Invoke-AzCli -Description "Creating function app: $FuncCuQueueDbName" `
+        -Arguments (@('functionapp','create','--name',$FuncCuQueueDbName) + $CommonFuncArgs + @(
+                     '--tags',"project=$ProjectName","environment=$Environment","function=cu-queue-to-db",
+                     '--output','table'))
+    if ($result -ne $null) {
+        Write-Host "[SUCCESS] Function app $FuncCuQueueDbName created" -ForegroundColor Green
+    }
+}
+
 # =============================================================================
 # STEP 12/12: Managed Identities & RBAC
 # =============================================================================
@@ -917,12 +947,14 @@ Write-Host ">>> Step 12/12: Managed Identities & RBAC" -ForegroundColor White
 # Verify function apps and web app exist before proceeding
 $MailboxExists = Test-AzResource -Arguments @('functionapp','show','--name',$FuncMailboxName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
 $QueueDbExists = Test-AzResource -Arguments @('functionapp','show','--name',$FuncQueueDbName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
+$CuQueueDbExists = Test-AzResource -Arguments @('functionapp','show','--name',$FuncCuQueueDbName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
 $WebAppExists  = Test-AzResource -Arguments @('webapp','show','--name',$WebAppName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
 
-if (-not $MailboxExists -or -not $QueueDbExists) {
-    Write-Host "[ERROR] One or both function apps do not exist. Cannot configure managed identities." -ForegroundColor Red
+if (-not $MailboxExists -or -not $QueueDbExists -or -not $CuQueueDbExists) {
+    Write-Host "[ERROR] One or more function apps do not exist. Cannot configure managed identities." -ForegroundColor Red
     if (-not $MailboxExists) { Write-Host "  Missing: $FuncMailboxName" -ForegroundColor Red }
     if (-not $QueueDbExists) { Write-Host "  Missing: $FuncQueueDbName" -ForegroundColor Red }
+    if (-not $CuQueueDbExists) { Write-Host "  Missing: $FuncCuQueueDbName" -ForegroundColor Red }
     Write-Host "[ERROR] Please fix the function app creation errors above and re-run the script." -ForegroundColor Red
     exit 1
 }
@@ -953,6 +985,16 @@ if ($QueueDbIdentity) {
     Write-Host "[SUCCESS] Managed identity enabled for $FuncQueueDbName" -ForegroundColor Green
 }
 
+$CuQueueDbIdentity = (Invoke-AzCliSilent -Arguments @('functionapp','identity','show','--name',$FuncCuQueueDbName,'--resource-group',$ResourceGroupName,'--query','principalId','-o','tsv')).Output
+if ($CuQueueDbIdentity) {
+    Write-Host "[OK] Managed identity already enabled for $FuncCuQueueDbName" -ForegroundColor Green
+} else {
+    Write-Host "[INFO] Enabling managed identity for $FuncCuQueueDbName" -ForegroundColor Cyan
+    Invoke-AzCliSilent -Arguments @('functionapp','identity','assign','--name',$FuncCuQueueDbName,'--resource-group',$ResourceGroupName,'--output','none') | Out-Null
+    $CuQueueDbIdentity = (Invoke-AzCliSilent -Arguments @('functionapp','identity','show','--name',$FuncCuQueueDbName,'--resource-group',$ResourceGroupName,'--query','principalId','-o','tsv')).Output
+    Write-Host "[SUCCESS] Managed identity enabled for $FuncCuQueueDbName" -ForegroundColor Green
+}
+
 $WebAppIdentity = (Invoke-AzCliSilent -Arguments @('webapp','identity','show','--name',$WebAppName,'--resource-group',$ResourceGroupName,'--query','principalId','-o','tsv')).Output
 if ($WebAppIdentity) {
     Write-Host "[OK] Managed identity already enabled for $WebAppName" -ForegroundColor Green
@@ -978,7 +1020,7 @@ if ($CuIdentity) {
     }
 }
 
-if (-not $MailboxIdentity -or -not $QueueDbIdentity -or -not $WebAppIdentity) {
+if (-not $MailboxIdentity -or -not $QueueDbIdentity -or -not $CuQueueDbIdentity -or -not $WebAppIdentity) {
     Write-Host "[ERROR] Failed to retrieve managed identity principal IDs. Cannot assign RBAC." -ForegroundColor Red
     exit 1
 }
@@ -992,7 +1034,7 @@ if (-not $KeyVaultId) {
     $script:DeploymentErrors.Add("Key Vault RBAC: could not retrieve resource ID for $KeyVaultName")
 } else {
     Write-Host "[INFO] Key Vault Secrets User role for function apps and web app" -ForegroundColor Cyan
-    foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $WebAppIdentity)) {
+    foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, $WebAppIdentity)) {
         if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Key Vault Secrets User' -Scope $KeyVaultId)) { $newAssignments++ }
     }
 }
@@ -1003,12 +1045,13 @@ $ServiceBusId = (Invoke-AzCliSilent -Arguments @('servicebus','namespace','show'
 Write-Host "[INFO] Service Bus roles for function apps" -ForegroundColor Cyan
 if (-not (Ensure-RoleAssignment -Assignee $MailboxIdentity -Role 'Azure Service Bus Data Sender' -Scope $ServiceBusId)) { $newAssignments++ }
 if (-not (Ensure-RoleAssignment -Assignee $QueueDbIdentity -Role 'Azure Service Bus Data Receiver' -Scope $ServiceBusId)) { $newAssignments++ }
+if (-not (Ensure-RoleAssignment -Assignee $CuQueueDbIdentity -Role 'Azure Service Bus Data Receiver' -Scope $ServiceBusId)) { $newAssignments++ }
 
 # Storage account access (managed identity for AzureWebJobsStorage)
 $StorageAccountId = (Invoke-AzCliSilent -Arguments @('storage','account','show','--name',$StorageAccountName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 
 Write-Host "[INFO] Storage account roles for function apps" -ForegroundColor Cyan
-foreach ($identity in @($MailboxIdentity, $QueueDbIdentity)) {
+foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity)) {
     foreach ($role in @('Storage Blob Data Owner','Storage Account Contributor','Storage Queue Data Contributor','Storage Table Data Contributor')) {
         if (-not (Ensure-RoleAssignment -Assignee $identity -Role $role -Scope $StorageAccountId)) { $newAssignments++ }
     }
@@ -1031,7 +1074,7 @@ $CosmosDbAccountId = (Invoke-AzCliSilent -Arguments @('cosmosdb','show','--name'
 $CosmosDataContributorRoleId = "00000000-0000-0000-0000-000000000002"
 
 Write-Host "[INFO] Cosmos DB Data Contributor role for function apps and web app" -ForegroundColor Cyan
-foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $WebAppIdentity)) {
+foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, $WebAppIdentity)) {
     if (-not (Ensure-CosmosRoleAssignment -AccountName $CosmosDbAccountName -ResourceGroup $ResourceGroupName -RoleDefinitionId $CosmosDataContributorRoleId -PrincipalId $identity -Scope $CosmosDbAccountId)) { $newAssignments++ }
 }
 
@@ -1039,7 +1082,7 @@ foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $WebAppIdentity)) {
 $ContentUnderstandingId = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 
 Write-Host "[INFO] Cognitive Services User role for function apps and web app" -ForegroundColor Cyan
-foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $WebAppIdentity)) {
+foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, $WebAppIdentity)) {
     if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Cognitive Services User' -Scope $ContentUnderstandingId)) { $newAssignments++ }
 }
 
@@ -1047,7 +1090,7 @@ foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $WebAppIdentity)) {
 $AiFoundryId = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 
 Write-Host "[INFO] Cognitive Services OpenAI User role for function apps and web app" -ForegroundColor Cyan
-foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $WebAppIdentity)) {
+foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, $WebAppIdentity)) {
     if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Cognitive Services OpenAI User' -Scope $AiFoundryId)) { $newAssignments++ }
 }
 
@@ -1141,8 +1184,6 @@ $kvSecrets = @{
     "GraphClientId"              = $GraphClientId
     "GraphClientSecret"          = $GraphClientSecret
     "GraphTenantId"              = $TenantId
-    "MailboxFunctionAppName"     = $FuncMailboxName
-    "QueueDbFunctionAppName"     = $FuncQueueDbName
     "CosmosDbEndpoint"           = $CosmosDbEndpoint
     "CosmosDbDatabaseName"       = $CosmosDbDatabaseName
     "CosmosDbContainerName"               = $CosmosDbContainerName
@@ -1154,6 +1195,8 @@ $kvSecrets = @{
     "AiFoundryApiVersion"                   = $AiFoundryApiVersion
     "StorageEndpoint"                       = $StorageBlobEndpoint
     "StorageContainerName"                  = $StorageContainerName
+    "StorageQueueName"                      = $StorageQueueName
+    "StorageQueuePollingSchedule"            = $StorageQueuePollingSchedule
 }
 foreach ($entry in $kvSecrets.GetEnumerator()) {
     if (-not $entry.Value) {
@@ -1179,10 +1222,47 @@ if ($script:DeploymentErrors.Count -eq 0) {
 # =============================================================================
 Write-Host "[INFO] Configuring Function App settings..." -ForegroundColor Cyan
 
-# Remove the auto-set AzureWebJobsStorage connection string and switch to identity-based storage
-Write-Host "[INFO] Switching function apps to identity-based storage access" -ForegroundColor Cyan
-Invoke-AzCliSilent -Arguments @('functionapp','config','appsettings','delete','--name',$FuncMailboxName,'--resource-group',$ResourceGroupName,'--setting-names','AzureWebJobsStorage','--output','none') | Out-Null
-Invoke-AzCliSilent -Arguments @('functionapp','config','appsettings','delete','--name',$FuncQueueDbName,'--resource-group',$ResourceGroupName,'--setting-names','AzureWebJobsStorage','--output','none') | Out-Null
+# Switch function apps from key-based to identity-based storage access.
+# The platform auto-provisions AzureWebJobsStorage (connection string) and
+# DEPLOYMENT_STORAGE_CONNECTION_STRING (account key) at creation time, but the
+# storage account has allowSharedKeyAccess=false.  We must:
+#   1. Delete the key-based AzureWebJobsStorage and DEPLOYMENT_STORAGE_CONNECTION_STRING app settings
+#   2. Update functionAppConfig.deployment.storage.authentication to SystemAssignedIdentity via ARM
+Write-Host "[INFO] Switching function apps to identity-based storage (runtime + deployment)" -ForegroundColor Cyan
+foreach ($funcName in @($FuncMailboxName, $FuncQueueDbName, $FuncCuQueueDbName)) {
+    # Remove key-based app settings (idempotent — silently succeeds if already absent)
+    Invoke-AzCliSilent -Arguments @('functionapp','config','appsettings','delete','--name',$funcName,'--resource-group',$ResourceGroupName,'--setting-names','AzureWebJobsStorage','DEPLOYMENT_STORAGE_CONNECTION_STRING','--output','none') | Out-Null
+
+    # Ensure deployment storage uses SystemAssignedIdentity (not StorageAccountConnectionString)
+    $siteJson = Invoke-AzCliSilent -Arguments @('rest','--method','GET',
+        '--url',"/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/$funcName`?api-version=2024-04-01",
+        '-o','json')
+    if ($siteJson.ExitCode -ne 0) {
+        Write-Host "[WARNING] Could not read site config for $funcName – skipping deployment storage switch" -ForegroundColor Yellow
+        continue
+    }
+    $site = $siteJson.Output | ConvertFrom-Json
+    $currentAuth = $site.properties.functionAppConfig.deployment.storage.authentication.type
+    if ($currentAuth -eq 'SystemAssignedIdentity') {
+        Write-Host "[OK] Already identity-based for $funcName" -ForegroundColor Green
+        continue
+    }
+    $site.properties.functionAppConfig.deployment.storage.authentication.type = 'SystemAssignedIdentity'
+    $site.properties.functionAppConfig.deployment.storage.authentication.storageAccountConnectionStringName = $null
+    $patchBody = $site | ConvertTo-Json -Depth 20 -Compress
+    $patchFile = [System.IO.Path]::GetTempFileName()
+    [System.IO.File]::WriteAllText($patchFile, $patchBody, [System.Text.Encoding]::UTF8)
+    $patchResult = Invoke-AzCliSilent -Arguments @('rest','--method','PUT',
+        '--url',"/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/$funcName`?api-version=2024-04-01",
+        '--body',"@$patchFile",'--output','none')
+    Remove-Item $patchFile -Force -ErrorAction SilentlyContinue
+    if ($patchResult.ExitCode -ne 0) {
+        Write-Host "[ERROR] Failed to switch deployment storage for $funcName" -ForegroundColor Red
+        $script:DeploymentErrors.Add("Deployment storage: $funcName")
+    } else {
+        Write-Host "[SUCCESS] Switched to identity-based for $funcName" -ForegroundColor Green
+    }
+}
 
 # Note: FUNCTIONS_WORKER_RUNTIME and FUNCTIONS_EXTENSION_VERSION are managed by the platform
 # on Flex Consumption plans and must NOT be set as app settings.
@@ -1213,6 +1293,18 @@ if ($r2.ExitCode -ne 0) {
     Write-Host "[ERROR] Failed to configure settings for $FuncQueueDbName" -ForegroundColor Red
     if ($r2.Error) { Write-Host "  $($r2.Error)" -ForegroundColor Red }
     $script:DeploymentErrors.Add("Function app settings: $FuncQueueDbName")
+}
+
+$cuQueueDbSettings = @{
+    "AzureWebJobsStorage__accountName"          = $StorageAccountName
+    "AZURE_KEY_VAULT_URL"                       = $KvUrl
+    "StorageQueuePollingSchedule"               = "@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=StorageQueuePollingSchedule)"
+}
+$r3cu = Set-FunctionAppSettings -FunctionAppName $FuncCuQueueDbName -ResourceGroup $ResourceGroupName -Settings $cuQueueDbSettings
+if ($r3cu.ExitCode -ne 0) {
+    Write-Host "[ERROR] Failed to configure settings for $FuncCuQueueDbName" -ForegroundColor Red
+    if ($r3cu.Error) { Write-Host "  $($r3cu.Error)" -ForegroundColor Red }
+    $script:DeploymentErrors.Add("Function app settings: $FuncCuQueueDbName")
 }
 
 Write-Host "[SUCCESS] Function App settings configured" -ForegroundColor Green
@@ -1246,6 +1338,18 @@ if ($r3.ExitCode -ne 0) {
 }
 
 # =============================================================================
+# Cleanup: remove the temporary deployment-test secret used for KV access validation
+# =============================================================================
+Write-Host "[INFO] Cleaning up temporary Key Vault secrets..." -ForegroundColor Cyan
+$delResult = Invoke-AzCliSilent -Arguments @('keyvault','secret','delete','--vault-name',$KeyVaultName,'--name','deployment-test','--output','none')
+if ($delResult.ExitCode -eq 0) {
+    # Wait briefly, then purge so it doesn't linger in soft-delete
+    Start-Sleep -Seconds 5
+    Invoke-AzCliSilent -Arguments @('keyvault','secret','purge','--vault-name',$KeyVaultName,'--name','deployment-test','--output','none') | Out-Null
+    Write-Host "[OK] Temporary secret 'deployment-test' removed" -ForegroundColor Green
+}
+
+# =============================================================================
 # SUMMARY
 # =============================================================================
 Write-Host ""
@@ -1270,6 +1374,7 @@ if ($script:DeploymentErrors.Count -gt 0) {
     Write-Host "  Web App             : $WebAppName"
     Write-Host "  Function (Mailbox)  : $FuncMailboxName"
     Write-Host "  Function (Queue-DB) : $FuncQueueDbName"
+    Write-Host "  Function (CU-Queue) : $FuncCuQueueDbName"
     Write-Host "  Graph API App ID    : $GraphClientId"
     Write-Host "  Content Understanding: $ContentUnderstandingName"
     Write-Host "  AI Foundry          : $AiFoundryName"
@@ -1294,6 +1399,7 @@ if ($script:DeploymentErrors.Count -gt 0) {
     Write-Host "  Web App             : $WebAppName"
     Write-Host "  Function (Mailbox)  : $FuncMailboxName"
     Write-Host "  Function (Queue-DB) : $FuncQueueDbName"
+    Write-Host "  Function (CU-Queue) : $FuncCuQueueDbName"
     Write-Host "  Graph API App ID    : $GraphClientId"
     Write-Host "  Content Understanding: $ContentUnderstandingName"
     Write-Host "  AI Foundry          : $AiFoundryName"

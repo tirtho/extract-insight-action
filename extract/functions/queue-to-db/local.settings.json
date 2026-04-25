@@ -7,7 +7,8 @@
     "AZURE_KEY_VAULT_URL": "%KEY_VAULT_URL%",
     "ServiceBusConnection__fullyQualifiedNamespace": "sb-eia-dev-1.servicebus.windows.net",
     "ServiceBusTopicName": "@Microsoft.KeyVault(VaultName=kv-eia-dev-1;SecretName=ServiceBusTopicName)",
-    "ServiceBusSubscriptionName": "@Microsoft.KeyVault(VaultName=kv-eia-dev-1;SecretName=ServiceBusSubscriptionName)"
+    "ServiceBusSubscriptionName": "@Microsoft.KeyVault(VaultName=kv-eia-dev-1;SecretName=ServiceBusSubscriptionName)",
+    "StorageQueueName": "@Microsoft.KeyVault(VaultName=kv-eia-dev-1;SecretName=StorageQueueName)"
   },
   "ConnectionStrings": {},
   "Host": {

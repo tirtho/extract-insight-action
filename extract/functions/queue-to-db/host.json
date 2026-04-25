@@ -6,6 +6,15 @@
         "isEnabled": true,
         "excludedTypes": "Request"
       }
+    },
+    "logLevel": {
+      "DurableTask.AzureStorage": "Warning",
+      "DurableTask.Core": "Warning"
+    }
+  },
+  "extensions": {
+    "durableTask": {
+      "hubName": "ExtractMailHub"
     }
   },
   "extensionBundle": {

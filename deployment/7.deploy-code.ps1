@@ -32,6 +32,7 @@ $Environment       = if ($env:ENVIRONMENT)               { $env:ENVIRONMENT }   
 $ResourceGroupName = if ($env:RESOURCE_GROUP_NAME)       { $env:RESOURCE_GROUP_NAME }       else { "rg-$ProjectName-$Environment-$Suffix" }
 $FuncMailboxName   = if ($env:FUNCTION_APP_MAILBOX_NAME) { $env:FUNCTION_APP_MAILBOX_NAME } else { "func-mailbox-$ProjectName-$Environment-$Suffix" }
 $FuncQueueDbName   = if ($env:FUNCTION_APP_QUEUE_DB_NAME){ $env:FUNCTION_APP_QUEUE_DB_NAME }else { "func-queuedb-$ProjectName-$Environment-$Suffix" }
+$FuncCuQueueDbName = if ($env:FUNCTION_APP_CU_QUEUE_DB_NAME){ $env:FUNCTION_APP_CU_QUEUE_DB_NAME }else { "func-cuqueuedb-$ProjectName-$Environment-$Suffix" }
 $ProjClean         = $ProjectName -replace '-',''
 $StorageAccountName = if ($env:STORAGE_ACCOUNT_NAME)    { $env:STORAGE_ACCOUNT_NAME }      else { "st$ProjClean$Environment$Suffix" }
 
@@ -180,34 +181,53 @@ function Invoke-MavenPackage {
 # =============================================================================
 # STEP 1: Select which function(s) to deploy
 # =============================================================================
-Write-Host "Which function app do you want to deploy?" -ForegroundColor White
+Write-Host "Which function app(s) do you want to deploy?" -ForegroundColor White
 Write-Host "  1. mailbox-to-queue"
 Write-Host "  2. queue-to-db"
-Write-Host "  3. All (both)"
+Write-Host "  3. cu-queue-to-db"
+Write-Host "  4. All"
+Write-Host ""
+Write-Host "  You can enter a single number or comma-separated list (e.g. 1,3)" -ForegroundColor DarkCyan
 Write-Host ""
 
+$validOptions = @('1','2','3','4')
 do {
-    $choice = Read-Host "Enter 1, 2, or 3"
-    $choice = $choice.Trim()
-    if ($choice -notin @('1','2','3')) {
-        Write-Host "[ERROR] Please enter 1, 2, or 3." -ForegroundColor Red
+    $rawInput = (Read-Host "Enter selection(s)").Trim()
+    $selections = $rawInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+    $allValid = ($selections.Count -gt 0) -and ($selections | Where-Object { $_ -notin $validOptions }).Count -eq 0
+    if (-not $allValid) {
+        Write-Host "[ERROR] Please enter 1, 2, 3, 4, or a comma-separated list (e.g. 1,3)." -ForegroundColor Red
     }
-} while ($choice -notin @('1','2','3'))
+} while (-not $allValid)
+
+# Expand '4' (All) into individual selections, then deduplicate
+if ($selections -contains '4') {
+    $selections = @('1','2','3')
+} else {
+    $selections = $selections | Select-Object -Unique
+}
 
 # Build ordered list of targets: @{ Label, FunctionAppName, SourceDir }
 $targets = [System.Collections.Generic.List[hashtable]]::new()
-if ($choice -in @('1','3')) {
+if ($selections -contains '1') {
     $targets.Add(@{
         Label           = "mailbox-to-queue"
         FunctionAppName = $FuncMailboxName
         SourceDir       = Join-Path $FunctionsRoot "mailbox-to-queue"
     })
 }
-if ($choice -in @('2','3')) {
+if ($selections -contains '2') {
     $targets.Add(@{
         Label           = "queue-to-db"
         FunctionAppName = $FuncQueueDbName
         SourceDir       = Join-Path $FunctionsRoot "queue-to-db"
+    })
+}
+if ($selections -contains '3') {
+    $targets.Add(@{
+        Label           = "cu-queue-to-db"
+        FunctionAppName = $FuncCuQueueDbName
+        SourceDir       = Join-Path $FunctionsRoot "cu-queue-to-db"
     })
 }
 
@@ -222,7 +242,7 @@ foreach ($t in $targets) {
 Write-Host "  Resource Group: $ResourceGroupName"
 Write-Host ""
 
-if ($choice -ne '3') {
+if ($targets.Count -eq 1) {
     # Single target — allow per-app name override
     $confirm = Read-Host "Press [Enter] to accept Function App name '$($targets[0].FunctionAppName)', or type a new name to override"
     $confirm = $confirm.Trim()

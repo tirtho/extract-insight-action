@@ -1,0 +1,12 @@
+{
+  "scriptFile": "../cu-queue-to-db-1.0.0.jar",
+  "entryPoint": "com.microsoft.azure.functions.cuqueue.PollCuAnalysis.run",
+  "bindings": [
+    {
+      "type": "timerTrigger",
+      "direction": "in",
+      "name": "timerInfo",
+      "schedule": "%StorageQueuePollingSchedule%"
+    }
+  ]
+}

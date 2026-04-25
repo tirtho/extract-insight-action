@@ -1,8 +1,5 @@
 package com.microsoft.azure.functions.mailbox;
 
-import com.microsoft.azure.functions.annotation.FunctionName;
-import com.microsoft.azure.functions.annotation.ServiceBusTopicTrigger;
-import com.microsoft.azure.functions.ExecutionContext;
 import com.azure.cosmos.CosmosContainer;
 import com.azure.cosmos.models.CosmosItemRequestOptions;
 import com.azure.cosmos.models.PartitionKey;
@@ -10,334 +7,471 @@ import com.core.az.AzConnection;
 import com.core.az.AzContentUnderstanding;
 import com.core.az.AzEnvNames;
 import com.core.az.AzStorageBlob;
+import com.core.az.AzStorageQueue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.microsoft.azure.functions.ExecutionContext;
+import com.microsoft.azure.functions.annotation.FunctionName;
+import com.microsoft.azure.functions.annotation.ServiceBusTopicTrigger;
+import com.microsoft.azure.functions.mailbox.model.AttachmentInfo;
+import com.microsoft.azure.functions.mailbox.model.AttachmentResult;
+import com.microsoft.azure.functions.mailbox.model.EmailData;
+import com.microsoft.azure.functions.mailbox.model.ProcessAttachmentInput;
+import com.microsoft.azure.functions.mailbox.model.StoreDocumentInput;
+import com.microsoft.durabletask.Task;
+import com.microsoft.durabletask.TaskOrchestrationContext;
+import com.microsoft.durabletask.azurefunctions.DurableActivityTrigger;
+import com.microsoft.durabletask.azurefunctions.DurableClientContext;
+import com.microsoft.durabletask.azurefunctions.DurableClientInput;
+import com.microsoft.durabletask.azurefunctions.DurableOrchestrationTrigger;
 import com.microsoft.graph.models.Attachment;
 import com.microsoft.graph.models.AttachmentCollectionResponse;
 import com.microsoft.graph.models.FileAttachment;
-import com.microsoft.graph.models.Message;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Logger;
 
 /**
- * Azure Function that reads email ID references from the Service Bus topic,
- * stores the email body and attachments in Blob Storage, submits attachments
- * to Azure Content Understanding for analysis, and persists all metadata
- * and analysis task records in Cosmos DB.
+ * Durable Function orchestration that processes emails with attachments.
  *
- * <p>Triggered by messages published by {@code PollMailbox}. Each message contains
- * the Graph message ID and internet message ID.
+ * <h3>Flow</h3>
+ * <ol>
+ *   <li><b>ExtractMailStarter</b> – Service Bus trigger receives the email
+ *       reference and schedules the orchestration.</li>
+ *   <li><b>ExtractMailOrchestrator</b> – Orchestrator calls activities:
+ *       FetchEmail → StoreEmailBody → fan-out ProcessAttachment per
+ *       attachment → fan-in → StoreInCosmos.</li>
+ *   <li><b>FetchEmail</b> – Activity that retrieves the email and attachment
+ *       metadata (not bytes) from Microsoft Graph.</li>
+ *   <li><b>StoreEmailBody</b> – Activity that stores the plain-text email
+ *       body in Blob Storage.</li>
+ *   <li><b>ProcessAttachment</b> – Activity that fetches one attachment's
+ *       bytes from Graph, stores in Blob, and submits to Content
+ *       Understanding for analysis.</li>
+ *   <li><b>StoreInCosmos</b> – Activity that persists the email document
+ *       with embedded attachment results in Cosmos DB.</li>
+ * </ol>
  */
 public class ExtractMail {
 
     private static final Logger logger = Logger.getLogger(ExtractMail.class.getName());
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
-    private AzConnection azConnection;
-    private GraphServiceClient graphServiceClient;
-    private AzStorageBlob storageBlob;
-    private AzContentUnderstanding contentUnderstanding;
+    // ================================================================
+    //  STARTER – Service Bus trigger
+    // ================================================================
 
-    @FunctionName("ExtractMail")
-    public void run(
+    @FunctionName("ExtractMailStarter")
+    public void starter(
             @ServiceBusTopicTrigger(
                     name = "message",
                     topicName = "%ServiceBusTopicName%",
                     subscriptionName = "%ServiceBusSubscriptionName%",
                     connection = "ServiceBusConnection"
             ) String message,
+            @DurableClientInput(name = "durableContext") DurableClientContext durableContext,
             ExecutionContext context) {
 
-        logger.info("ExtractMail function triggered at: " + LocalDateTime.now());
+        logger.info("ExtractMailStarter triggered at: " + LocalDateTime.now());
 
-        try {
-            initializeClients();
+        String instanceId = durableContext.getClient()
+                .scheduleNewOrchestrationInstance("ExtractMailOrchestrator", message);
 
+        logger.info("Scheduled orchestration instance: " + instanceId);
+    }
+
+    // ================================================================
+    //  ORCHESTRATOR – deterministic, no I/O
+    // ================================================================
+
+    @FunctionName("ExtractMailOrchestrator")
+    public String orchestrator(
+            @DurableOrchestrationTrigger(name = "ctx") TaskOrchestrationContext ctx) {
+
+        // The raw Service Bus message is passed as input
+        String message = ctx.getInput(String.class);
+
+        // Step 1: Fetch email metadata + attachment list + analyzer config
+        EmailData emailData = ctx.callActivity("FetchEmail", message, EmailData.class).await();
+
+        if (emailData == null) {
+            return "Email not found";
+        }
+
+        // Step 2: Store email body as plain text in blob storage
+        ctx.callActivity("StoreEmailBody", emailData, Void.class).await();
+
+        // Step 3: Fan out – process each file attachment in parallel
+        List<Task<AttachmentResult>> tasks = new ArrayList<>();
+        if (emailData.getAttachments() != null) {
+            for (AttachmentInfo att : emailData.getAttachments()) {
+                if (!att.isFile()) {
+                    continue;
+                }
+                ProcessAttachmentInput input = new ProcessAttachmentInput();
+                input.setGraphMessageId(emailData.getGraphMessageId());
+                input.setAttachmentId(att.getAttachmentId());
+                input.setAttachmentName(att.getName());
+                input.setContentType(att.getContentType());
+                input.setOdataType(att.getOdataType());
+                input.setBlobFolder(emailData.getBlobFolder());
+                input.setAnalyzersJson(emailData.getAnalyzersJson());
+                tasks.add(ctx.callActivity("ProcessAttachment", input, AttachmentResult.class));
+            }
+        }
+
+        // Fan in – wait for all attachment activities to complete
+        List<AttachmentResult> results = ctx.allOf(tasks).await();
+
+        // Step 4: Store final email document in Cosmos DB
+        StoreDocumentInput docInput = new StoreDocumentInput();
+        docInput.setGraphMessageId(emailData.getGraphMessageId());
+        docInput.setInternetMessageId(emailData.getInternetMessageId());
+        docInput.setSubject(emailData.getSubject());
+        docInput.setFromAddress(emailData.getFromAddress());
+        docInput.setFromName(emailData.getFromName());
+        docInput.setReceivedDateTime(emailData.getReceivedDateTime());
+        docInput.setBodyPreview(emailData.getBodyPreview());
+        docInput.setAttachments(results);
+
+        ctx.callActivity("StoreInCosmos", docInput, Void.class).await();
+
+        return "Completed: " + emailData.getInternetMessageId();
+    }
+
+    // ================================================================
+    //  ACTIVITY – FetchEmail
+    // ================================================================
+
+    @FunctionName("FetchEmail")
+    public EmailData fetchEmailActivity(
+            @DurableActivityTrigger(name = "message") String message) {
+
+        logger.info("FetchEmail activity started");
+
+        try (AzConnection azConnection = new AzConnection(System.getenv("AZURE_KEY_VAULT_URL"))) {
+            GraphServiceClient graphClient = azConnection.getGraphClient();
+            String targetMailbox = azConnection.getMailboxEmail();
+
+            // Durable Functions SDK may double-serialize String inputs as JSON strings;
+            // unwrap if the parsed result is a TextNode rather than an ObjectNode
             JsonNode emailRef = objectMapper.readTree(message);
+            if (emailRef.isTextual()) {
+                emailRef = objectMapper.readTree(emailRef.asText());
+            }
             String graphMessageId    = emailRef.path("graphMessageId").asText();
             String internetMessageId = emailRef.path("internetMessageId").asText();
 
-            logger.info("Processing email: " + internetMessageId);
+            logger.info("Fetching email from mailbox: " + targetMailbox
+                    + ", messageId: " + graphMessageId);
 
-            Message email = fetchEmail(graphMessageId);
+            // Fetch email
+            var email = graphClient.users().byUserId(targetMailbox)
+                    .messages().byMessageId(graphMessageId)
+                    .get(rc -> {
+                        rc.queryParameters.select = new String[]{
+                                "id", "internetMessageId", "subject", "from",
+                                "receivedDateTime", "body", "toRecipients",
+                                "ccRecipients", "hasAttachments"
+                        };
+                    });
+
             if (email == null) {
-                logger.warning("Could not retrieve email from Graph API for graphMessageId: " + graphMessageId);
-                return;
+                logger.warning("Email not found for graphMessageId: " + graphMessageId);
+                return null;
             }
 
-            // Use graphMessageId as the blob folder name (clean, URL-safe)
-            String blobFolder = sanitizeForBlobPath(graphMessageId);
+            // Build EmailData
+            EmailData data = new EmailData();
+            data.setGraphMessageId(graphMessageId);
+            data.setInternetMessageId(internetMessageId);
+            data.setSubject(email.getSubject() != null ? email.getSubject() : "");
+            data.setReceivedDateTime(email.getReceivedDateTime() != null
+                    ? email.getReceivedDateTime().toString() : "");
+            data.setBlobFolder(sanitizeForBlobPath(graphMessageId));
 
-            // 1. Store email body as plain text in blob storage
-            storeEmailBody(email, blobFolder);
+            if (email.getFrom() != null && email.getFrom().getEmailAddress() != null) {
+                data.setFromAddress(email.getFrom().getEmailAddress().getAddress() != null
+                        ? email.getFrom().getEmailAddress().getAddress() : "");
+                data.setFromName(email.getFrom().getEmailAddress().getName() != null
+                        ? email.getFrom().getEmailAddress().getName() : "");
+            }
 
-            // 2. Fetch attachments, store in blob, analyze via Content Understanding
-            ArrayNode attachmentsArray = processAttachments(graphMessageId, blobFolder);
+            if (email.getBody() != null && email.getBody().getContent() != null) {
+                data.setBodyContent(email.getBody().getContent());
+                String content = email.getBody().getContent();
+                data.setBodyPreview(content.substring(0, Math.min(500, content.length())));
+            }
 
-            // 3. Store email metadata document (with attachments) in Cosmos DB
-            ObjectNode doc = buildDocument(email, internetMessageId);
-            doc.set("attachments", attachmentsArray);
-            storeInCosmos(doc);
+            // Fetch attachment list (metadata only, not bytes)
+            AttachmentCollectionResponse attachResponse = graphClient
+                    .users().byUserId(targetMailbox)
+                    .messages().byMessageId(graphMessageId)
+                    .attachments().get();
 
-            logger.info("ExtractMail completed successfully for: " + internetMessageId);
+            List<AttachmentInfo> attachmentInfos = new ArrayList<>();
+            if (attachResponse != null && attachResponse.getValue() != null) {
+                for (Attachment att : attachResponse.getValue()) {
+                    String odataType = att.getOdataType();
+                    boolean isFile = (att instanceof FileAttachment)
+                            || "#microsoft.graph.fileAttachment".equals(odataType);
+
+                    AttachmentInfo info = new AttachmentInfo(
+                            att.getId(), att.getName(), att.getContentType(),
+                            odataType, isFile);
+                    attachmentInfos.add(info);
+                }
+            }
+            data.setAttachments(attachmentInfos);
+
+            // Fetch analyzer config from Key Vault (once, shared across fan-out activities)
+            String analyzersJson = azConnection.getSecret(
+                    AzEnvNames.KV_CONTENT_UNDERSTANDING_ANALYZERS);
+            data.setAnalyzersJson(normalizeJson(analyzersJson));
+
+            logger.info("FetchEmail completed: subject='" + data.getSubject()
+                    + "', attachments=" + attachmentInfos.size());
+            return data;
 
         } catch (Exception e) {
-            logger.severe("Error in ExtractMail: " + e.getMessage());
-            throw new RuntimeException("ExtractMail function failed", e);
-        } finally {
-            cleanup();
+            logger.severe("FetchEmail activity failed: " + e.getMessage());
+            throw new RuntimeException("FetchEmail failed", e);
         }
     }
 
-    private void initializeClients() {
-        String keyVaultUrl = System.getenv("AZURE_KEY_VAULT_URL");
-        azConnection = new AzConnection(keyVaultUrl);
-        storageBlob = new AzStorageBlob(azConnection);
-        contentUnderstanding = new AzContentUnderstanding(azConnection);
-        if (graphServiceClient == null) {
-            graphServiceClient = azConnection.getGraphClient();
-            logger.info("Microsoft Graph client initialized successfully from AzConnection");
-        }
-    }
+    // ================================================================
+    //  ACTIVITY – StoreEmailBody
+    // ================================================================
 
-    // ---------------------------------------------------------------
-    //  Graph API helpers
-    // ---------------------------------------------------------------
+    @FunctionName("StoreEmailBody")
+    public void storeEmailBodyActivity(
+            @DurableActivityTrigger(name = "emailData") EmailData emailData) {
 
-    private Message fetchEmail(String graphMessageId) {
-        String targetMailbox = azConnection.getMailboxEmail();
-        logger.info("Fetching email from mailbox: " + targetMailbox + ", messageId: " + graphMessageId);
+        logger.info("StoreEmailBody activity started");
 
-        return graphServiceClient.users().byUserId(targetMailbox)
-                .messages().byMessageId(graphMessageId)
-                .get(requestConfiguration -> {
-                    requestConfiguration.queryParameters.select = new String[]{
-                            "id", "internetMessageId", "subject", "from",
-                            "receivedDateTime", "body", "toRecipients", "ccRecipients",
-                            "hasAttachments"
-                    };
-                });
-    }
-
-    private List<Attachment> fetchAttachments(String graphMessageId) {
-        String targetMailbox = azConnection.getMailboxEmail();
-        logger.info("Fetching attachments for message: " + graphMessageId);
-
-        AttachmentCollectionResponse response = graphServiceClient
-                .users().byUserId(targetMailbox)
-                .messages().byMessageId(graphMessageId)
-                .attachments().get();
-
-        return response != null ? response.getValue() : null;
-    }
-
-    // ---------------------------------------------------------------
-    //  Body & attachment processing
-    // ---------------------------------------------------------------
-
-    /**
-     * Strips HTML tags from the email body and stores it as a .txt file
-     * in Blob Storage under {@code <messageId>/body.txt}.
-     */
-    private void storeEmailBody(Message email, String blobFolder) {
-        if (email.getBody() == null || email.getBody().getContent() == null) {
+        if (emailData.getBodyContent() == null || emailData.getBodyContent().isEmpty()) {
             logger.info("Email has no body content to store");
             return;
         }
-        String plainText = stripHtmlTags(email.getBody().getContent());
-        String blobPath = blobFolder + "/body.txt";
-        storageBlob.writeString(blobPath, plainText);
-        logger.info("Stored email body as text at: " + blobPath);
+
+        try (AzConnection azConnection = new AzConnection(System.getenv("AZURE_KEY_VAULT_URL"))) {
+            AzStorageBlob storageBlob = new AzStorageBlob(azConnection);
+            String plainText = stripHtmlTags(emailData.getBodyContent());
+            String blobPath = emailData.getBlobFolder() + "/body.txt";
+            storageBlob.writeString(blobPath, plainText);
+            logger.info("Stored email body at: " + blobPath);
+        }
     }
 
-    /**
-     * Fetches attachments from Graph API, stores each in Blob Storage,
-     * submits to Content Understanding for analysis, and returns an array
-     * of attachment metadata to embed in the Cosmos DB email document.
-     */
-    private ArrayNode processAttachments(String graphMessageId,
-                                         String blobFolder) {
-        ArrayNode result = objectMapper.createArrayNode();
+    // ================================================================
+    //  ACTIVITY – ProcessAttachment (one per attachment, fanned out)
+    // ================================================================
 
-        List<Attachment> attachments = fetchAttachments(graphMessageId);
-        if (attachments == null || attachments.isEmpty()) {
-            logger.info("No attachments found for message: " + graphMessageId);
-            return result;
-        }
+    @FunctionName("ProcessAttachment")
+    public AttachmentResult processAttachmentActivity(
+            @DurableActivityTrigger(name = "input") ProcessAttachmentInput input) {
 
-        // Parse analyzer config from Key Vault.
-        // The value may be unquoted JSON, e.g.:
-        //   [{id:docAnalyzer,type:document}, ...]
-        // Normalise it to valid JSON before parsing.
-        String analyzersJson = azConnection.getSecret(AzEnvNames.KV_CONTENT_UNDERSTANDING_ANALYZERS);
-        analyzersJson = normalizeJson(analyzersJson);
-        JsonNode analyzersArray;
-        try {
-            analyzersArray = objectMapper.readTree(analyzersJson);
-        } catch (Exception e) {
-            logger.severe("Failed to parse ContentUnderstandingAnalyzers from Key Vault: " + e.getMessage());
-            return result;
-        }
+        logger.info("ProcessAttachment activity started for: " + input.getAttachmentName());
+        AttachmentResult result = new AttachmentResult();
+        result.setAttachmentName(input.getAttachmentName());
 
-        logger.info("Found " + attachments.size() + " attachment(s) to process");
+        try (AzConnection azConnection = new AzConnection(System.getenv("AZURE_KEY_VAULT_URL"))) {
+            GraphServiceClient graphClient = azConnection.getGraphClient();
+            String targetMailbox = azConnection.getMailboxEmail();
 
-        for (Attachment attachment : attachments) {
-            String odataType = attachment.getOdataType();
-            logger.info("Attachment: name='" + attachment.getName()
-                    + "', class=" + attachment.getClass().getName()
-                    + ", @odata.type=" + odataType);
+            // 1. Fetch this specific attachment's bytes from Graph
+            Attachment attachment = graphClient.users().byUserId(targetMailbox)
+                    .messages().byMessageId(input.getGraphMessageId())
+                    .attachments().byAttachmentId(input.getAttachmentId())
+                    .get();
 
-            // Use @odata.type to detect file attachments; instanceof can fail
-            // under Azure Functions' class loader.
-            boolean isFile = (attachment instanceof FileAttachment)
-                    || "#microsoft.graph.fileAttachment".equals(odataType);
-
-            if (!isFile) {
-                logger.info("Skipping non-file attachment: " + attachment.getName());
-                continue;
+            byte[] contentBytes = null;
+            if (attachment instanceof FileAttachment) {
+                contentBytes = ((FileAttachment) attachment).getContentBytes();
+            } else {
+                // Kiota backing store fallback
+                Object raw = attachment.getBackingStore().get("contentBytes");
+                if (raw instanceof byte[]) {
+                    contentBytes = (byte[]) raw;
+                } else if (raw instanceof String) {
+                    contentBytes = java.util.Base64.getDecoder().decode((String) raw);
+                }
             }
 
-            try {
-                // Extract contentBytes: prefer the typed subclass but fall back
-                // to the backingStore in case the cast didn't work.
-                byte[] contentBytes = null;
-                String attachmentName = attachment.getName();
+            if (contentBytes == null || contentBytes.length == 0) {
+                result.setStatus("failed");
+                result.setErrorMessage("Attachment has no content");
+                return result;
+            }
 
-                if (attachment instanceof FileAttachment) {
-                    contentBytes = ((FileAttachment) attachment).getContentBytes();
-                } else {
-                    // Kiota stores fields in a backing store accessible by key
-                    Object raw = attachment.getBackingStore().get("contentBytes");
-                    if (raw instanceof byte[]) {
-                        contentBytes = (byte[]) raw;
-                    } else if (raw instanceof String) {
-                        contentBytes = java.util.Base64.getDecoder().decode((String) raw);
+            // 2. Store in Blob Storage
+            AzStorageBlob storageBlob = new AzStorageBlob(azConnection);
+            String blobPath = input.getBlobFolder() + "/" + input.getAttachmentName();
+            storageBlob.writeBytes(blobPath, contentBytes);
+            String blobUrl = storageBlob.getBlobUrl(blobPath);
+            result.setBlobUrl(blobUrl);
+            logger.info("Stored attachment '" + input.getAttachmentName() + "' at: " + blobUrl);
+
+            // 3. Determine type and find analyzer
+            String attachmentType = determineAttachmentType(input.getContentType(),
+                    input.getAttachmentName());
+            result.setContentType(attachmentType);
+
+            JsonNode analyzersArray = objectMapper.readTree(input.getAnalyzersJson());
+            String analyzerId = findAnalyzerForType(attachmentType, analyzersArray);
+
+            if (analyzerId == null) {
+                logger.warning("No analyzer for type '" + attachmentType
+                        + "' (attachment: " + input.getAttachmentName() + ")");
+                result.setStatus("failed");
+                result.setErrorMessage("No analyzer found for type '" + attachmentType + "'");
+                return result;
+            }
+
+            // 4. Submit to Content Understanding
+            result.setAnalyzerName(analyzerId);
+            try (AzContentUnderstanding cu = new AzContentUnderstanding(azConnection)) {
+                String payload = String.format("{\"inputs\":[{\"url\":\"%s\"}]}", blobUrl);
+                String analyzeResponse = cu.analyze(analyzerId, payload);
+                String operationId = AzContentUnderstanding.getOperationIdFromJson(analyzeResponse);
+
+                result.setAnalyzeOperationId(operationId);
+                result.setAnalyzeRequestDateTime(LocalDateTime.now().toString());
+                result.setStatus("accepted");
+
+                logger.info("Analysis submitted for '" + input.getAttachmentName()
+                        + "' with analyzer '" + analyzerId
+                        + "', operationId: " + operationId);
+            }
+
+            return result;
+
+        } catch (Exception e) {
+            logger.warning("ProcessAttachment failed for '" + input.getAttachmentName()
+                    + "': " + e.getMessage());
+            result.setStatus("failed");
+            result.setErrorMessage(e.getMessage());
+            return result;
+        }
+    }
+
+    // ================================================================
+    //  ACTIVITY – StoreInCosmos
+    // ================================================================
+
+    @FunctionName("StoreInCosmos")
+    public void storeInCosmosActivity(
+            @DurableActivityTrigger(name = "input") StoreDocumentInput input) {
+
+        logger.info("StoreInCosmos activity started");
+
+        try (AzConnection azConnection = new AzConnection(System.getenv("AZURE_KEY_VAULT_URL"))) {
+            String dbName = azConnection.getSecret(AzEnvNames.KV_COSMOS_DB_DATABASE_NAME);
+            String containerName = azConnection.getSecret(AzEnvNames.KV_COSMOS_DB_CONTAINER_NAME);
+
+            CosmosContainer container = azConnection.getCosmosClient()
+                    .getDatabase(dbName)
+                    .getContainer(containerName);
+
+            AzStorageQueue storageQueue = new AzStorageQueue(azConnection);
+
+            String emailDocId = (input.getInternetMessageId() != null
+                    && !input.getInternetMessageId().isEmpty())
+                    ? input.getInternetMessageId()
+                    : input.getGraphMessageId();
+
+            // Store each attachment as a separate document of type "attachment"
+            ArrayNode attachmentRefs = objectMapper.createArrayNode();
+            if (input.getAttachments() != null) {
+                for (int i = 0; i < input.getAttachments().size(); i++) {
+                    AttachmentResult att = input.getAttachments().get(i);
+
+                    String attDocId = emailDocId + "_att_" + i;
+                    ObjectNode attDoc = objectMapper.createObjectNode();
+                    attDoc.put("id", attDocId);
+                    attDoc.put("type", "attachment");
+                    attDoc.put("emailId", emailDocId);
+                    attDoc.put("attachmentName", att.getAttachmentName());
+                    if (att.getBlobUrl() != null) attDoc.put("blobUrl", att.getBlobUrl());
+                    if (att.getContentType() != null) attDoc.put("contentType", att.getContentType());
+                    if (att.getAnalyzerName() != null) attDoc.put("analyzerName", att.getAnalyzerName());
+                    if (att.getAnalyzeOperationId() != null)
+                        attDoc.put("analyzeOperationId", att.getAnalyzeOperationId());
+                    if (att.getAnalyzeRequestDateTime() != null)
+                        attDoc.put("analyzeRequestDateTime", att.getAnalyzeRequestDateTime());
+                    attDoc.put("status", att.getStatus() != null ? att.getStatus() : "");
+                    if (att.getErrorMessage() != null)
+                        attDoc.put("errorMessage", att.getErrorMessage());
+                    attDoc.put("createdAt", LocalDateTime.now().toString());
+
+                    container.upsertItem(attDoc, new PartitionKey(attDocId),
+                            new CosmosItemRequestOptions());
+                    logger.info("Stored attachment document: " + attDocId);
+
+                    // Queue a poll message for attachments with pending CU analysis
+                    if ("accepted".equals(att.getStatus()) && att.getAnalyzeOperationId() != null) {
+                        ObjectNode queueMsg = objectMapper.createObjectNode();
+                        queueMsg.put("attachmentDocId", attDocId);
+                        queueMsg.put("analyzerName", att.getAnalyzerName());
+                        queueMsg.put("operationId", att.getAnalyzeOperationId());
+                        storageQueue.sendMessage(queueMsg.toString());
+                        logger.info("Queued CU poll message for attachment: " + attDocId);
                     }
-                }
 
-                ObjectNode entry = processFileAttachment(attachmentName,
-                        attachment.getContentType(), contentBytes,
-                        blobFolder, analyzersArray);
-                if (entry != null) {
-                    result.add(entry);
+                    // Add reference to the attachment document
+                    ObjectNode ref = objectMapper.createObjectNode();
+                    ref.put("attachmentId", attDocId);
+                    ref.put("attachmentName", att.getAttachmentName());
+                    attachmentRefs.add(ref);
                 }
-            } catch (Exception e) {
-                logger.warning("Failed to process attachment '"
-                        + attachment.getName() + "': " + e.getMessage());
-                // Persist a failed entry so the attachment is not silently lost
-                ObjectNode failedEntry = objectMapper.createObjectNode();
-                failedEntry.put("attachmentName", attachment.getName() != null ? attachment.getName() : "unknown");
-                failedEntry.put("contentType", attachment.getContentType() != null ? attachment.getContentType() : "unknown");
-                failedEntry.put("status", "failed");
-                failedEntry.put("errorMessage", e.getMessage());
-                result.add(failedEntry);
             }
+
+            // Build email document with type "email" and attachment references
+            ObjectNode doc = objectMapper.createObjectNode();
+            doc.put("id", emailDocId);
+            doc.put("type", "email");
+            doc.put("graphMessageId", input.getGraphMessageId() != null
+                    ? input.getGraphMessageId() : "");
+            doc.put("internetMessageId", input.getInternetMessageId() != null
+                    ? input.getInternetMessageId() : "");
+            doc.put("subject", input.getSubject() != null ? input.getSubject() : "");
+            doc.put("receivedDateTime", input.getReceivedDateTime() != null
+                    ? input.getReceivedDateTime() : "");
+            doc.put("extractedAt", LocalDateTime.now().toString());
+
+            if (input.getFromAddress() != null) {
+                doc.put("fromAddress", input.getFromAddress());
+            }
+            if (input.getFromName() != null) {
+                doc.put("fromName", input.getFromName());
+            }
+            if (input.getBodyPreview() != null) {
+                doc.put("bodyPreview", input.getBodyPreview());
+            }
+            doc.set("attachments", attachmentRefs);
+
+            container.upsertItem(doc, new PartitionKey(emailDocId),
+                    new CosmosItemRequestOptions());
+            logger.info("Stored email document in Cosmos DB with id: " + emailDocId);
         }
-        return result;
     }
 
-    /**
-     * Processes a single file attachment:
-     * <ol>
-     *   <li>Stores the attachment bytes in Blob Storage under {@code <messageId>/<filename>}</li>
-     *   <li>Determines the content type (audio/image/video/document)</li>
-     *   <li>Matches it with the correct Content Understanding analyzer</li>
-     *   <li>Submits the blob URL for analysis</li>
-     * </ol>
-     *
-     * @return an ObjectNode with attachment metadata, or {@code null} if skipped
-     */
-    private ObjectNode processFileAttachment(String attachmentName,
-                                             String mimeType,
-                                             byte[] contentBytes,
-                                             String blobFolder,
-                                             JsonNode analyzersArray) {
+    // ================================================================
+    //  Static helpers (shared by activities)
+    // ================================================================
 
-        if (contentBytes == null || contentBytes.length == 0) {
-            logger.warning("Attachment '" + attachmentName + "' has no content, skipping");
-            ObjectNode entry = objectMapper.createObjectNode();
-            entry.put("attachmentName", attachmentName);
-            entry.put("status", "failed");
-            entry.put("errorMessage", "Attachment has no content");
-            return entry;
-        }
-
-        // 1. Store attachment in Blob Storage
-        String blobPath = blobFolder + "/" + attachmentName;
-        storageBlob.writeBytes(blobPath, contentBytes);
-        String blobUrl = storageBlob.getBlobUrl(blobPath);
-        logger.info("Stored attachment '" + attachmentName + "' at: " + blobUrl);
-
-        // 2. Determine type and find matching analyzer
-        String attachmentType = determineAttachmentType(mimeType, attachmentName);
-        String analyzerId = findAnalyzerForType(attachmentType, analyzersArray);
-
-        // Build the attachment entry for the Cosmos document
-        ObjectNode entry = objectMapper.createObjectNode();
-        entry.put("attachmentName", attachmentName);
-        entry.put("blobUrl", blobUrl);
-        entry.put("contentType", attachmentType);
-
-        if (analyzerId == null) {
-            logger.warning("No analyzer found for type '" + attachmentType
-                    + "' (attachment: " + attachmentName + ")");
-            entry.putNull("analyzerName");
-            entry.putNull("analyzeOperationId");
-            entry.putNull("analyzeRequestDateTime");
-            entry.put("status", "failed");
-            entry.put("errorMessage", "No analyzer found for type '" + attachmentType + "'");
-            return entry;
-        }
-
-        // 3. Submit to Content Understanding for analysis
-        //    GA API requires: {"inputs":[{"url":"<blobUrl>"}]}
-        String contentPayload = String.format("{\"inputs\":[{\"url\":\"%s\"}]}", blobUrl);
-
-        try {
-            String analyzeResponse = contentUnderstanding.analyze(analyzerId, contentPayload);
-            String operationId = AzContentUnderstanding.getOperationIdFromJson(analyzeResponse);
-            logger.info("Analysis submitted for '" + attachmentName
-                    + "' with analyzer '" + analyzerId
-                    + "', operationId: " + operationId);
-
-            entry.put("analyzerName", analyzerId);
-            entry.put("analyzeOperationId", operationId);
-            entry.put("analyzeRequestDateTime", LocalDateTime.now().toString());
-            entry.put("status", "accepted");
-        } catch (Exception e) {
-            logger.warning("Content Understanding analyze failed for '" + attachmentName
-                    + "' with analyzer '" + analyzerId + "': " + e.getMessage());
-            entry.put("analyzerName", analyzerId);
-            entry.put("status", "failed");
-            entry.put("errorMessage", e.getMessage());
-        }
-
-        return entry;
-    }
-
-    // ---------------------------------------------------------------
-    //  Type detection
-    // ---------------------------------------------------------------
-
-    /**
-     * Maps a MIME content type / file extension to one of the four
-     * Content Understanding categories: audio, image, video, document.
-     */
     static String determineAttachmentType(String contentType, String filename) {
-        // Check MIME type first
         if (contentType != null) {
             String ct = contentType.toLowerCase();
             if (ct.startsWith("audio/")) return "audio";
             if (ct.startsWith("image/")) return "image";
             if (ct.startsWith("video/")) return "video";
         }
-
-        // Fall back to file extension
         if (filename != null) {
             String name = filename.toLowerCase();
             int dot = name.lastIndexOf('.');
@@ -358,16 +492,10 @@ public class ExtractMail {
                 }
             }
         }
-
-        // Default: PDFs, Office docs, text files, etc.
         return "document";
     }
 
-    /**
-     * Looks up the analyzer ID whose {@code type} matches the given attachment type
-     * in the Key Vault {@code ContentUnderstandingAnalyzers} JSON array.
-     */
-    private static String findAnalyzerForType(String type, JsonNode analyzersArray) {
+    static String findAnalyzerForType(String type, JsonNode analyzersArray) {
         if (analyzersArray == null || !analyzersArray.isArray()) return null;
         for (JsonNode analyzer : analyzersArray) {
             if (type.equals(analyzer.path("type").asText())) {
@@ -377,26 +505,13 @@ public class ExtractMail {
         return null;
     }
 
-    // ---------------------------------------------------------------
-    //  Text helpers
-    // ---------------------------------------------------------------
-
-    /**
-     * Normalizes a potentially unquoted JSON string (e.g. from Key Vault)
-     * by adding double-quotes around bare keys and values.
-     * Turns  {@code [{id:docAnalyzer,type:document}]}
-     * into   {@code [{"id":"docAnalyzer","type":"document"}]}.
-     */
     static String normalizeJson(String raw) {
         if (raw == null) return "[]";
-        // Quote unquoted field names:  {key: or ,key:  ->  {"key": or ,"key":
         String result = raw.replaceAll("([{,])\\s*([A-Za-z0-9_]+)\\s*:", "$1\"$2\":");
-        // Quote unquoted string values: :value, or :value}  ->  :"value", or :"value"}
         result = result.replaceAll(":\\s*([A-Za-z_][A-Za-z0-9_-]*)\\s*([,}\\]])", ":\"$1\"$2");
         return result;
     }
 
-    /** Strips HTML tags and decodes common entities, returning plain text. */
     static String stripHtmlTags(String html) {
         if (html == null) return "";
         String text = html.replaceAll("<[^>]+>", "");
@@ -410,73 +525,8 @@ public class ExtractMail {
         return text;
     }
 
-    /** Sanitizes a string for use as a blob path folder name. */
     static String sanitizeForBlobPath(String input) {
         if (input == null || input.isEmpty()) return "unknown";
         return input.replaceAll("[<>:\"|?*\\\\]", "_").trim();
-    }
-
-    // ---------------------------------------------------------------
-    //  Cosmos DB
-    // ---------------------------------------------------------------
-
-    private ObjectNode buildDocument(Message email, String internetMessageId) {
-        ObjectNode doc = objectMapper.createObjectNode();
-
-        String docId = internetMessageId != null && !internetMessageId.isEmpty()
-                ? internetMessageId
-                : email.getId();
-        doc.put("id", docId);
-        doc.put("graphMessageId", email.getId() != null ? email.getId() : "");
-        doc.put("internetMessageId", internetMessageId != null ? internetMessageId : "");
-        doc.put("subject", email.getSubject() != null ? email.getSubject() : "");
-        doc.put("receivedDateTime", email.getReceivedDateTime() != null ? email.getReceivedDateTime().toString() : "");
-        doc.put("extractedAt", LocalDateTime.now().toString());
-
-        if (email.getFrom() != null && email.getFrom().getEmailAddress() != null) {
-            doc.put("fromAddress", email.getFrom().getEmailAddress().getAddress() != null ? email.getFrom().getEmailAddress().getAddress() : "");
-            doc.put("fromName", email.getFrom().getEmailAddress().getName() != null ? email.getFrom().getEmailAddress().getName() : "");
-        }
-
-        if (email.getBody() != null && email.getBody().getContent() != null) {
-            String content = email.getBody().getContent();
-            doc.put("bodyPreview", content.substring(0, Math.min(500, content.length())));
-        }
-
-        return doc;
-    }
-
-    private void storeInCosmos(ObjectNode doc) {
-        String dbName = azConnection.getSecret(AzEnvNames.KV_COSMOS_DB_DATABASE_NAME);
-        String containerName = azConnection.getSecret(AzEnvNames.KV_COSMOS_DB_CONTAINER_NAME);
-
-        CosmosContainer container = azConnection.getCosmosClient()
-                .getDatabase(dbName)
-                .getContainer(containerName);
-
-        String id = doc.path("id").asText();
-        container.upsertItem(doc, new PartitionKey(id), new CosmosItemRequestOptions());
-        logger.info("Stored document in Cosmos DB with id: " + id);
-    }
-
-    // ---------------------------------------------------------------
-    //  Cleanup
-    // ---------------------------------------------------------------
-
-    private void cleanup() {
-        try {
-            if (contentUnderstanding != null) {
-                contentUnderstanding.close();
-                contentUnderstanding = null;
-            }
-            if (azConnection != null) {
-                azConnection.close();
-                azConnection = null;
-            }
-            graphServiceClient = null;
-            storageBlob = null;
-        } catch (Exception e) {
-            logger.warning("Error during cleanup: " + e.getMessage());
-        }
     }
 }

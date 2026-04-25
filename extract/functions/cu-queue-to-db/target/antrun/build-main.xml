@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="maven-antrun-" default="main">
+  <target name="main">
+    <copy file="C:\Users\tibarar\OneDrive - Microsoft\Desktop\MyProjects\extract-insight-action\extract\functions\cu-queue-to-db\target/cu-queue-to-db-1.0.0.jar" todir="C:\Users\tibarar\OneDrive - Microsoft\Desktop\MyProjects\extract-insight-action\extract\functions\cu-queue-to-db\target/azure-functions/cu-queue-to-db-function" overwrite="true" />
+  </target>
+</project>

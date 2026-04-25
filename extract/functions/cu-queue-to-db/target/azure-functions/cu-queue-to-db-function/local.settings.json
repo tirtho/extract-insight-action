@@ -1,0 +1,16 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "java",
+    "FUNCTIONS_EXTENSION_VERSION": "~4",
+    "AZURE_KEY_VAULT_URL": "%KEY_VAULT_URL%",
+    "StorageQueuePollingSchedule": "@Microsoft.KeyVault(VaultName=kv-eia-dev-1;SecretName=StorageQueuePollingSchedule)"
+  },
+  "ConnectionStrings": {},
+  "Host": {
+    "LocalHttpPort": 7073,
+    "CORS": "*",
+    "CORSCredentials": false
+  }
+}

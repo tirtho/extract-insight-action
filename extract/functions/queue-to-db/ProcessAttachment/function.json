@@ -1,0 +1,11 @@
+{
+  "scriptFile": "../queue-to-db-1.0.0.jar",
+  "entryPoint": "com.microsoft.azure.functions.mailbox.ExtractMail.processAttachmentActivity",
+  "bindings": [
+    {
+      "type": "activityTrigger",
+      "direction": "in",
+      "name": "input"
+    }
+  ]
+}
