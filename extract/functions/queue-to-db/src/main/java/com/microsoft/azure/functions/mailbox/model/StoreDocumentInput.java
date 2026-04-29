@@ -15,6 +15,8 @@ public class StoreDocumentInput {
     private String fromName;
     private String receivedDateTime;
     private String bodyPreview;
+    private String bodyContent;
+    private String mailboxOwner;
     private List<AttachmentResult> attachments;
 
     public StoreDocumentInput() {}
@@ -39,6 +41,12 @@ public class StoreDocumentInput {
 
     public String getBodyPreview() { return bodyPreview; }
     public void setBodyPreview(String bodyPreview) { this.bodyPreview = bodyPreview; }
+
+    public String getBodyContent() { return bodyContent; }
+    public void setBodyContent(String bodyContent) { this.bodyContent = bodyContent; }
+
+    public String getMailboxOwner() { return mailboxOwner; }
+    public void setMailboxOwner(String mailboxOwner) { this.mailboxOwner = mailboxOwner; }
 
     public List<AttachmentResult> getAttachments() { return attachments; }
     public void setAttachments(List<AttachmentResult> attachments) { this.attachments = attachments; }

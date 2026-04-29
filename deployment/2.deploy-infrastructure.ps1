@@ -42,6 +42,9 @@ $ServiceBusSubName    = if ($env:SERVICE_BUS_SUBSCRIPTION_NAME) { $env:SERVICE_B
 $GraphAppName         = if ($env:GRAPH_APP_NAME)            { $env:GRAPH_APP_NAME }            else { "$ProjectName-graph-api-$Environment" }
 $GraphClientId        = $env:GRAPH_CLIENT_ID
 $GraphClientSecret    = $env:GRAPH_CLIENT_SECRET
+$WebAppAuthAppName    = if ($env:WEBAPP_AUTH_APP_NAME)      { $env:WEBAPP_AUTH_APP_NAME }      else { "$ProjectName-webapp-auth-$Environment" }
+$WebAppClientId       = $env:WEBAPP_CLIENT_ID
+$WebAppClientSecret   = $env:WEBAPP_CLIENT_SECRET
 $AppInsightsName      = if ($env:APP_INSIGHTS_NAME)         { $env:APP_INSIGHTS_NAME }         else { "ai-$ProjectName-$Environment" }
 $CosmosDbAccountName  = if ($env:COSMOS_DB_ACCOUNT_NAME)    { $env:COSMOS_DB_ACCOUNT_NAME }    else { "cosmos-$ProjectName-$Environment-$Suffix" }
 $StorageQueueName     = if ($env:STORAGE_QUEUE_NAME)        { $env:STORAGE_QUEUE_NAME }        else { "cu-analyze-ops-$ProjectName-$Environment-$Suffix" }
@@ -545,6 +548,77 @@ if (-not $GraphClientSecret) {
 }
 
 Write-Host "[INFO] Run .\grant-graph-consent.ps1 -Suffix $Suffix to grant admin consent (requires tenant admin role)" -ForegroundColor Cyan
+
+# -----------------------------------------------------------------------------
+# Web app Entra ID app registration for Spring Security OIDC login
+# -----------------------------------------------------------------------------
+$webAppRedirectUri = "https://$WebAppName.azurewebsites.net/login/oauth2/code/azure"
+$localDevRedirectUri = "http://localhost:8080/login/oauth2/code/azure"
+
+$existingWebAuthAppId = (Invoke-AzCliSilent -Arguments @('ad','app','list','--display-name',$WebAppAuthAppName,'--query','[0].appId','-o','tsv')).Output
+if ($existingWebAuthAppId) {
+    Write-Host "[OK] Web app auth registration $WebAppAuthAppName already exists with ID: $existingWebAuthAppId" -ForegroundColor Green
+    $WebAppClientId = $existingWebAuthAppId
+} else {
+    Invoke-AzCliSilent -Arguments @('ad','app','create',
+            '--display-name',$WebAppAuthAppName,
+            '--sign-in-audience','AzureADMyOrg',
+            '--web-redirect-uris',$webAppRedirectUri,$localDevRedirectUri,
+            '--output','none') | Out-Null
+    $WebAppClientId = (Invoke-AzCliSilent -Arguments @('ad','app','list','--display-name',$WebAppAuthAppName,'--query','[0].appId','-o','tsv')).Output
+    if ($WebAppClientId) {
+        Write-Host "[SUCCESS] Web app auth registration created with ID: $WebAppClientId" -ForegroundColor Green
+    } else {
+        Write-Host "[ERROR] Failed to create web app auth registration: $WebAppAuthAppName" -ForegroundColor Red
+        $script:DeploymentErrors.Add("Web app auth registration: $WebAppAuthAppName")
+    }
+}
+
+if ($WebAppClientId) {
+    # Keep redirect URIs aligned for both deployed app and local development.
+    Invoke-AzCliSilent -Arguments @('ad','app','update','--id',$WebAppClientId,
+            '--web-redirect-uris',$webAppRedirectUri,$localDevRedirectUri,
+            '--output','none') | Out-Null
+}
+
+if (-not $WebAppClientSecret -and $WebAppClientId) {
+    $existingWebCreds = (Invoke-AzCliSilent -Arguments @('ad','app','credential','list','--id',$WebAppClientId,'--query','[0].keyId','-o','tsv')).Output
+    if ($existingWebCreds) {
+        $kvWebSecret = (Invoke-AzCliSilent -Arguments @('keyvault','secret','show','--vault-name',$KeyVaultName,'--name','WebAppClientSecret','--query','value','-o','tsv')).Output
+        if ($kvWebSecret) {
+            Write-Host "[OK] Client secret already exists for $WebAppAuthAppName and is stored in Key Vault" -ForegroundColor Green
+            $WebAppClientSecret = $kvWebSecret
+        } else {
+            Write-Host "[WARNING] Web app credential exists in Entra ID but is missing from Key Vault. Rotating credential..." -ForegroundColor Yellow
+            $webCredResult = Invoke-AzCliSilent -Arguments @('ad','app','credential','reset','--id',$WebAppClientId,'--display-name','insight-ui-auth-secret','--years','2','--query','password','-o','tsv')
+            if ($webCredResult.ExitCode -eq 0 -and $webCredResult.Output) {
+                $WebAppClientSecret = $webCredResult.Output
+                Write-Host "[SUCCESS] Web app client secret rotated and will be stored in Key Vault" -ForegroundColor Green
+            } else {
+                Write-Host "[ERROR] Failed to rotate client secret for $WebAppAuthAppName" -ForegroundColor Red
+                if ($webCredResult.Error) { Write-Host "  $($webCredResult.Error)" -ForegroundColor Red }
+                $script:DeploymentErrors.Add("Web app auth client secret rotation")
+            }
+        }
+    } else {
+        $webCredResult = Invoke-AzCliSilent -Arguments @('ad','app','credential','reset','--id',$WebAppClientId,'--display-name','insight-ui-auth-secret','--years','2','--query','password','-o','tsv')
+        if ($webCredResult.ExitCode -eq 0 -and $webCredResult.Output) {
+            $WebAppClientSecret = $webCredResult.Output
+            Write-Host "[SUCCESS] Client secret created for web app auth registration" -ForegroundColor Green
+        } else {
+            Write-Host "[ERROR] Failed to create client secret for $WebAppAuthAppName" -ForegroundColor Red
+            if ($webCredResult.Error) { Write-Host "  $($webCredResult.Error)" -ForegroundColor Red }
+            $script:DeploymentErrors.Add("Web app auth client secret creation")
+        }
+    }
+}
+
+if (-not $WebAppClientId) {
+    Write-Host "[WARNING] WebAppClientId is empty - the 'WebAppClientId' Key Vault secret will be skipped." -ForegroundColor Yellow
+}
+if (-not $WebAppClientSecret) {
+    Write-Host "[WARNING] WebAppClientSecret is empty - the 'WebAppClientSecret' Key Vault secret will be skipped." -ForegroundColor Yellow
+}
 
 # =============================================================================
 # STEP 5: Service Bus
@@ -1057,6 +1131,9 @@ foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity))
     }
 }
 
+Write-Host "[INFO] Storage Blob Data Reader role for web app" -ForegroundColor Cyan
+if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Blob Data Reader' -Scope $StorageAccountId)) { $newAssignments++ }
+
 # Admin user needs blob access for container creation and direct blob operations
 if ($CurrentUserId) {
     Write-Host "[INFO] Storage Blob Data Contributor for admin user" -ForegroundColor Cyan
@@ -1184,6 +1261,9 @@ $kvSecrets = @{
     "GraphClientId"              = $GraphClientId
     "GraphClientSecret"          = $GraphClientSecret
     "GraphTenantId"              = $TenantId
+    "WebAppTenantId"             = $TenantId
+    "WebAppClientId"             = $WebAppClientId
+    "WebAppClientSecret"         = $WebAppClientSecret
     "CosmosDbEndpoint"           = $CosmosDbEndpoint
     "CosmosDbDatabaseName"       = $CosmosDbDatabaseName
     "CosmosDbContainerName"               = $CosmosDbContainerName
@@ -1317,6 +1397,18 @@ Write-Host "[INFO] Configuring Web App settings..." -ForegroundColor Cyan
 $webAppSettingsPayload = @{
     properties = @{
         "AZURE_KEY_VAULT_URL"      = $KvUrl
+        # OIDC sign-in for end users (Spring Security). Renamed away from AZURE_* so
+        # DefaultAzureCredential.EnvironmentCredential does NOT pick them up — the
+        # app's system-assigned managed identity is used for Azure data-plane access.
+        "TENANT_ID"                = "@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=WebAppTenantId)"
+        "WEBAPP_CLIENT_ID"         = "@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=WebAppClientId)"
+        "WEBAPP_CLIENT_SECRET"     = "@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=WebAppClientSecret)"
+        # Concrete data-plane endpoints (avoid KV-reference resolution issues).
+        "COSMOS_ENDPOINT"          = "https://$CosmosDbAccountName.documents.azure.com:443/"
+        "COSMOS_DATABASE_NAME"     = $CosmosDbDatabaseName
+        "COSMOS_CONTAINER_NAME"    = $CosmosDbContainerName
+        "STORAGE_ENDPOINT"         = "https://$StorageAccountName.blob.core.windows.net/"
+        "STORAGE_CONTAINER_NAME"   = $StorageContainerName
     }
 } | ConvertTo-Json -Compress
 

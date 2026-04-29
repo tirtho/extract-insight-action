@@ -31,3 +31,7 @@ env.bat
 
 # Project libraries
 project-lib/
+
+# Maven build output
+target/
+**/target/

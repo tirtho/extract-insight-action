@@ -984,7 +984,15 @@ WEBAPP_SETTINGS_TEMP=$(mktemp)
 cat > "$WEBAPP_SETTINGS_TEMP" <<EOFWEBAPP
 {
   "properties": {
-    "AZURE_KEY_VAULT_URL": "$KV_URL"
+    "AZURE_KEY_VAULT_URL": "$KV_URL",
+    "TENANT_ID": "@Microsoft.KeyVault(VaultName=$KEY_VAULT_NAME;SecretName=WebAppTenantId)",
+    "WEBAPP_CLIENT_ID": "@Microsoft.KeyVault(VaultName=$KEY_VAULT_NAME;SecretName=WebAppClientId)",
+    "WEBAPP_CLIENT_SECRET": "@Microsoft.KeyVault(VaultName=$KEY_VAULT_NAME;SecretName=WebAppClientSecret)",
+    "COSMOS_ENDPOINT": "https://${COSMOS_DB_ACCOUNT_NAME}.documents.azure.com:443/",
+    "COSMOS_DATABASE_NAME": "$COSMOS_DB_DATABASE_NAME",
+    "COSMOS_CONTAINER_NAME": "$COSMOS_DB_CONTAINER_NAME",
+    "STORAGE_ENDPOINT": "https://${STORAGE_ACCOUNT_NAME}.blob.core.windows.net/",
+    "STORAGE_CONTAINER_NAME": "${STORAGE_CONTAINER_NAME:-}"
   }
 }
 EOFWEBAPP

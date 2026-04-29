@@ -137,6 +137,7 @@ public class ExtractMail {
         docInput.setFromName(emailData.getFromName());
         docInput.setReceivedDateTime(emailData.getReceivedDateTime());
         docInput.setBodyPreview(emailData.getBodyPreview());
+        docInput.setBodyContent(stripHtmlTags(emailData.getBodyContent()));
         docInput.setAttachments(results);
 
         ctx.callActivity("StoreInCosmos", docInput, Void.class).await();
@@ -204,8 +205,8 @@ public class ExtractMail {
 
             if (email.getBody() != null && email.getBody().getContent() != null) {
                 data.setBodyContent(email.getBody().getContent());
-                String content = email.getBody().getContent();
-                data.setBodyPreview(content.substring(0, Math.min(500, content.length())));
+                String plainTextContent = stripHtmlTags(email.getBody().getContent());
+                data.setBodyPreview(plainTextContent.substring(0, Math.min(500, plainTextContent.length())));
             }
 
             // Fetch attachment list (metadata only, not bytes)
@@ -444,6 +445,12 @@ public class ExtractMail {
                     ? input.getReceivedDateTime() : "");
             doc.put("extractedAt", LocalDateTime.now().toString());
 
+            // Add mailbox owner (for filtering by authenticated user in UI)
+            String mailboxOwner = azConnection.getMailboxEmail();
+            if (mailboxOwner != null && !mailboxOwner.isBlank()) {
+                doc.put("mailboxOwner", mailboxOwner);
+            }
+
             if (input.getFromAddress() != null) {
                 doc.put("fromAddress", input.getFromAddress());
             }
@@ -452,6 +459,9 @@ public class ExtractMail {
             }
             if (input.getBodyPreview() != null) {
                 doc.put("bodyPreview", input.getBodyPreview());
+            }
+            if (input.getBodyContent() != null) {
+                doc.put("bodyContent", input.getBodyContent());
             }
             doc.set("attachments", attachmentRefs);
 

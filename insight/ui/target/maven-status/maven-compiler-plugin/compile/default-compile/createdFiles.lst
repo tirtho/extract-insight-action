@@ -1,0 +1,9 @@
+com\eia\ui\model\EmailSummaryView.class
+com\eia\ui\service\AzureEmailStore$AttachmentDownload.class
+com\eia\ui\config\SecurityConfig$1.class
+com\eia\ui\model\EmailDetailView.class
+com\eia\ui\EIAWebApp.class
+com\eia\ui\service\AzureEmailStore.class
+com\eia\ui\config\SecurityConfig.class
+com\eia\ui\controller\EmailController.class
+com\eia\ui\model\AttachmentView.class
