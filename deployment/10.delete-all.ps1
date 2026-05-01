@@ -28,10 +28,10 @@ $Environment              = if ($env:ENVIRONMENT)               { $env:ENVIRONME
 $ProjClean                = $ProjectName -replace '-',''
 $ResourceGroupName        = if ($env:RESOURCE_GROUP_NAME)       { $env:RESOURCE_GROUP_NAME }       else { "rg-$ProjectName-$Environment-$Suffix" }
 $KeyVaultName             = if ($env:KEY_VAULT_NAME)            { $env:KEY_VAULT_NAME }            else { "kv-$ProjectName-$Environment-$Suffix" }
-$StorageAccountName       = if ($env:STORAGE_ACCOUNT_NAME)      { $env:STORAGE_ACCOUNT_NAME }      else { "st$ProjClean$Environment$Suffix" }
 $ContentUnderstandingName = if ($env:CONTENT_UNDERSTANDING_NAME){ $env:CONTENT_UNDERSTANDING_NAME } else { "cu-$ProjectName-$Environment-$Suffix" }
 $AiFoundryName            = if ($env:AI_FOUNDRY_NAME)           { $env:AI_FOUNDRY_NAME }            else { "oai-$ProjectName-$Environment-$Suffix" }
 $GraphAppName             = if ($env:GRAPH_APP_NAME)            { $env:GRAPH_APP_NAME }             else { "$ProjectName-graph-api-$Environment" }
+$WebAppAuthAppName        = if ($env:WEBAPP_AUTH_APP_NAME)      { $env:WEBAPP_AUTH_APP_NAME }       else { "$ProjectName-webapp-auth-$Environment" }
 
 $ScriptRoot = $PSScriptRoot
 $RepoRoot   = Split-Path $ScriptRoot -Parent
@@ -64,6 +64,7 @@ Write-Host "    - Resource Group    : $ResourceGroupName (and ALL resources insi
 Write-Host "    - Key Vault purge   : $KeyVaultName" -ForegroundColor Yellow
 Write-Host "    - Cognitive Services purge: $ContentUnderstandingName, $AiFoundryName" -ForegroundColor Yellow
 Write-Host "    - Graph App Registration  : $GraphAppName" -ForegroundColor Yellow
+Write-Host "    - WebApp Auth App Registration: $WebAppAuthAppName" -ForegroundColor Yellow
 Write-Host "    - Local env.bat file" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "  This action is IRREVERSIBLE." -ForegroundColor Red
@@ -101,13 +102,42 @@ Write-Host "[OK] Logged in (subscription: $SubscriptionId)" -ForegroundColor Gre
 $script:DeleteErrors = [System.Collections.Generic.List[string]]::new()
 
 # =============================================================================
-# STEPS 1 & 2 (PARALLEL): Delete Graph App + Delete Resource Group
+# Helper: Delete an Entra ID app registration (and its service principal)
+# =============================================================================
+function Remove-AppRegistration {
+    param([string]$DisplayName)
+    $appId = (Invoke-AzCliSilent -Arguments @('ad','app','list','--display-name',$DisplayName,'--query','[0].appId','-o','tsv')).Output
+    if (-not $appId) {
+        Write-Host "[OK] App registration '$DisplayName' not found, nothing to delete" -ForegroundColor Gray
+        return
+    }
+    $spId = (Invoke-AzCliSilent -Arguments @('ad','sp','show','--id',$appId,'--query','id','-o','tsv')).Output
+    if ($spId) {
+        Write-Host "[INFO] Deleting service principal for '$DisplayName': $spId" -ForegroundColor Cyan
+        $r = Invoke-AzCliSilent -Arguments @('ad','sp','delete','--id',$spId)
+        if ($r.ExitCode -eq 0) {
+            Write-Host "[OK] Service principal deleted" -ForegroundColor Green
+        } else {
+            Write-Host "[WARNING] Failed to delete service principal: $($r.Error)" -ForegroundColor Yellow
+        }
+    }
+    Write-Host "[INFO] Deleting app registration: $DisplayName ($appId)" -ForegroundColor Cyan
+    $r = Invoke-AzCliSilent -Arguments @('ad','app','delete','--id',$appId)
+    if ($r.ExitCode -eq 0) {
+        Write-Host "[OK] App registration '$DisplayName' deleted" -ForegroundColor Green
+    } else {
+        Write-Host "[WARNING] Failed to delete app registration '$DisplayName': $($r.Error)" -ForegroundColor Yellow
+        $script:DeleteErrors.Add("App registration: $DisplayName")
+    }
+}
+
+# =============================================================================
+# STEPS 1 & 2 (PARALLEL): Delete App Registrations + Delete Resource Group
 # =============================================================================
 Write-Host ""
-Write-Host ">>> Steps 1 & 2: Delete Graph App Registration + Resource Group (parallel)" -ForegroundColor White
+Write-Host ">>> Steps 1 & 2: Delete App Registrations + Resource Group (parallel)" -ForegroundColor White
 
 # --- Kick off Resource Group deletion (async, --no-wait) ---
-$rgDeleted = $false
 $rgExists = (Invoke-AzCliSilent -Arguments @('group','show','--name',$ResourceGroupName,'--query','name','-o','tsv')).Output
 if ($rgExists) {
     Write-Host "[INFO] Deleting resource group: $ResourceGroupName (this may take several minutes)..." -ForegroundColor Cyan
@@ -118,33 +148,11 @@ if ($rgExists) {
     }
 } else {
     Write-Host "[OK] Resource group '$ResourceGroupName' not found, nothing to delete" -ForegroundColor Gray
-    $rgDeleted = $true
 }
 
-# --- Delete Graph App in main thread (while RG deletes in background) ---
-$graphAppId = (Invoke-AzCliSilent -Arguments @('ad','app','list','--display-name',$GraphAppName,'--query','[0].appId','-o','tsv')).Output
-if ($graphAppId) {
-    $spId = (Invoke-AzCliSilent -Arguments @('ad','sp','show','--id',$graphAppId,'--query','id','-o','tsv')).Output
-    if ($spId) {
-        Write-Host "[INFO] Deleting service principal: $spId" -ForegroundColor Cyan
-        $r = Invoke-AzCliSilent -Arguments @('ad','sp','delete','--id',$spId)
-        if ($r.ExitCode -eq 0) {
-            Write-Host "[OK] Service principal deleted (consent grants removed)" -ForegroundColor Green
-        } else {
-            Write-Host "[WARNING] Failed to delete service principal: $($r.Error)" -ForegroundColor Yellow
-        }
-    }
-    Write-Host "[INFO] Deleting app registration: $GraphAppName ($graphAppId)" -ForegroundColor Cyan
-    $r = Invoke-AzCliSilent -Arguments @('ad','app','delete','--id',$graphAppId)
-    if ($r.ExitCode -eq 0) {
-        Write-Host "[OK] App registration deleted" -ForegroundColor Green
-    } else {
-        Write-Host "[WARNING] Failed to delete app registration: $($r.Error)" -ForegroundColor Yellow
-        $script:DeleteErrors.Add("Graph app registration: $GraphAppName")
-    }
-} else {
-    Write-Host "[OK] App registration '$GraphAppName' not found, nothing to delete" -ForegroundColor Gray
-}
+# --- Delete app registrations in main thread (while RG deletes in background) ---
+Remove-AppRegistration -DisplayName $GraphAppName
+Remove-AppRegistration -DisplayName $WebAppAuthAppName
 
 # --- Poll for Resource Group deletion completion ---
 if ($rgExists -and -not $script:DeleteErrors.Contains("Resource group: $ResourceGroupName")) {
@@ -161,7 +169,6 @@ if ($rgExists -and -not $script:DeleteErrors.Contains("Resource group: $Resource
     $finalCheck = Invoke-AzCliSilent -Arguments @('group','exists','--name',$ResourceGroupName)
     if ($finalCheck.Output -eq 'false') {
         Write-Host "[OK] Resource group $ResourceGroupName deleted" -ForegroundColor Green
-        $rgDeleted = $true
     } else {
         Write-Host "[WARNING] Resource group deletion still in progress after $maxWaitSeconds seconds. It will complete in the background." -ForegroundColor Yellow
     }
@@ -268,5 +275,6 @@ Write-Host "    Resource Group      : $ResourceGroupName"
 Write-Host "    Key Vault (purged)  : $KeyVaultName"
 Write-Host "    Cognitive Services  : $ContentUnderstandingName, $AiFoundryName"
 Write-Host "    Graph App           : $GraphAppName"
+Write-Host "    WebApp Auth App     : $WebAppAuthAppName"
 Write-Host "    Local env.bat       : $envBatPath"
 Write-Host ""

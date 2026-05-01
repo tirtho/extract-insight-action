@@ -18,6 +18,94 @@ param(
 $ErrorActionPreference = "Stop"
 
 # =============================================================================
+# LOAD env.config (folded in from 1.config.ps1)
+# Reads KEY=VALUE pairs from deployment/env.config and sets them as environment
+# variables for this process so az/mvn/func and child processes inherit them.
+# =============================================================================
+$configFile = Join-Path $PSScriptRoot "env.config"
+if (Test-Path $configFile) {
+    $loadedVars = @()
+    Get-Content $configFile | ForEach-Object {
+        $line = $_.Trim()
+        if ($line -and -not $line.StartsWith('#') -and $line -match '^([^=]+)=(.*)$') {
+            $name  = $Matches[1].Trim()
+            $value = $Matches[2].Trim().Trim('"')
+            Set-Item -Path "env:$name" -Value $value
+            [System.Environment]::SetEnvironmentVariable($name, $value, 'Process')
+            $loadedVars += $name
+        }
+    }
+    Write-Host "[INFO] Loaded $($loadedVars.Count) environment variable(s) from env.config" -ForegroundColor Cyan
+} else {
+    Write-Host "[WARNING] env.config not found at $configFile - prompting for required values" -ForegroundColor Yellow
+
+    # Prompt for the required configuration values, with example defaults.
+    # If the user just presses Enter, the example value is used.
+    $configPrompts = @(
+        @{ Name = 'PROJECT_NAME';        Example = 'eia';                                              Default = 'eia' },
+        @{ Name = 'ENVIRONMENT';         Example = 'dev';                                              Default = 'dev' },
+        @{ Name = 'LOCATION';            Example = 'centralus';                                        Default = 'centralus' },
+        @{ Name = 'USER_EMAIL_ADDRESS';  Example = 'user@contoso.onmicrosoft.com';                     Default = $null },
+        @{ Name = 'SUBSCRIPTION_ID';     Example = '00000000-0000-0000-0000-000000000000';             Default = $null }
+    )
+
+    $loadedVars = @()
+    $generatedLines = @()
+    foreach ($p in $configPrompts) {
+        $current = [System.Environment]::GetEnvironmentVariable($p.Name, 'Process')
+        if ($current) {
+            Write-Host "  $($p.Name) already set in environment, keeping: $current" -ForegroundColor Gray
+            $loadedVars += $p.Name
+            $generatedLines += "$($p.Name)=`"$current`""
+            continue
+        }
+        $promptHint = if ($p.Default) { "default: $($p.Default), example: $($p.Example)" } else { "example: $($p.Example)" }
+        do {
+            $entered = Read-Host "Enter $($p.Name) [$promptHint]"
+            if ([string]::IsNullOrWhiteSpace($entered)) { $entered = $p.Default }
+            if ([string]::IsNullOrWhiteSpace($entered)) {
+                Write-Host "  [ERROR] $($p.Name) is required" -ForegroundColor Red
+            }
+        } while ([string]::IsNullOrWhiteSpace($entered))
+        $entered = $entered.Trim()
+        Set-Item -Path "env:$($p.Name)" -Value $entered
+        [System.Environment]::SetEnvironmentVariable($p.Name, $entered, 'Process')
+        $loadedVars += $p.Name
+        $generatedLines += "$($p.Name)=`"$entered`""
+    }
+
+    # Persist what the user entered to env.config for next time.
+    try {
+        Set-Content -Path $configFile -Value ($generatedLines -join "`r`n") -Encoding ASCII -Force
+        Write-Host "[INFO] Saved entered values to $configFile" -ForegroundColor Cyan
+    } catch {
+        Write-Host "[WARNING] Could not write $configFile : $_" -ForegroundColor Yellow
+    }
+    Write-Host "[INFO] Loaded $($loadedVars.Count) environment variable(s) from interactive prompts" -ForegroundColor Cyan
+}
+
+# Derived: SUFFIX / KEY_VAULT_NAME / KEY_VAULT_URL exported for downstream scripts.
+# Also write env.bat at the repo root so cmd-based tools can pick up KEY_VAULT_URL.
+$_ProjectName = if ($env:PROJECT_NAME) { $env:PROJECT_NAME } else { "eia" }
+$_Environment = if ($env:ENVIRONMENT)  { $env:ENVIRONMENT }  else { "dev" }
+$_KvName      = "kv-$_ProjectName-$_Environment-$Suffix"
+$env:SUFFIX          = $Suffix
+$env:KEY_VAULT_NAME  = $_KvName
+$env:KEY_VAULT_URL   = "https://$_KvName.vault.azure.net"
+[System.Environment]::SetEnvironmentVariable('SUFFIX',         $env:SUFFIX,         'Process')
+[System.Environment]::SetEnvironmentVariable('KEY_VAULT_NAME', $env:KEY_VAULT_NAME, 'Process')
+[System.Environment]::SetEnvironmentVariable('KEY_VAULT_URL',  $env:KEY_VAULT_URL,  'Process')
+
+$envBatPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'env.bat'
+$envBatContent = "@echo off`r`nset KEY_VAULT_URL=$($env:KEY_VAULT_URL)"
+try {
+    Set-Content -Path $envBatPath -Value $envBatContent -Encoding ASCII -Force
+    Write-Host "[INFO] Wrote $envBatPath" -ForegroundColor Cyan
+} catch {
+    Write-Host "[WARNING] Could not write $envBatPath : $_" -ForegroundColor Yellow
+}
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 $ProjectName   = if ($env:PROJECT_NAME)   { $env:PROJECT_NAME }   else { "eia" }
@@ -49,18 +137,32 @@ $AppInsightsName      = if ($env:APP_INSIGHTS_NAME)         { $env:APP_INSIGHTS_
 $CosmosDbAccountName  = if ($env:COSMOS_DB_ACCOUNT_NAME)    { $env:COSMOS_DB_ACCOUNT_NAME }    else { "cosmos-$ProjectName-$Environment-$Suffix" }
 $StorageQueueName     = if ($env:STORAGE_QUEUE_NAME)        { $env:STORAGE_QUEUE_NAME }        else { "cu-analyze-ops-$ProjectName-$Environment-$Suffix" }
 $StorageQueuePollingSchedule = if ($env:STORAGE_QUEUE_POLLING_SCHEDULE) { $env:STORAGE_QUEUE_POLLING_SCHEDULE } else { "0 */1 * * * *" }
+
+# Mailbox application configuration (folded in from 4.kv-settings-for-applications.ps1).
+# UserEmailAddress is required for the application to function; the deployment
+# will halt early if it is not provided.
+$UserEmailAddress = if ($env:USER_EMAIL_ADDRESS) { $env:USER_EMAIL_ADDRESS } else { "" }
+$PollingMailboxName = if ($env:POLLING_MAILBOX_NAME) { $env:POLLING_MAILBOX_NAME } else { "Inbox" }
+$ReadMailboxForPastNSeconds = if ($env:READ_MAILBOX_FOR_PAST_N_SECONDS) { $env:READ_MAILBOX_FOR_PAST_N_SECONDS } else { "3600" }
 $CosmosDbDatabaseName = "DocAIDatabase"
 $CosmosDbContainerName = "EmailExtracts"
 $AppServicePlanName   = if ($env:APP_SERVICE_PLAN_NAME)     { $env:APP_SERVICE_PLAN_NAME }     else { "plan-$ProjectName-$Environment" }
 $WebAppName           = if ($env:WEB_APP_NAME)              { $env:WEB_APP_NAME }              else { "app-$ProjectName-$Environment-$Suffix" }
 $ContentUnderstandingName = if ($env:CONTENT_UNDERSTANDING_NAME) { $env:CONTENT_UNDERSTANDING_NAME } else { "cu-$ProjectName-$Environment-$Suffix" }
 $AiFoundryName            = if ($env:AI_FOUNDRY_NAME)            { $env:AI_FOUNDRY_NAME }            else { "oai-$ProjectName-$Environment-$Suffix" }
-$AiFoundryDeploymentName  = "gpt-5.1-chat"
-$AiFoundryModelName       = "gpt-5.1-chat"
-$AiFoundryModelVersion    = "2025-11-13"
+$AiFoundryProjectName     = if ($env:AI_FOUNDRY_PROJECT_NAME)    { $env:AI_FOUNDRY_PROJECT_NAME }    else { "proj-$ProjectName-$Environment-$Suffix" }
+$AiFoundryProjectApiVersion = "2025-04-01-preview"
 $AiFoundryApiVersion      = "2024-12-01-preview"
 $AiFoundrySkuName         = "GlobalStandard"
 $AiFoundrySkuCapacity     = "50"
+$DeployModelsCsvPath      = Join-Path $PSScriptRoot "deploy-models.csv"
+
+# The "primary" model used by the Java app (deployment name stored in Key Vault).
+# Defaults are derived from the first row of deploy-models.csv at runtime
+# (see Step 9). These initial values are fallbacks if the CSV is missing.
+$AiFoundryDeploymentName  = "gpt-5.1-chat"
+$AiFoundryModelName       = "gpt-5.1-chat"
+$AiFoundryModelVersion    = "2025-11-13"
 
 # Content Understanding requires a supported completion model (separate from the main LLM deployment).
 # Supported: gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-5.2
@@ -92,6 +194,14 @@ if ($JavaMajorVersion -ne '21') {
     exit 1
 }
 Write-Host "[INFO] Java 21 confirmed from JAVA_HOME" -ForegroundColor Cyan
+
+# Verify USER_EMAIL_ADDRESS is set (required for mailbox polling)
+if (-not $UserEmailAddress) {
+    Write-Host "[ERROR] USER_EMAIL_ADDRESS environment variable is not set." -ForegroundColor Red
+    Write-Host "        Set it (e.g. \$env:USER_EMAIL_ADDRESS = 'user@contoso.com') and re-run." -ForegroundColor Red
+    exit 1
+}
+Write-Host "[INFO] USER_EMAIL_ADDRESS = $UserEmailAddress" -ForegroundColor Cyan
 
 # =============================================================================
 # HELPER FUNCTION
@@ -216,7 +326,8 @@ $script:ServiceLocationCache = @{}
 function Get-ServiceLocation {
     param(
         [Parameter(Mandatory=$true)][string]$ServiceName,
-        [Parameter(Mandatory=$true)][string]$DefaultLocation
+        [Parameter(Mandatory=$true)][string]$DefaultLocation,
+        [switch]$AlwaysPrompt
     )
 
     # Return cached result if already resolved
@@ -237,6 +348,37 @@ function Get-ServiceLocation {
         $parts = $line -split ','
         if ($parts[0].Trim().ToLower() -eq $ServiceName.ToLower()) {
             $supportedLocations = $parts[1..($parts.Length-1)] | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ -ne '' }
+
+            if ($AlwaysPrompt) {
+                # Always present a numbered list and let the user choose
+                Write-Host ""
+                Write-Host "[INFO] Select a location for service '$ServiceName':" -ForegroundColor Cyan
+                for ($i = 0; $i -lt $supportedLocations.Count; $i++) {
+                    $marker = ""
+                    if ($supportedLocations[$i] -eq $DefaultLocation.ToLower()) { $marker = " (default)" }
+                    Write-Host ("  [{0}] {1}{2}" -f ($i+1), $supportedLocations[$i], $marker)
+                }
+                $defaultIndex = [Array]::IndexOf($supportedLocations, $DefaultLocation.ToLower())
+                $defaultPromptIndex = if ($defaultIndex -ge 0) { $defaultIndex + 1 } else { 1 }
+                do {
+                    $userInput = Read-Host "Enter selection number [1-$($supportedLocations.Count)] (default: $defaultPromptIndex)"
+                    if ([string]::IsNullOrWhiteSpace($userInput)) { $userInput = "$defaultPromptIndex" }
+                    $valid = $false
+                    if ($userInput -match '^\d+$') {
+                        $idx = [int]$userInput
+                        if ($idx -ge 1 -and $idx -le $supportedLocations.Count) { $valid = $true }
+                    }
+                    if (-not $valid) {
+                        Write-Host "[ERROR] Invalid selection. Enter a number between 1 and $($supportedLocations.Count)." -ForegroundColor Red
+                    }
+                } while (-not $valid)
+
+                $chosen = $supportedLocations[[int]$userInput - 1]
+                $script:ServiceLocationCache[$ServiceName] = $chosen
+                Write-Host "[INFO] Using location '$chosen' for $ServiceName" -ForegroundColor Cyan
+                return $chosen
+            }
+
             if ($supportedLocations -contains $DefaultLocation.ToLower()) {
                 $script:ServiceLocationCache[$ServiceName] = $DefaultLocation
                 return $DefaultLocation
@@ -351,7 +493,7 @@ $LocationServiceBus           = Get-ServiceLocation -ServiceName "servicebus"   
 $LocationAppInsights          = Get-ServiceLocation -ServiceName "applicationinsights"  -DefaultLocation $Location
 $LocationCosmosDb             = Get-ServiceLocation -ServiceName "cosmosdb"             -DefaultLocation $Location
 $LocationContentUnderstanding = Get-ServiceLocation -ServiceName "contentunderstanding" -DefaultLocation $Location
-$LocationAiFoundry            = Get-ServiceLocation -ServiceName "aifoundry"            -DefaultLocation $Location
+$LocationAiFoundry            = Get-ServiceLocation -ServiceName "aifoundry"            -DefaultLocation $Location -AlwaysPrompt
 $LocationAppService           = Get-ServiceLocation -ServiceName "appservice"           -DefaultLocation $Location
 $LocationFunctionApp          = Get-ServiceLocation -ServiceName "functionapp"          -DefaultLocation $Location
 
@@ -547,7 +689,7 @@ if (-not $GraphClientSecret) {
     Write-Host "[WARNING] You can set it manually: az keyvault secret set --vault-name $KeyVaultName --name GraphClientSecret --value '<secret>'" -ForegroundColor Yellow
 }
 
-Write-Host "[INFO] Run .\grant-graph-consent.ps1 -Suffix $Suffix to grant admin consent (requires tenant admin role)" -ForegroundColor Cyan
+Write-Host "[INFO] Run .\3.grant-graph-consent.ps1 -Suffix $Suffix to grant admin consent (requires tenant admin role)" -ForegroundColor Cyan
 
 # -----------------------------------------------------------------------------
 # Web app Entra ID app registration for Spring Security OIDC login
@@ -759,15 +901,16 @@ if (Test-AzResource -Arguments @('cognitiveservices','account','show','--name',$
 Write-Host ""
 Write-Host ">>> Step 9/12: Azure AI Foundry + LLM Model Deployment" -ForegroundColor White
 
-# Create AI Foundry resource (Azure AI Services account)
+# Create AI Foundry resource (Azure AI Services account with project management enabled)
 if (Test-AzResource -Arguments @('cognitiveservices','account','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')) {
-    Write-Host "[WARNING] AI Foundry resource $AiFoundryName already exists, skipping" -ForegroundColor Yellow
+    Write-Host "[WARNING] AI Foundry resource $AiFoundryName already exists, skipping creation" -ForegroundColor Yellow
 } else {
     $result = Invoke-AzCli -Description "Creating Azure AI Foundry resource: $AiFoundryName" `
         -Arguments @('cognitiveservices','account','create','--name',$AiFoundryName,
                      '--resource-group',$ResourceGroupName,'--location',$LocationAiFoundry,
                      '--kind','AIServices','--sku','S0',
                      '--custom-domain',$AiFoundryName,
+                     '--assign-identity',
                      '--tags',"project=$ProjectName","environment=$Environment",
                      '--output','table','--yes')
     if ($result -ne $null) {
@@ -775,23 +918,287 @@ if (Test-AzResource -Arguments @('cognitiveservices','account','show','--name',$
     }
 }
 
-# Deploy main LLM model (gpt-5.1-chat, GlobalStandard, 50K TPM)
-$deploymentExists = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','deployment','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--deployment-name',$AiFoundryDeploymentName,'--query','name','-o','tsv')).Output
-if ($deploymentExists) {
-    Write-Host "[WARNING] Model deployment $AiFoundryDeploymentName already exists, skipping" -ForegroundColor Yellow
+# Ensure the account is Foundry-enabled (allowProjectManagement = true).
+# This property is not exposed as a first-class az flag, so we enable it via az resource update.
+$AiFoundryAccountId = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
+if ($AiFoundryAccountId) {
+    $apmCheck = Invoke-AzCliSilent -Arguments @('resource','show','--ids',$AiFoundryAccountId,'--query','properties.allowProjectManagement','-o','tsv')
+    $apmCurrent = if ($apmCheck.Output) { $apmCheck.Output.Trim().ToLower() } else { '' }
+    if ($apmCurrent -ne 'true') {
+        $apmResult = Invoke-AzCli -Description "Enabling project management on $AiFoundryName" `
+            -Arguments @('resource','update','--ids',$AiFoundryAccountId,
+                         '--set','properties.allowProjectManagement=true',
+                         '--latest-include-preview','--output','none')
+        if ($apmResult -ne $null) {
+            Write-Host "[SUCCESS] Project management enabled on $AiFoundryName" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "[WARNING] Project management already enabled on $AiFoundryName, skipping" -ForegroundColor Yellow
+    }
 } else {
-    $result = Invoke-AzCli -Description "Deploying model $AiFoundryModelName ($AiFoundrySkuName, ${AiFoundrySkuCapacity}K TPM)" `
-        -Arguments @('cognitiveservices','account','deployment','create',
-                     '--name',$AiFoundryName,'--resource-group',$ResourceGroupName,
-                     '--deployment-name',$AiFoundryDeploymentName,
-                     '--model-name',$AiFoundryModelName,
-                     '--model-version',$AiFoundryModelVersion,
-                     '--model-format','OpenAI',
-                     '--sku-name',$AiFoundrySkuName,
-                     '--sku-capacity',$AiFoundrySkuCapacity,
-                     '--output','table')
-    if ($result -ne $null) {
-        Write-Host "[SUCCESS] Model $AiFoundryModelName deployed as $AiFoundryDeploymentName" -ForegroundColor Green
+    Write-Host "[ERROR] Could not resolve AI Foundry account id; skipping project setup" -ForegroundColor Red
+}
+
+# Create the AI Foundry project (child resource under the AIServices account)
+if ($AiFoundryAccountId) {
+    $projectResourceId = "$AiFoundryAccountId/projects/$AiFoundryProjectName"
+    $projectExists = Invoke-AzCliSilent -Arguments @('resource','show','--ids',$projectResourceId,'--api-version',$AiFoundryProjectApiVersion,'--query','name','-o','tsv')
+    if ($projectExists.ExitCode -eq 0 -and $projectExists.Output) {
+        Write-Host "[WARNING] AI Foundry project $AiFoundryProjectName already exists, skipping" -ForegroundColor Yellow
+    } else {
+        # Build the full project resource body (location + properties).
+        # az rest is used because `az resource create` rejects the nested
+        # accounts/projects type in some CLI versions.
+        $projectBody = @{
+            location   = $LocationAiFoundry
+            properties = @{
+                displayName = $AiFoundryProjectName
+                description = "AI Foundry project for $ProjectName ($Environment)"
+            }
+        } | ConvertTo-Json -Compress -Depth 5
+        $projectBodyFile = Join-Path ([System.IO.Path]::GetTempPath()) "foundry-project-$([guid]::NewGuid().ToString('N')).json"
+        Set-Content -Path $projectBodyFile -Value $projectBody -Encoding UTF8
+        $projectArmUrl = "https://management.azure.com$projectResourceId`?api-version=$AiFoundryProjectApiVersion"
+        try {
+            $maxAttempts = 4
+            $attemptNum  = 0
+            $projectOk   = $false
+            $lastErr     = ''
+            while (-not $projectOk -and $attemptNum -lt $maxAttempts) {
+                $attemptNum++
+                Write-Host "[INFO] Creating AI Foundry project: $AiFoundryProjectName (attempt $attemptNum/$maxAttempts)" -ForegroundColor Cyan
+                $putResult = Invoke-AzCliSilent -Arguments @('rest','--method','put',
+                                 '--url',$projectArmUrl,
+                                 '--body',"@$projectBodyFile",
+                                 '--output','none')
+                if ($putResult.ExitCode -eq 0) {
+                    $projectOk = $true
+                    break
+                }
+                $lastErr = $putResult.Output
+                $isTransient = ($lastErr -match 'InternalServerError|ServiceUnavailable|GatewayTimeout|429|TooManyRequests|temporar')
+                if ($isTransient -and $attemptNum -lt $maxAttempts) {
+                    $delay = [Math]::Min(60, 10 * [Math]::Pow(2, $attemptNum - 1))
+                    Write-Host "[WARNING] Transient error from ARM, retrying in $delay seconds..." -ForegroundColor Yellow
+                    if ($lastErr) { Write-Host "  $lastErr" -ForegroundColor DarkYellow }
+                    Start-Sleep -Seconds $delay
+                } else {
+                    break
+                }
+            }
+            if ($projectOk) {
+                Write-Host "[SUCCESS] AI Foundry project $AiFoundryProjectName created" -ForegroundColor Green
+            } else {
+                Write-Host "[ERROR] Creating AI Foundry project: $AiFoundryProjectName failed after $attemptNum attempt(s)" -ForegroundColor Red
+                if ($lastErr) { Write-Host "  $lastErr" -ForegroundColor Red }
+                $script:DeploymentErrors.Add("Creating AI Foundry project: $AiFoundryProjectName")
+            }
+        } finally {
+            Remove-Item -Path $projectBodyFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# -----------------------------------------------------------------------------
+# Deploy LLM models on the AI Foundry account from deploy-models.csv
+# CSV format: <model-name>,<sku-name>,<model-version>
+# Deployment name is the same as the model name. If a model is unavailable for
+# the requested SKU/version in the chosen region, the user is prompted for an
+# alternative model name, deployment type, and version.
+# -----------------------------------------------------------------------------
+
+# Cache of available OpenAI models per location: $script:FoundryModelCatalog[$loc] = parsed JSON array
+$script:FoundryModelCatalog = @{}
+
+function Get-FoundryModelCatalog {
+    param([Parameter(Mandatory=$true)][string]$Location)
+    if ($script:FoundryModelCatalog.ContainsKey($Location)) {
+        return $script:FoundryModelCatalog[$Location]
+    }
+    $listResult = Invoke-AzCliSilent -Arguments @('cognitiveservices','model','list','--location',$Location,'-o','json')
+    $catalog = @()
+    if ($listResult.ExitCode -eq 0 -and $listResult.Output) {
+        try {
+            $parsed = $listResult.Output | ConvertFrom-Json -ErrorAction Stop
+            $catalog = @($parsed | Where-Object { $_.model.format -eq 'OpenAI' -and $_.kind -eq 'AIServices' })
+            if (-not $catalog -or $catalog.Count -eq 0) {
+                # Fallback: include all OpenAI-format entries regardless of kind
+                $catalog = @($parsed | Where-Object { $_.model.format -eq 'OpenAI' })
+            }
+        } catch {
+            Write-Host "[WARNING] Could not parse model catalog for $Location" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "[WARNING] Could not list available models in $Location" -ForegroundColor Yellow
+    }
+    $script:FoundryModelCatalog[$Location] = $catalog
+    return $catalog
+}
+
+function Get-StringSimilarityScore {
+    # Simple case-insensitive similarity: longest common substring length / max(len).
+    # Plus a bonus if one is a substring of the other.
+    param([string]$A, [string]$B)
+    if (-not $A -or -not $B) { return 0.0 }
+    $a = $A.ToLower(); $b = $B.ToLower()
+    if ($a -eq $b) { return 1.0 }
+    if ($a.Contains($b) -or $b.Contains($a)) {
+        return 0.85 + (0.15 * ([Math]::Min($a.Length,$b.Length) / [Math]::Max($a.Length,$b.Length)))
+    }
+    # Longest common substring
+    $la = $a.Length; $lb = $b.Length
+    $best = 0
+    $prev = New-Object 'int[]' ($lb + 1)
+    for ($i = 1; $i -le $la; $i++) {
+        $curr = New-Object 'int[]' ($lb + 1)
+        for ($j = 1; $j -le $lb; $j++) {
+            if ($a[$i-1] -eq $b[$j-1]) {
+                $curr[$j] = $prev[$j-1] + 1
+                if ($curr[$j] -gt $best) { $best = $curr[$j] }
+            }
+        }
+        $prev = $curr
+    }
+    return $best / [Math]::Max($la, $lb)
+}
+
+function Show-ModelSuggestions {
+    param(
+        [Parameter(Mandatory=$true)][string]$Location,
+        [Parameter(Mandatory=$true)][string]$RequestedModel,
+        [string]$RequestedSku,
+        [int]$Top = 5
+    )
+    $catalog = Get-FoundryModelCatalog -Location $Location
+    if (-not $catalog -or $catalog.Count -eq 0) { return }
+
+    # Score by model name similarity
+    $scored = foreach ($entry in $catalog) {
+        $name = $entry.model.name
+        $score = Get-StringSimilarityScore -A $RequestedModel -B $name
+        [PSCustomObject]@{
+            Name    = $name
+            Version = $entry.model.version
+            Skus    = ($entry.model.skus | ForEach-Object { $_.name } | Sort-Object -Unique) -join ', '
+            Score   = $score
+        }
+    }
+    # Group by name+version, keep best score
+    $grouped = $scored | Group-Object Name, Version | ForEach-Object {
+        $_.Group | Sort-Object Score -Descending | Select-Object -First 1
+    }
+    $topResults = @($grouped | Sort-Object Score -Descending | Select-Object -First $Top)
+
+    if ($topResults.Count -gt 0) {
+        Write-Host ""
+        Write-Host "[INFO] Closest matches for '$RequestedModel' in $Location :" -ForegroundColor Cyan
+        $topResults | ForEach-Object {
+            Write-Host ("  - {0,-30} version={1,-15} skus={2}" -f $_.Name, $_.Version, $_.Skus) -ForegroundColor Cyan
+        }
+    }
+
+    if ($RequestedSku) {
+        $skuMatches = $catalog | Where-Object { $_.model.name -eq $RequestedModel } | ForEach-Object {
+            [PSCustomObject]@{
+                Version = $_.model.version
+                Skus    = ($_.model.skus | ForEach-Object { $_.name }) -join ', '
+            }
+        }
+        if ($skuMatches) {
+            Write-Host "[INFO] Versions/SKUs available for exact name '$RequestedModel':" -ForegroundColor Cyan
+            $skuMatches | ForEach-Object {
+                Write-Host ("  - version={0,-15} skus={1}" -f $_.Version, $_.Skus) -ForegroundColor Cyan
+            }
+        }
+    }
+}
+
+function Invoke-FoundryModelDeployment {
+    param(
+        [Parameter(Mandatory=$true)][string]$AccountName,
+        [Parameter(Mandatory=$true)][string]$ResourceGroup,
+        [Parameter(Mandatory=$true)][string]$ModelName,
+        [Parameter(Mandatory=$true)][string]$SkuName,
+        [Parameter(Mandatory=$true)][string]$ModelVersion,
+        [Parameter(Mandatory=$true)][string]$Capacity
+    )
+
+    $deploymentName = $ModelName
+    $existing = Invoke-AzCliSilent -Arguments @('cognitiveservices','account','deployment','show','--name',$AccountName,'--resource-group',$ResourceGroup,'--deployment-name',$deploymentName,'--query','name','-o','tsv')
+    if ($existing.ExitCode -eq 0 -and $existing.Output) {
+        Write-Host "[WARNING] Model deployment $deploymentName already exists on $AccountName, skipping" -ForegroundColor Yellow
+        return $true
+    }
+
+    $attempt = Invoke-AzCliSilent -Arguments @('cognitiveservices','account','deployment','create',
+                 '--name',$AccountName,'--resource-group',$ResourceGroup,
+                 '--deployment-name',$deploymentName,
+                 '--model-name',$ModelName,
+                 '--model-version',$ModelVersion,
+                 '--model-format','OpenAI',
+                 '--sku-name',$SkuName,
+                 '--sku-capacity',$Capacity,
+                 '--output','table')
+
+    if ($attempt.ExitCode -eq 0) {
+        Write-Host "[SUCCESS] Deployed $ModelName ($SkuName, version $ModelVersion) on $AccountName" -ForegroundColor Green
+        return $true
+    }
+
+    Write-Host "[ERROR] Failed to deploy $ModelName ($SkuName, version $ModelVersion) on $AccountName" -ForegroundColor Red
+    if ($attempt.Output) { Write-Host $attempt.Output -ForegroundColor Red }
+    return $false
+}
+
+if (-not (Test-Path $DeployModelsCsvPath)) {
+    Write-Host "[WARNING] $DeployModelsCsvPath not found - skipping model deployments" -ForegroundColor Yellow
+} else {
+    $modelLines = Get-Content $DeployModelsCsvPath | Where-Object { $_ -and ($_.Trim() -ne '') -and (-not $_.Trim().StartsWith('#')) }
+    $rowIndex = 0
+    foreach ($modelLine in $modelLines) {
+        $cols = $modelLine -split ','
+        if ($cols.Count -lt 3) {
+            Write-Host "[WARNING] Skipping malformed line in deploy-models.csv: $modelLine" -ForegroundColor Yellow
+            continue
+        }
+        $modelName    = $cols[0].Trim()
+        $modelSku     = $cols[1].Trim()
+        $modelVersion = $cols[2].Trim()
+
+        $ok = Invoke-FoundryModelDeployment -AccountName $AiFoundryName -ResourceGroup $ResourceGroupName `
+                -ModelName $modelName -SkuName $modelSku -ModelVersion $modelVersion -Capacity $AiFoundrySkuCapacity
+
+        while (-not $ok) {
+            Show-ModelSuggestions -Location $LocationAiFoundry -RequestedModel $modelName -RequestedSku $modelSku
+            Write-Host ""
+            Write-Host "[INPUT] Model '$modelName' (sku '$modelSku', version '$modelVersion') is unavailable. Provide an alternative or press Enter on model name to skip." -ForegroundColor Yellow
+            $altModel = Read-Host "Alternative model name (Enter to skip)"
+            if ([string]::IsNullOrWhiteSpace($altModel)) {
+                Write-Host "[INFO] Skipping model '$modelName'" -ForegroundColor Cyan
+                break
+            }
+            $altSku = Read-Host "Alternative deployment type / sku-name (default: $modelSku)"
+            if ([string]::IsNullOrWhiteSpace($altSku)) { $altSku = $modelSku }
+            $altVersion = Read-Host "Alternative model version"
+            if ([string]::IsNullOrWhiteSpace($altVersion)) {
+                Write-Host "[ERROR] Model version is required" -ForegroundColor Red
+                continue
+            }
+            $modelName    = $altModel.Trim()
+            $modelSku     = $altSku.Trim()
+            $modelVersion = $altVersion.Trim()
+            $ok = Invoke-FoundryModelDeployment -AccountName $AiFoundryName -ResourceGroup $ResourceGroupName `
+                    -ModelName $modelName -SkuName $modelSku -ModelVersion $modelVersion -Capacity $AiFoundrySkuCapacity
+        }
+
+        # The first successfully-handled row becomes the "primary" model used by the
+        # Java app (its deployment name/model name/version are stored in Key Vault).
+        if ($rowIndex -eq 0 -and $ok) {
+            $AiFoundryDeploymentName = $modelName
+            $AiFoundryModelName      = $modelName
+            $AiFoundryModelVersion   = $modelVersion
+        }
+        $rowIndex++
     }
 }
 
@@ -857,12 +1264,10 @@ if (-not $CuEndpoint) {
     Write-Host "[WARNING] Cannot configure CU defaults - CU endpoint not available" -ForegroundColor Yellow
 } else {
     # Ensure current user has Cognitive Services User on CU (data-plane role required for PATCH defaults)
-    $cuRbacWait = $false
     if ($CurrentUserId -and $CuResourceId) {
         $cuRoleAlready = Ensure-RoleAssignment -Assignee $CurrentUserId -Role 'Cognitive Services User' -Scope $CuResourceId
         if (-not $cuRoleAlready) {
             Write-Host "[INFO] Granted Cognitive Services User to current user on $ContentUnderstandingName" -ForegroundColor Cyan
-            $cuRbacWait = $true
             Write-Host "[INFO] Waiting 60 seconds for RBAC propagation..." -ForegroundColor Cyan
             Start-Sleep -Seconds 60
         }
@@ -1277,6 +1682,9 @@ $kvSecrets = @{
     "StorageContainerName"                  = $StorageContainerName
     "StorageQueueName"                      = $StorageQueueName
     "StorageQueuePollingSchedule"            = $StorageQueuePollingSchedule
+    "UserEmailAddress"                       = $UserEmailAddress
+    "PollingMailboxName"                     = $PollingMailboxName
+    "ReadMailboxForPastNSeconds"             = $ReadMailboxForPastNSeconds
 }
 foreach ($entry in $kvSecrets.GetEnumerator()) {
     if (-not $entry.Value) {
@@ -1500,8 +1908,13 @@ if ($script:DeploymentErrors.Count -gt 0) {
     Write-Host "[SUCCESS] ==========================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "[INFO] Next Steps:" -ForegroundColor Cyan
-    Write-Host "  1. Grant Graph API admin consent:  .\grant-graph-consent.ps1 -Suffix $Suffix"
-    Write-Host "  2. Deploy your function code to the created function apps"
-    Write-Host "  3. Deploy your Spring Boot JAR/WAR to the web app: $WebAppName"
-    Write-Host "  4. Test the deployment with sample data"
+    Write-Host "  1. Grant Graph API admin consent (requires tenant admin role):"
+    Write-Host "       .\3.grant-graph-consent.ps1 -Suffix $Suffix"
+    Write-Host "  2. (Optional) Configure operational tweaks in the deployed environment:"
+    Write-Host "       .\4.operation-dev.ps1 -Suffix $Suffix"
+    Write-Host "  3. Register Content Understanding analyzer schemas:"
+    Write-Host "       .\5.content-understanding-add-schema.ps1 -Suffix $Suffix"
+    Write-Host "  4. Build and deploy application code (functions + web app):"
+    Write-Host "       .\6.deploy-code.ps1 -Suffix $Suffix"
+    Write-Host "  5. Test the deployment with sample data"
 }

@@ -1,0 +1,4 @@
+# Models to deploy on the Azure AI Foundry account/project.
+# Format: <model-name>,<sku-name>,<model-version>
+# The deployment name will match the model name.
+gpt-5.4-pro,GlobalStandard,2026-03-05

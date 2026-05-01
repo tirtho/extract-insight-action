@@ -14,8 +14,8 @@
     Optional. Path to the folder containing .json schema files.
     Defaults to <script-dir>\cu-schemas.
 .USAGE
-    .\6.content-understanding-add-schema.ps1 -Suffix 0
-    .\6.content-understanding-add-schema.ps1 -Suffix 0 -SchemaFolder C:\my-schemas
+    .\5.content-understanding-add-schema.ps1 -Suffix 0
+    .\5.content-understanding-add-schema.ps1 -Suffix 0 -SchemaFolder C:\my-schemas
 #>
 param(
     [Parameter(Mandatory=$true, HelpMessage="Suffix used during infrastructure deployment (e.g. 0)")]

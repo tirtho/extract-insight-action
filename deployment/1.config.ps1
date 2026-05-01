@@ -15,16 +15,24 @@ if (-not (Test-Path $configFile)) {
     return
 }
 
+$loadedVars = @()
 Get-Content $configFile | ForEach-Object {
     $line = $_.Trim()
     if ($line -and -not $line.StartsWith('#') -and $line -match '^([^=]+)=(.*)$') {
         $name  = $Matches[1].Trim()
         $value = $Matches[2].Trim().Trim('"')
+        # Set on the current PowerShell session (env: drive) AND the underlying
+        # process environment so child processes (az, mvn, func, etc.) inherit them.
+        Set-Item -Path "env:$name" -Value $value
         [System.Environment]::SetEnvironmentVariable($name, $value, 'Process')
+        $loadedVars += $name
     }
 }
 
-Write-Host "[INFO] Environment variables loaded from env.config" -ForegroundColor Cyan
+Write-Host "[INFO] Loaded $($loadedVars.Count) environment variable(s) from env.config:" -ForegroundColor Cyan
+foreach ($n in $loadedVars) {
+    Write-Host "  $n = $([System.Environment]::GetEnvironmentVariable($n, 'Process'))" -ForegroundColor Gray
+}
 
 # =============================================================================
 # Prompt for suffix and derive KEY_VAULT_URL
@@ -39,5 +47,28 @@ if (-not $Suffix) {
 }
 
 $KeyVaultName = "kv-$ProjectName-$Environment-$Suffix"
-$env:KEY_VAULT_URL = "https://$KeyVaultName.vault.azure.net"
-Write-Host "[OK] KEY_VAULT_URL = $env:KEY_VAULT_URL" -ForegroundColor Green
+$env:SUFFIX          = $Suffix
+$env:KEY_VAULT_NAME  = $KeyVaultName
+$env:KEY_VAULT_URL   = "https://$KeyVaultName.vault.azure.net"
+[System.Environment]::SetEnvironmentVariable('SUFFIX',         $env:SUFFIX,         'Process')
+[System.Environment]::SetEnvironmentVariable('KEY_VAULT_NAME', $env:KEY_VAULT_NAME, 'Process')
+[System.Environment]::SetEnvironmentVariable('KEY_VAULT_URL',  $env:KEY_VAULT_URL,  'Process')
+
+Write-Host "[OK] SUFFIX          = $env:SUFFIX" -ForegroundColor Green
+Write-Host "[OK] KEY_VAULT_NAME  = $env:KEY_VAULT_NAME" -ForegroundColor Green
+Write-Host "[OK] KEY_VAULT_URL   = $env:KEY_VAULT_URL" -ForegroundColor Green
+
+# =============================================================================
+# Generate env.bat in the repo root (KEY_VAULT_URL for tools that source env.bat)
+# =============================================================================
+$envBatPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'env.bat'
+$envBatContent = "@echo off`r`nset KEY_VAULT_URL=$($env:KEY_VAULT_URL)"
+Set-Content -Path $envBatPath -Value $envBatContent -Encoding ASCII -Force
+Write-Host "[OK] Wrote $envBatPath" -ForegroundColor Green
+
+if ($MyInvocation.InvocationName -ne '.') {
+    Write-Host ""
+    Write-Host "[WARNING] This script was not dot-sourced. The environment variables" -ForegroundColor Yellow
+    Write-Host "          will be lost when this script exits." -ForegroundColor Yellow
+    Write-Host "          Re-run with:  . .\1.config.ps1" -ForegroundColor Yellow
+}

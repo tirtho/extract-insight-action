@@ -101,8 +101,20 @@ Write-Host "Logged in as: $($account.user) (Subscription: $($account.name))" -Fo
 Write-Host ""
 Write-Host "Looking up app registration: $GraphAppName ..." -ForegroundColor Gray
 $appResult = Invoke-Az -Arguments @('ad','app','list','--display-name',$GraphAppName,'--query','[0].appId','-o','tsv')
-if ($appResult.ExitCode -ne 0 -or -not $appResult.Output) {
-    Write-Host "[ERROR] App registration '$GraphAppName' not found. Run deploy-infrastructure.ps1 first." -ForegroundColor Red
+if ($appResult.ExitCode -ne 0) {
+    Write-Host "[ERROR] Failed to query app registrations (exit code $($appResult.ExitCode))." -ForegroundColor Red
+    if ($appResult.Stderr) { Write-Host "  $($appResult.Stderr)" -ForegroundColor Red }
+    if ($appResult.Stderr -match 'Continuous access evaluation|InteractionRequired|TokenCreatedWithOutdatedPolicies|AADSTS') {
+        Write-Host "[HINT] Your Azure CLI token needs to be refreshed. Run 'az login' and retry." -ForegroundColor Yellow
+    }
+    exit 1
+}
+if (-not $appResult.Output) {
+    Write-Host "[ERROR] App registration '$GraphAppName' not found in current tenant." -ForegroundColor Red
+    Write-Host "[HINT] Other 'graph-api' apps visible to you in this tenant:" -ForegroundColor Yellow
+    $alt = Invoke-Az -Arguments @('ad','app','list','--filter',"contains(displayName,'graph-api')",'--query','[].{name:displayName, appId:appId}','-o','table')
+    if ($alt.Output) { Write-Host $alt.Output -ForegroundColor Yellow }
+    Write-Host "[HINT] If your app uses a different name, set the env var GRAPH_APP_NAME and re-run, or run deploy-infrastructure.ps1 first." -ForegroundColor Yellow
     exit 1
 }
 $GraphClientId = $appResult.Output

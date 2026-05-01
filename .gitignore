@@ -35,3 +35,15 @@ project-lib/
 # Maven build output
 target/
 **/target/
+
+# VS Code workspace settings
+.vscode/
+**/.vscode/
+
+# Azurite local storage emulator artifacts
+__blobstorage__/
+**/__blobstorage__/
+__queuestorage__/
+**/__queuestorage__/
+__*__.json
+**/__*__.json
