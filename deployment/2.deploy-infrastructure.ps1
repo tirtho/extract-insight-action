@@ -246,9 +246,17 @@ function Test-AzResource {
     return $false
 }
 
-# Returns $true if the role assignment was already in place
+# Returns $true if the role assignment was already in place.
+# Pass -PrincipalType 'ServicePrincipal' (or 'User') for managed identities/users
+# to use --assignee-object-id and bypass the graph.microsoft.com lookup that can
+# time out on restricted networks.
 function Ensure-RoleAssignment {
-    param([string]$Assignee, [string]$Role, [string]$Scope)
+    param(
+        [string]$Assignee,
+        [string]$Role,
+        [string]$Scope,
+        [string]$PrincipalType = ''
+    )
     if (-not $Scope) {
         Write-Host "[ERROR] Ensure-RoleAssignment: Scope is empty for role '$Role' on assignee '$Assignee'" -ForegroundColor Red
         $script:DeploymentErrors.Add("RBAC: '$Role' for '$Assignee' - empty scope")
@@ -258,10 +266,19 @@ function Ensure-RoleAssignment {
     if ($existing.ExitCode -eq 0 -and $existing.Output) {
         return $true  # already exists
     }
-    $result = Invoke-AzCliSilent -Arguments @('role','assignment','create','--assignee',$Assignee,'--role',$Role,'--scope',$Scope,'--output','none')
+    if ($PrincipalType) {
+        $createArgs = @('role','assignment','create',
+            '--assignee-object-id',$Assignee,
+            '--assignee-principal-type',$PrincipalType,
+            '--role',$Role,'--scope',$Scope,'--output','none')
+    } else {
+        $createArgs = @('role','assignment','create','--assignee',$Assignee,'--role',$Role,'--scope',$Scope,'--output','none')
+    }
+    $result = Invoke-AzCliSilent -Arguments $createArgs
     if ($result.ExitCode -ne 0) {
         Write-Host "[ERROR] Failed to assign role '$Role' to '$Assignee' on scope '$Scope'" -ForegroundColor Red
-        if ($result.Error) { Write-Host "  $($result.Error)" -ForegroundColor Red }
+        if ($result.Error)  { Write-Host "  $($result.Error)"  -ForegroundColor Red }
+        if ($result.Output) { Write-Host "  $($result.Output)" -ForegroundColor Red }
         $script:DeploymentErrors.Add("RBAC: '$Role' for '$Assignee'")
     }
     return $false  # newly created (or failed - caller increments counter; errors logged above)
@@ -316,6 +333,49 @@ function Set-FunctionAppSettings {
     $r = Invoke-AzCliSilent -Arguments @('rest','--method','PUT','--url',"$funcId/config/appsettings?api-version=2023-01-01",'--body',"@$tempFile")
     Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
     return $r
+}
+
+# Polls provisioningState of an ARM resource until Succeeded or timeout.
+# Returns $true on success, $false on failure/timeout.
+function Wait-ForArmResource {
+    param(
+        [string]$ResourceId,
+        [string]$ApiVersion,
+        [int]$MaxSeconds = 600,
+        [int]$IntervalSeconds = 15,
+        # When set, a 'failed' provisioningState is treated as transient and polling continues
+        # for the full window. Use for AI Foundry project creation, which passes through a
+        # transient 'failed' state before the async LRO settles to 'Succeeded'.
+        [switch]$FailedIsTransient
+    )
+    $waited = 0
+    while ($waited -lt $MaxSeconds) {
+        $r = Invoke-AzCliSilent -Arguments @('resource','show','--ids',$ResourceId,'--api-version',$ApiVersion,'--query','properties.provisioningState','-o','tsv')
+        $state = $r.Output.Trim().ToLower()
+        switch ($state) {
+            'succeeded' { return $true }
+            { $_ -in 'canceled','deleting' } {
+                Write-Host "[ERROR] Resource provisioningState = $state" -ForegroundColor Red
+                return $false
+            }
+            'failed' {
+                if ($FailedIsTransient) {
+                    Write-Host "[INFO] provisioningState = 'failed' (may be transient), waited ${waited}s / ${MaxSeconds}s..." -ForegroundColor Cyan
+                } else {
+                    Write-Host "[ERROR] Resource provisioningState = $state" -ForegroundColor Red
+                    return $false
+                }
+            }
+            default {
+                $displayState = if ($state) { $state } else { '(not yet visible)' }
+                Write-Host "[INFO] provisioningState = '$displayState', waited ${waited}s / ${MaxSeconds}s..." -ForegroundColor Cyan
+            }
+        }
+        Start-Sleep -Seconds $IntervalSeconds
+        $waited += $IntervalSeconds
+    }
+    Write-Host "[ERROR] Timed out after ${MaxSeconds}s waiting for resource to reach Succeeded state" -ForegroundColor Red
+    return $false
 }
 
 # =============================================================================
@@ -646,8 +706,19 @@ if ($ExistingAppId) {
 } else {
     $graphPerms = '[{\"resourceAppId\":\"00000003-0000-0000-c000-000000000000\",\"resourceAccess\":[{\"id\":\"810c84a8-4a9e-49e6-bf7d-12d183f40d01\",\"type\":\"Role\"},{\"id\":\"40f97065-369a-49f4-947c-6a255697ae91\",\"type\":\"Role\"}]}]'
     Invoke-AzCliSilent -Arguments @('ad','app','create','--display-name',$GraphAppName,'--sign-in-audience','AzureADMyOrg','--required-resource-accesses',$graphPerms,'--output','none') | Out-Null
-    $GraphClientId = (Invoke-AzCliSilent -Arguments @('ad','app','list','--display-name',$GraphAppName,'--query','[0].appId','-o','tsv')).Output
-    Write-Host "[SUCCESS] App registration created with ID: $GraphClientId" -ForegroundColor Green
+    # Azure AD replicates the new object asynchronously; poll until it appears.
+    for ($i = 1; $i -le 12; $i++) {
+        $GraphClientId = (Invoke-AzCliSilent -Arguments @('ad','app','list','--display-name',$GraphAppName,'--query','[0].appId','-o','tsv')).Output
+        if ($GraphClientId) { break }
+        Write-Host "[INFO] Waiting for app registration to propagate (attempt $i/12)..." -ForegroundColor Cyan
+        Start-Sleep -Seconds 10
+    }
+    if ($GraphClientId) {
+        Write-Host "[SUCCESS] App registration created with ID: $GraphClientId" -ForegroundColor Green
+    } else {
+        Write-Host "[ERROR] App registration $GraphAppName created but ID could not be retrieved after 2 minutes" -ForegroundColor Red
+        $script:DeploymentErrors.Add("Graph API app registration: $GraphAppName")
+    }
 }
 
 if (-not $GraphClientSecret) {
@@ -707,7 +778,13 @@ if ($existingWebAuthAppId) {
             '--sign-in-audience','AzureADMyOrg',
             '--web-redirect-uris',$webAppRedirectUri,$localDevRedirectUri,
             '--output','none') | Out-Null
-    $WebAppClientId = (Invoke-AzCliSilent -Arguments @('ad','app','list','--display-name',$WebAppAuthAppName,'--query','[0].appId','-o','tsv')).Output
+    # Azure AD replicates the new object asynchronously; poll until it appears.
+    for ($i = 1; $i -le 12; $i++) {
+        $WebAppClientId = (Invoke-AzCliSilent -Arguments @('ad','app','list','--display-name',$WebAppAuthAppName,'--query','[0].appId','-o','tsv')).Output
+        if ($WebAppClientId) { break }
+        Write-Host "[INFO] Waiting for web app auth registration to propagate (attempt $i/12)..." -ForegroundColor Cyan
+        Start-Sleep -Seconds 10
+    }
     if ($WebAppClientId) {
         Write-Host "[SUCCESS] Web app auth registration created with ID: $WebAppClientId" -ForegroundColor Green
     } else {
@@ -892,6 +969,11 @@ if (Test-AzResource -Arguments @('cognitiveservices','account','show','--name',$
                      '--output','table','--yes')
     if ($result -ne $null) {
         Write-Host "[SUCCESS] Content Understanding $ContentUnderstandingName created" -ForegroundColor Green
+        # The custom-domain DNS record takes time to become routable after account creation.
+        # Data-plane calls to the endpoint will return 'Subdomain does not map to a resource'
+        # until propagation completes. Wait before proceeding.
+        Write-Host "[INFO] Waiting 90 seconds for Content Understanding custom domain to propagate..." -ForegroundColor Cyan
+        Start-Sleep -Seconds 90
     }
 }
 
@@ -915,6 +997,12 @@ if (Test-AzResource -Arguments @('cognitiveservices','account','show','--name',$
                      '--output','table','--yes')
     if ($result -ne $null) {
         Write-Host "[SUCCESS] AI Foundry resource $AiFoundryName created" -ForegroundColor Green
+        # ARM needs time to fully initialise the new account before it can accept
+        # project or deployment child-resource PUTs. Without this wait the very
+        # next ARM call gets InternalServerError. provisioningState=Succeeded on
+        # the control plane does NOT mean the AI Foundry backend service is ready.
+        Write-Host "[INFO] Waiting 180 seconds for new AI Foundry account backend to initialise..." -ForegroundColor Cyan
+        Start-Sleep -Seconds 180
     }
 }
 
@@ -931,26 +1019,67 @@ if ($AiFoundryAccountId) {
                          '--latest-include-preview','--output','none')
         if ($apmResult -ne $null) {
             Write-Host "[SUCCESS] Project management enabled on $AiFoundryName" -ForegroundColor Green
+            Write-Host "[INFO] Waiting 90 seconds for allowProjectManagement to propagate..." -ForegroundColor Cyan
+            Start-Sleep -Seconds 90
         }
     } else {
-        Write-Host "[WARNING] Project management already enabled on $AiFoundryName, skipping" -ForegroundColor Yellow
+        Write-Host "[OK] Project management already enabled on $AiFoundryName" -ForegroundColor Green
     }
 } else {
     Write-Host "[ERROR] Could not resolve AI Foundry account id; skipping project setup" -ForegroundColor Red
 }
 
-# Create the AI Foundry project (child resource under the AIServices account)
+# Create the AI Foundry project (child resource under the AIServices account).
+#
+# ARM project creation is an async LRO: the PUT returns HTTP 202 Accepted and
+# ARM provisions in the background. Some az CLI versions surface the 202 as a
+# non-zero exit code even though the operation is in flight. Strategy:
+#   1. Poll the account until provisioningState=Succeeded AND allowProjectManagement=true.
+#   2. Issue the PUT (up to 5 retries with exponential backoff for genuine transients).
+#   3. Detect 202/async indicators in output and treat as accepted.
+#   4. Always poll provisioningState for up to 10 min after the PUT.
 if ($AiFoundryAccountId) {
+    # Poll the account until ARM reports it is fully ready for child-resource operations.
+    # 'az cognitiveservices account create' returns as soon as the control-plane record is
+    # written, but the backend service layer continues initialising asynchronously.
+    Write-Host "[INFO] Polling AI Foundry account readiness (provisioningState=Succeeded + allowProjectManagement=true)..." -ForegroundColor Cyan
+    $acctReady = $false
+    $acctMaxSec = 600; $acctWaited = 0; $acctInterval = 15
+    while ($acctWaited -lt $acctMaxSec) {
+        $acctProv = (Invoke-AzCliSilent -Arguments @('resource','show','--ids',$AiFoundryAccountId,
+            '--query','properties.provisioningState','-o','tsv')).Output.Trim().ToLower()
+        $acctApm  = (Invoke-AzCliSilent -Arguments @('resource','show','--ids',$AiFoundryAccountId,
+            '--query','properties.allowProjectManagement','-o','tsv')).Output.Trim().ToLower()
+        if ($acctProv -eq 'succeeded' -and $acctApm -eq 'true') {
+            Write-Host "[OK] AI Foundry account ready (provisioningState=Succeeded, allowProjectManagement=true) after ${acctWaited}s" -ForegroundColor Green
+            $acctReady = $true; break
+        }
+        $provDisplay = if ($acctProv) { $acctProv } else { '(unknown)' }
+        $apmDisplay  = if ($acctApm)  { $acctApm  } else { '(unknown)' }
+        Write-Host "[INFO] Account not ready yet (provisioningState=$provDisplay, allowProjectManagement=$apmDisplay), waited ${acctWaited}s / ${acctMaxSec}s..." -ForegroundColor Cyan
+        Start-Sleep -Seconds $acctInterval
+        $acctWaited += $acctInterval
+    }
+    if (-not $acctReady) {
+        Write-Host "[WARNING] Timed out waiting for AI Foundry account to become ready — proceeding anyway" -ForegroundColor Yellow
+    }
     $projectResourceId = "$AiFoundryAccountId/projects/$AiFoundryProjectName"
-    $projectExists = Invoke-AzCliSilent -Arguments @('resource','show','--ids',$projectResourceId,'--api-version',$AiFoundryProjectApiVersion,'--query','name','-o','tsv')
-    if ($projectExists.ExitCode -eq 0 -and $projectExists.Output) {
-        Write-Host "[WARNING] AI Foundry project $AiFoundryProjectName already exists, skipping" -ForegroundColor Yellow
+    $provCheck = Invoke-AzCliSilent -Arguments @('resource','show','--ids',$projectResourceId,
+        '--api-version',$AiFoundryProjectApiVersion,'--query','properties.provisioningState','-o','tsv')
+    $existingState = $provCheck.Output.Trim().ToLower()
+    if ($existingState -eq 'succeeded') {
+        Write-Host "[WARNING] AI Foundry project $AiFoundryProjectName already exists (Succeeded), skipping" -ForegroundColor Yellow
+    } elseif ($existingState -and $existingState -ne 'none' -and $existingState -ne 'failed') {
+        Write-Host "[INFO] AI Foundry project $AiFoundryProjectName exists with state '$existingState', polling..." -ForegroundColor Cyan
+        if (Wait-ForArmResource -ResourceId $projectResourceId -ApiVersion $AiFoundryProjectApiVersion -MaxSeconds 600 -IntervalSeconds 15) {
+            Write-Host "[SUCCESS] AI Foundry project $AiFoundryProjectName reached Succeeded state" -ForegroundColor Green
+        } else {
+            $script:DeploymentErrors.Add("Creating AI Foundry project: $AiFoundryProjectName (state stuck at $existingState)")
+        }
     } else {
-        # Build the full project resource body (location + properties).
-        # az rest is used because `az resource create` rejects the nested
-        # accounts/projects type in some CLI versions.
         $projectBody = @{
             location   = $LocationAiFoundry
+            identity   = @{ type = 'SystemAssigned' }
             properties = @{
                 displayName = $AiFoundryProjectName
                 description = "AI Foundry project for $ProjectName ($Environment)"
@@ -960,37 +1089,42 @@ if ($AiFoundryAccountId) {
         Set-Content -Path $projectBodyFile -Value $projectBody -Encoding UTF8
         $projectArmUrl = "https://management.azure.com$projectResourceId`?api-version=$AiFoundryProjectApiVersion"
         try {
-            $maxAttempts = 4
-            $attemptNum  = 0
-            $projectOk   = $false
-            $lastErr     = ''
-            while (-not $projectOk -and $attemptNum -lt $maxAttempts) {
-                $attemptNum++
-                Write-Host "[INFO] Creating AI Foundry project: $AiFoundryProjectName (attempt $attemptNum/$maxAttempts)" -ForegroundColor Cyan
+            $maxPutAttempts = 5
+            for ($putAttempt = 1; $putAttempt -le $maxPutAttempts; $putAttempt++) {
+                Write-Host "[INFO] Creating AI Foundry project: $AiFoundryProjectName (PUT attempt $putAttempt/$maxPutAttempts)" -ForegroundColor Cyan
                 $putResult = Invoke-AzCliSilent -Arguments @('rest','--method','put',
                                  '--url',$projectArmUrl,
-                                 '--body',"@$projectBodyFile",
-                                 '--output','none')
-                if ($putResult.ExitCode -eq 0) {
-                    $projectOk = $true
+                                 '--body',"@$projectBodyFile")
+                if ($putResult.ExitCode -eq 0) { break }
+                # 202 Accepted surfaces as non-zero in some az CLI builds
+                $combined = $putResult.Output + $putResult.Error
+                if ($combined -match 'AsyncOperation|Operation-Location|Accepted|creating|202') {
+                    Write-Host "[INFO] PUT returned async/202 indicator — treating as accepted" -ForegroundColor Cyan
                     break
                 }
-                $lastErr = $putResult.Output
-                $isTransient = ($lastErr -match 'InternalServerError|ServiceUnavailable|GatewayTimeout|429|TooManyRequests|temporar')
-                if ($isTransient -and $attemptNum -lt $maxAttempts) {
-                    $delay = [Math]::Min(60, 10 * [Math]::Pow(2, $attemptNum - 1))
-                    Write-Host "[WARNING] Transient error from ARM, retrying in $delay seconds..." -ForegroundColor Yellow
-                    if ($lastErr) { Write-Host "  $lastErr" -ForegroundColor DarkYellow }
+                if ($putAttempt -lt $maxPutAttempts) {
+                    # Exponential backoff: 15, 30, 60, 60, 60, 60, 60 seconds
+                    $delay = [Math]::Min(60, 15 * [Math]::Pow(2, $putAttempt - 1))
+                    $isTransient = ($combined -match 'InternalServerError|ServiceUnavailable|GatewayTimeout|429|TooManyRequests|temporar')
+                    $label = if ($isTransient) { 'Transient error' } else { 'Error' }
+                    Write-Host "[WARNING] $label on attempt $putAttempt, retrying in $delay seconds..." -ForegroundColor Yellow
                     Start-Sleep -Seconds $delay
-                } else {
-                    break
                 }
             }
-            if ($projectOk) {
-                Write-Host "[SUCCESS] AI Foundry project $AiFoundryProjectName created" -ForegroundColor Green
+            # Always poll regardless of PUT exit — ARM may have accepted the LRO
+            Write-Host "[INFO] Polling for project provisioning state (up to 10 min)..." -ForegroundColor Cyan
+            if (Wait-ForArmResource -ResourceId $projectResourceId -ApiVersion $AiFoundryProjectApiVersion -MaxSeconds 600 -IntervalSeconds 15 -FailedIsTransient) {
+                Write-Host "[SUCCESS] AI Foundry project $AiFoundryProjectName created (Succeeded)" -ForegroundColor Green
             } else {
-                Write-Host "[ERROR] Creating AI Foundry project: $AiFoundryProjectName failed after $attemptNum attempt(s)" -ForegroundColor Red
-                if ($lastErr) { Write-Host "  $lastErr" -ForegroundColor Red }
+                $finalCheck = Invoke-AzCliSilent -Arguments @('resource','show','--ids',$projectResourceId,
+                    '--api-version',$AiFoundryProjectApiVersion,'--query','properties.provisioningState','-o','tsv')
+                $finalState = $finalCheck.Output.Trim()
+                if ($finalState) {
+                    Write-Host "[ERROR] Creating AI Foundry project: $AiFoundryProjectName — stuck in state '$finalState' after all retries" -ForegroundColor Red
+                } else {
+                    Write-Host "[ERROR] Creating AI Foundry project: $AiFoundryProjectName — resource not found after all PUT attempts" -ForegroundColor Red
+                }
+                Write-Host "  Verify: az resource show --ids $projectResourceId --api-version $AiFoundryProjectApiVersion" -ForegroundColor Red
                 $script:DeploymentErrors.Add("Creating AI Foundry project: $AiFoundryProjectName")
             }
         } finally {
@@ -1301,9 +1435,9 @@ if (-not $CuEndpoint) {
         $tempDefaultsFile = [System.IO.Path]::GetTempFileName()
         [System.IO.File]::WriteAllText($tempDefaultsFile, $defaultsBody, [System.Text.Encoding]::UTF8)
 
-        # Retry up to 3 times in case RBAC propagation is still in-flight
+        # Retry up to 5 times in case RBAC propagation or custom-domain DNS is still in-flight
         $cuDefaultsSet = $false
-        $maxRetries = 3
+        $maxRetries = 5
         for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
             $setResult = Invoke-AzCliSilent -Arguments @('rest','--method','PATCH','--url',$cuDefaultsUrl,'--resource','https://cognitiveservices.azure.com','--body',"@$tempDefaultsFile",'--headers','Content-Type=application/json')
             if ($setResult.ExitCode -eq 0) {
@@ -1311,9 +1445,16 @@ if (-not $CuEndpoint) {
                 $cuDefaultsSet = $true
                 break
             }
-            if ($attempt -lt $maxRetries -and $setResult.Error -match 'PermissionDenied') {
-                Write-Host "[INFO] Permission not yet propagated, retrying in 30 seconds (attempt $attempt/$maxRetries)..." -ForegroundColor Cyan
-                Start-Sleep -Seconds 30
+            if ($attempt -lt $maxRetries) {
+                if ($setResult.Error -match 'PermissionDenied') {
+                    Write-Host "[INFO] Permission not yet propagated, retrying in 30 seconds (attempt $attempt/$maxRetries)..." -ForegroundColor Cyan
+                    Start-Sleep -Seconds 30
+                } elseif ($setResult.Error -match 'ResourceNotFound|Subdomain does not map') {
+                    Write-Host "[INFO] Endpoint not yet reachable (custom domain propagating), retrying in 30 seconds (attempt $attempt/$maxRetries)..." -ForegroundColor Cyan
+                    Start-Sleep -Seconds 30
+                } else {
+                    break  # Non-retryable error
+                }
             }
         }
         Remove-Item $tempDefaultsFile -Force -ErrorAction SilentlyContinue
@@ -1514,7 +1655,7 @@ if (-not $KeyVaultId) {
 } else {
     Write-Host "[INFO] Key Vault Secrets User role for function apps and web app" -ForegroundColor Cyan
     foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, $WebAppIdentity)) {
-        if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Key Vault Secrets User' -Scope $KeyVaultId)) { $newAssignments++ }
+        if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Key Vault Secrets User' -Scope $KeyVaultId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
     }
 }
 
@@ -1522,9 +1663,9 @@ if (-not $KeyVaultId) {
 $ServiceBusId = (Invoke-AzCliSilent -Arguments @('servicebus','namespace','show','--name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 
 Write-Host "[INFO] Service Bus roles for function apps" -ForegroundColor Cyan
-if (-not (Ensure-RoleAssignment -Assignee $MailboxIdentity -Role 'Azure Service Bus Data Sender' -Scope $ServiceBusId)) { $newAssignments++ }
-if (-not (Ensure-RoleAssignment -Assignee $QueueDbIdentity -Role 'Azure Service Bus Data Receiver' -Scope $ServiceBusId)) { $newAssignments++ }
-if (-not (Ensure-RoleAssignment -Assignee $CuQueueDbIdentity -Role 'Azure Service Bus Data Receiver' -Scope $ServiceBusId)) { $newAssignments++ }
+if (-not (Ensure-RoleAssignment -Assignee $MailboxIdentity   -Role 'Azure Service Bus Data Sender'   -Scope $ServiceBusId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+if (-not (Ensure-RoleAssignment -Assignee $QueueDbIdentity   -Role 'Azure Service Bus Data Receiver' -Scope $ServiceBusId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+if (-not (Ensure-RoleAssignment -Assignee $CuQueueDbIdentity -Role 'Azure Service Bus Data Receiver' -Scope $ServiceBusId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 
 # Storage account access (managed identity for AzureWebJobsStorage)
 $StorageAccountId = (Invoke-AzCliSilent -Arguments @('storage','account','show','--name',$StorageAccountName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
@@ -1532,23 +1673,23 @@ $StorageAccountId = (Invoke-AzCliSilent -Arguments @('storage','account','show',
 Write-Host "[INFO] Storage account roles for function apps" -ForegroundColor Cyan
 foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity)) {
     foreach ($role in @('Storage Blob Data Owner','Storage Account Contributor','Storage Queue Data Contributor','Storage Table Data Contributor')) {
-        if (-not (Ensure-RoleAssignment -Assignee $identity -Role $role -Scope $StorageAccountId)) { $newAssignments++ }
+        if (-not (Ensure-RoleAssignment -Assignee $identity -Role $role -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
     }
 }
 
 Write-Host "[INFO] Storage Blob Data Reader role for web app" -ForegroundColor Cyan
-if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Blob Data Reader' -Scope $StorageAccountId)) { $newAssignments++ }
+if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Blob Data Reader' -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 
 # Admin user needs blob access for container creation and direct blob operations
 if ($CurrentUserId) {
     Write-Host "[INFO] Storage Blob Data Contributor for admin user" -ForegroundColor Cyan
-    if (-not (Ensure-RoleAssignment -Assignee $CurrentUserId -Role 'Storage Blob Data Contributor' -Scope $StorageAccountId)) { $newAssignments++ }
+    if (-not (Ensure-RoleAssignment -Assignee $CurrentUserId -Role 'Storage Blob Data Contributor' -Scope $StorageAccountId -PrincipalType 'User')) { $newAssignments++ }
 }
 
 # Content Understanding needs to read blobs from Storage when given a blob URL
 if ($CuIdentity) {
     Write-Host "[INFO] Storage Blob Data Reader for Content Understanding" -ForegroundColor Cyan
-    if (-not (Ensure-RoleAssignment -Assignee $CuIdentity -Role 'Storage Blob Data Reader' -Scope $StorageAccountId)) { $newAssignments++ }
+    if (-not (Ensure-RoleAssignment -Assignee $CuIdentity -Role 'Storage Blob Data Reader' -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 }
 
 # Cosmos DB access (data plane RBAC - Built-in Data Contributor)
@@ -1565,7 +1706,7 @@ $ContentUnderstandingId = (Invoke-AzCliSilent -Arguments @('cognitiveservices','
 
 Write-Host "[INFO] Cognitive Services User role for function apps and web app" -ForegroundColor Cyan
 foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, $WebAppIdentity)) {
-    if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Cognitive Services User' -Scope $ContentUnderstandingId)) { $newAssignments++ }
+    if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Cognitive Services User' -Scope $ContentUnderstandingId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 }
 
 # AI Foundry access (Cognitive Services OpenAI User)
@@ -1573,7 +1714,7 @@ $AiFoundryId = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','s
 
 Write-Host "[INFO] Cognitive Services OpenAI User role for function apps and web app" -ForegroundColor Cyan
 foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, $WebAppIdentity)) {
-    if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Cognitive Services OpenAI User' -Scope $AiFoundryId)) { $newAssignments++ }
+    if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Cognitive Services OpenAI User' -Scope $AiFoundryId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 }
 
 if ($newAssignments -gt 0) {

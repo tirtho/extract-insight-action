@@ -186,11 +186,14 @@ DEPLOYMENT_ERRORS=()
 # =============================================================================
 
 # Run az CLI silently; sets LAST_EXIT / LAST_OUT / LAST_ERR
+# NOTE: do NOT use '|| true' here — we need the real exit code.
 az_silent() {
-    LAST_OUT=$(az "$@" 2>/tmp/az_err.$$ || true)
+    local _tmp_err
+    _tmp_err=$(mktemp)
+    LAST_OUT=$(az "$@" 2>"$_tmp_err")
     LAST_EXIT=$?
-    LAST_ERR=$(cat /tmp/az_err.$$ 2>/dev/null || true)
-    rm -f /tmp/az_err.$$
+    LAST_ERR=$(cat "$_tmp_err" 2>/dev/null || true)
+    rm -f "$_tmp_err"
 }
 
 # Idempotent resource check: returns 0 if resource exists
@@ -202,7 +205,7 @@ test_az_resource() {
 
 # Returns 0 if role already assigned, 1 if newly created, 2 on error
 ensure_role_assignment() {
-    local assignee="$1" role="$2" scope="$3"
+    local assignee="$1" role="$2" scope="$3" principal_type="${4:-}"
     if [[ -z "$scope" ]]; then
         echo "[ERROR] ensure_role_assignment: Scope is empty for role '$role' on assignee '$assignee'" >&2
         DEPLOYMENT_ERRORS+=("RBAC: '$role' for '$assignee' - empty scope")
@@ -212,8 +215,14 @@ ensure_role_assignment() {
     existing=$(az role assignment list --assignee "$assignee" --role "$role" --scope "$scope" \
         --query '[0].id' -o tsv 2>/dev/null || true)
     if [[ -n "$existing" ]]; then return 0; fi
-    if ! az role assignment create --assignee "$assignee" --role "$role" --scope "$scope" \
-            --output none 2>/tmp/ra_err.$$; then
+    local -a create_args=(role assignment create --role "$role" --scope "$scope" --output none)
+    if [[ -n "$principal_type" ]]; then
+        # Use --assignee-object-id to bypass graph.microsoft.com lookup (avoids network timeout)
+        create_args+=(--assignee-object-id "$assignee" --assignee-principal-type "$principal_type")
+    else
+        create_args+=(--assignee "$assignee")
+    fi
+    if ! az "${create_args[@]}" 2>/tmp/ra_err.$$; then
         echo "[ERROR] Failed to assign role '$role' to '$assignee' on scope '$scope'" >&2
         cat /tmp/ra_err.$$ >&2 || true
         rm -f /tmp/ra_err.$$
@@ -683,7 +692,7 @@ CurrentUserId=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)
 KeyVaultId=$(az keyvault show --name "$KeyVaultName" --resource-group "$ResourceGroupName" \
     --query id -o tsv 2>/dev/null || true)
 if [[ -n "$CurrentUserId" && -n "$KeyVaultId" ]]; then
-    ensure_role_assignment "$CurrentUserId" "Key Vault Administrator" "$KeyVaultId"
+    ensure_role_assignment "$CurrentUserId" "Key Vault Administrator" "$KeyVaultId" "User"
     rc=$?
     if [[ $rc -eq 0 ]]; then
         echo "[OK] Key Vault Administrator role already assigned to current user"
@@ -707,8 +716,19 @@ else
     graph_perms='[{"resourceAppId":"00000003-0000-0000-c000-000000000000","resourceAccess":[{"id":"810c84a8-4a9e-49e6-bf7d-12d183f40d01","type":"Role"},{"id":"40f97065-369a-49f4-947c-6a255697ae91","type":"Role"}]}]'
     az ad app create --display-name "$GraphAppName" --sign-in-audience AzureADMyOrg \
         --required-resource-accesses "$graph_perms" --output none 2>/dev/null || true
-    GraphClientId=$(az ad app list --display-name "$GraphAppName" --query '[0].appId' -o tsv 2>/dev/null || true)
-    echo "[SUCCESS] App registration created with ID: $GraphClientId"
+    # Azure AD replicates the new object asynchronously; poll until it appears.
+    for ((i=1; i<=12; i++)); do
+        GraphClientId=$(az ad app list --display-name "$GraphAppName" --query '[0].appId' -o tsv 2>/dev/null || true)
+        [[ -n "$GraphClientId" ]] && break
+        echo "[INFO] Waiting for app registration to propagate (attempt $i/12)..."
+        sleep 10
+    done
+    if [[ -n "$GraphClientId" ]]; then
+        echo "[SUCCESS] App registration created with ID: $GraphClientId"
+    else
+        echo "[ERROR] App registration $GraphAppName created but ID could not be retrieved after 2 minutes" >&2
+        DEPLOYMENT_ERRORS+=("Graph API app registration: $GraphAppName")
+    fi
 fi
 
 if [[ -z "$GraphClientSecret" && -n "$GraphClientId" ]]; then
@@ -749,8 +769,14 @@ if [[ -n "$existingWebAuthAppId" ]]; then
 else
     az ad app create --display-name "$WebAppAuthAppName" --sign-in-audience AzureADMyOrg \
         --web-redirect-uris "$webAppRedirectUri" "$localDevRedirectUri" --output none 2>/dev/null || true
-    WebAppClientId=$(az ad app list --display-name "$WebAppAuthAppName" \
-        --query '[0].appId' -o tsv 2>/dev/null || true)
+    # Azure AD replicates the new object asynchronously; poll until it appears.
+    for ((i=1; i<=12; i++)); do
+        WebAppClientId=$(az ad app list --display-name "$WebAppAuthAppName" \
+            --query '[0].appId' -o tsv 2>/dev/null || true)
+        [[ -n "$WebAppClientId" ]] && break
+        echo "[INFO] Waiting for web app auth registration to propagate (attempt $i/12)..."
+        sleep 10
+    done
     if [[ -n "$WebAppClientId" ]]; then
         echo "[SUCCESS] Web app auth registration created with ID: $WebAppClientId"
     else
@@ -911,6 +937,11 @@ else
             --kind AIServices --sku S0 --custom-domain "$ContentUnderstandingName" \
             --tags "project=$ProjectName" "environment=$Environment" --output table --yes; then
         echo "[SUCCESS] Content Understanding $ContentUnderstandingName created"
+        # The custom-domain DNS record takes time to become routable after account creation.
+        # Data-plane calls to the endpoint will return 'Subdomain does not map to a resource'
+        # until propagation completes. Wait before proceeding.
+        echo "[INFO] Waiting 90 seconds for Content Understanding custom domain to propagate..."
+        sleep 90
     else
         DEPLOYMENT_ERRORS+=("Creating Content Understanding: $ContentUnderstandingName")
     fi
@@ -931,6 +962,11 @@ else
             --assign-identity \
             --tags "project=$ProjectName" "environment=$Environment" --output table --yes; then
         echo "[SUCCESS] AI Foundry resource $AiFoundryName created"
+        # ARM needs time to fully initialise before accepting project child-resource PUTs.
+        # provisioningState=Succeeded on the control plane does NOT mean the AI Foundry
+        # backend service is ready — that initialises asynchronously and is not observable.
+        echo "[INFO] Waiting 180 seconds for new AI Foundry account backend to initialise..."
+        sleep 180
     else
         DEPLOYMENT_ERRORS+=("Creating AI Foundry resource: $AiFoundryName")
     fi
@@ -948,60 +984,164 @@ if [[ -n "$AiFoundryAccountId" ]]; then
                 --set properties.allowProjectManagement=true \
                 --latest-include-preview --output none 2>/dev/null; then
             echo "[SUCCESS] Project management enabled on $AiFoundryName"
+            echo "[INFO] Waiting 90 seconds for allowProjectManagement to propagate on fresh account..."
+            sleep 90
         else
             DEPLOYMENT_ERRORS+=("Enabling project management on $AiFoundryName")
         fi
     else
-        echo "[WARNING] Project management already enabled on $AiFoundryName, skipping"
+        echo "[OK] Project management already enabled on $AiFoundryName"
     fi
 else
     echo "[ERROR] Could not resolve AI Foundry account id; skipping project setup" >&2
 fi
 
 # Create AI Foundry project (child resource via az rest PUT)
+#
+# ARM project creation is an async LRO: the PUT returns HTTP 202 Accepted
+# immediately, then ARM creates the resource in the background. Some az CLI
+# versions treat a 202 response as a non-zero exit, even though the operation
+# is in flight and will succeed shortly.
+#
+# Strategy:
+#   1. Poll the account until provisioningState=Succeeded AND allowProjectManagement=true.
+#   2. Issue the PUT (up to 5 retries with exponential backoff for genuine transients).
+#   3. Regardless of PUT exit code, poll az resource show for up to 10 minutes.
+#   4. As soon as the resource appears with provisioningState=Succeeded, declare success.
+#   5. Only declare failure if the poll times out.
+
+# Poll the AI Foundry account until ARM reports it is fully ready for child-resource operations.
+# Returns 0 when ready, 1 on timeout.
+_wait_for_account_ready() {
+    local account_id="$1" max_seconds="${2:-600}" interval="${3:-15}"
+    local waited=0
+    echo "[INFO] Polling AI Foundry account readiness (provisioningState=Succeeded + allowProjectManagement=true)..."
+    while [[ $waited -lt $max_seconds ]]; do
+        local prov apm
+        prov=$(az resource show --ids "$account_id" \
+            --query 'properties.provisioningState' -o tsv 2>/dev/null || true)
+        apm=$(az resource show --ids "$account_id" \
+            --query 'properties.allowProjectManagement' -o tsv 2>/dev/null || true)
+        prov="${prov,,}"; apm="${apm,,}"
+        if [[ "$prov" == "succeeded" && "$apm" == "true" ]]; then
+            echo "[OK] AI Foundry account ready (provisioningState=Succeeded, allowProjectManagement=true) after ${waited}s"
+            return 0
+        fi
+        echo "[INFO] Account not ready yet (provisioningState=${prov:-(unknown)}, allowProjectManagement=${apm:-(unknown)}), waited ${waited}s / ${max_seconds}s..."
+        sleep "$interval"
+        waited=$(( waited + interval ))
+    done
+    echo "[ERROR] Timed out after ${max_seconds}s waiting for AI Foundry account to become ready" >&2
+    return 1
+}
+_wait_for_project() {
+    local resource_id="$1" api_ver="$2" max_seconds="${3:-600}" interval="${4:-15}"
+    local waited=0
+    while [[ $waited -lt $max_seconds ]]; do
+        local prov_state
+        prov_state=$(az resource show --ids "$resource_id" \
+            --api-version "$api_ver" \
+            --query 'properties.provisioningState' -o tsv 2>/dev/null || true)
+        prov_state="${prov_state,,}"
+        case "$prov_state" in
+            succeeded)
+                return 0 ;;
+            canceled|deleting)
+                echo "[ERROR] Project provisioningState = $prov_state" >&2
+                return 2 ;;
+            failed)
+                # AI Foundry projects transiently report 'failed' during async LRO provisioning
+                # before the backend settles; keep polling for the full window.
+                echo "[INFO] Project provisioningState = 'failed' (may be transient), waited ${waited}s / ${max_seconds}s..."
+                ;;
+            creating|updating|accepted|running|provisioning|"")
+                echo "[INFO] Project provisioningState = '${prov_state:-(not yet visible)}', waited ${waited}s / ${max_seconds}s..."
+                ;;
+            *)
+                echo "[INFO] Project provisioningState = '$prov_state', waited ${waited}s / ${max_seconds}s..."
+                ;;
+        esac
+        sleep "$interval"
+        waited=$(( waited + interval ))
+    done
+    echo "[ERROR] Timed out after ${max_seconds}s waiting for project to reach Succeeded state" >&2
+    return 1
+}
+
 if [[ -n "$AiFoundryAccountId" ]]; then
+    # Wait until the account is fully ready before attempting any child-resource PUTs.
+    # 'az cognitiveservices account create' returns as soon as the ARM record is written,
+    # but the backend service (project management layer) is still initialising.
+    _wait_for_account_ready "$AiFoundryAccountId" 600 15 || true
+
     projectResourceId="${AiFoundryAccountId}/projects/${AiFoundryProjectName}"
     project_exists=$(az resource show --ids "$projectResourceId" \
-        --api-version "$AiFoundryProjectApiVersion" --query name -o tsv 2>/dev/null || true)
-    if [[ -n "$project_exists" ]]; then
-        echo "[WARNING] AI Foundry project $AiFoundryProjectName already exists, skipping"
+        --api-version "$AiFoundryProjectApiVersion" \
+        --query 'properties.provisioningState' -o tsv 2>/dev/null || true)
+    project_exists_lc="${project_exists,,}"
+    if [[ "$project_exists_lc" == "succeeded" ]]; then
+        echo "[WARNING] AI Foundry project $AiFoundryProjectName already exists (Succeeded), skipping"
+    elif [[ -n "$project_exists_lc" && "$project_exists_lc" != "none" && "$project_exists_lc" != "failed" ]]; then
+        echo "[INFO] AI Foundry project $AiFoundryProjectName exists with state '$project_exists_lc', polling for completion..."
+        if _wait_for_project "$projectResourceId" "$AiFoundryProjectApiVersion" 600 15; then
+            echo "[SUCCESS] AI Foundry project $AiFoundryProjectName reached Succeeded state"
+        else
+            DEPLOYMENT_ERRORS+=("Creating AI Foundry project: $AiFoundryProjectName (state stuck at $project_exists_lc)")
+        fi
     else
         project_body=$(jq -n \
             --arg loc "$LocationAiFoundry" \
             --arg dn "$AiFoundryProjectName" \
             --arg desc "AI Foundry project for $ProjectName ($Environment)" \
-            '{location:$loc, properties:{displayName:$dn, description:$desc}}')
+            '{location:$loc, identity:{type:"SystemAssigned"}, properties:{displayName:$dn, description:$desc}}')
         project_body_file=$(mktemp)
         echo "$project_body" > "$project_body_file"
         project_arm_url="https://management.azure.com${projectResourceId}?api-version=${AiFoundryProjectApiVersion}"
-        project_ok=0
-        last_err=""
-        for ((attempt=1; attempt<=4; attempt++)); do
-            echo "[INFO] Creating AI Foundry project: $AiFoundryProjectName (attempt $attempt/4)"
+
+        # Issue the PUT — retry up to 5 times with exponential backoff for genuine
+        # transient backend errors (ServiceUnavailable, 429, etc.).
+        put_max=5
+        for put_attempt in $(seq 1 $put_max); do
+            echo "[INFO] Creating AI Foundry project: $AiFoundryProjectName (PUT attempt $put_attempt/$put_max)"
             az_silent rest --method put --url "$project_arm_url" \
-                --body "@$project_body_file" --output none
-            if [[ $LAST_EXIT -eq 0 ]]; then
-                project_ok=1; break
-            fi
-            last_err="$LAST_OUT"
-            is_transient=0
-            echo "$last_err" | grep -qE 'InternalServerError|ServiceUnavailable|GatewayTimeout|429|TooManyRequests|temporar' && is_transient=1
-            if [[ $is_transient -eq 1 && $attempt -lt 4 ]]; then
-                delay=$(( attempt==1 ? 10 : attempt==2 ? 20 : 40 ))
-                (( delay > 60 )) && delay=60
-                echo "[WARNING] Transient error from ARM, retrying in $delay seconds..."
-                [[ -n "$last_err" ]] && echo "  $last_err"
-                sleep $delay
-            else
+                --body "@$project_body_file"
+            put_exit=$LAST_EXIT
+            if [[ $put_exit -eq 0 ]]; then
                 break
+            fi
+            # 202 Accepted is success even though az CLI may return non-zero
+            if echo "${LAST_ERR}${LAST_OUT}" | grep -qiE 'AsyncOperation|Operation-Location|"Accepted"|"creating"|202'; then
+                echo "[INFO] PUT returned async/202 indicator — treating as accepted"
+                break
+            fi
+            if [[ $put_attempt -lt $put_max ]]; then
+                # Exponential backoff capped at 60s: 15, 30, 60, 60, ...
+                delay=$(( 15 * (1 << (put_attempt - 1)) ))
+                [[ $delay -gt 60 ]] && delay=60
+                is_transient=0
+                echo "${LAST_ERR}${LAST_OUT}" | grep -qiE 'InternalServerError|ServiceUnavailable|GatewayTimeout|429|TooManyRequests|temporar' && is_transient=1
+                label="Error"; [[ $is_transient -eq 1 ]] && label="Transient error"
+                echo "[WARNING] $label on attempt $put_attempt, retrying in ${delay}s..."
+                sleep $delay
             fi
         done
         rm -f "$project_body_file"
-        if [[ $project_ok -eq 1 ]]; then
-            echo "[SUCCESS] AI Foundry project $AiFoundryProjectName created"
+
+        # Regardless of PUT exit code, poll until the resource reaches Succeeded.
+        # ARM may have accepted the operation even when az CLI reported non-zero.
+        echo "[INFO] Polling for project provisioning state (up to 10 min)..."
+        if _wait_for_project "$projectResourceId" "$AiFoundryProjectApiVersion" 600 15; then
+            echo "[SUCCESS] AI Foundry project $AiFoundryProjectName created (Succeeded)"
         else
-            echo "[ERROR] Creating AI Foundry project: $AiFoundryProjectName failed after $attempt attempt(s)" >&2
-            [[ -n "$last_err" ]] && echo "  $last_err" >&2
+            final_state=$(az resource show --ids "$projectResourceId" \
+                --api-version "$AiFoundryProjectApiVersion" \
+                --query 'properties.provisioningState' -o tsv 2>/dev/null || true)
+            if [[ -n "$final_state" ]]; then
+                echo "[ERROR] Creating AI Foundry project: $AiFoundryProjectName — stuck in state '${final_state}' after all retries" >&2
+            else
+                echo "[ERROR] Creating AI Foundry project: $AiFoundryProjectName — resource not found after all PUT attempts" >&2
+            fi
+            echo "  Verify: az resource show --ids $projectResourceId --api-version $AiFoundryProjectApiVersion" >&2
             DEPLOYMENT_ERRORS+=("Creating AI Foundry project: $AiFoundryProjectName")
         fi
     fi
@@ -1108,7 +1248,7 @@ if [[ -z "$CuEndpoint" ]]; then
 else
     # Ensure current user has Cognitive Services User on CU
     if [[ -n "$CurrentUserId" && -n "$CuResourceId" ]]; then
-        ensure_role_assignment "$CurrentUserId" "Cognitive Services User" "$CuResourceId"
+        ensure_role_assignment "$CurrentUserId" "Cognitive Services User" "$CuResourceId" "User"
         rc=$?
         if [[ $rc -eq 1 ]]; then
             echo "[INFO] Granted Cognitive Services User to current user on $ContentUnderstandingName"
@@ -1138,7 +1278,7 @@ else
         defaults_file=$(mktemp)
         echo "$defaults_body" > "$defaults_file"
         cu_defaults_set=0
-        for ((attempt=1; attempt<=3; attempt++)); do
+        for ((attempt=1; attempt<=5; attempt++)); do
             az_silent rest --method PATCH --url "$cu_defaults_url" \
                 --resource https://cognitiveservices.azure.com \
                 --body "@$defaults_file" --headers Content-Type=application/json
@@ -1146,9 +1286,16 @@ else
                 echo "[SUCCESS] Content Understanding defaults set ($CuCompletionModelName -> $CuCompletionDeploymentName on $ContentUnderstandingName)"
                 cu_defaults_set=1; break
             fi
-            if [[ $attempt -lt 3 ]] && echo "$LAST_ERR" | grep -qi 'PermissionDenied'; then
-                echo "[INFO] Permission not yet propagated, retrying in 30 seconds (attempt $attempt/3)..."
-                sleep 30
+            if [[ $attempt -lt 5 ]]; then
+                if echo "$LAST_ERR" | grep -qi 'PermissionDenied'; then
+                    echo "[INFO] Permission not yet propagated, retrying in 30 seconds (attempt $attempt/5)..."
+                    sleep 30
+                elif echo "$LAST_ERR" | grep -qi 'ResourceNotFound\|Subdomain does not map'; then
+                    echo "[INFO] Endpoint not yet reachable (custom domain propagating), retrying in 30 seconds (attempt $attempt/5)..."
+                    sleep 30
+                else
+                    break  # Non-retryable error
+                fi
             fi
         done
         rm -f "$defaults_file"
@@ -1315,9 +1462,11 @@ if [[ -z "$MailboxIdentity" || -z "$QueueDbIdentity" || -z "$CuQueueDbIdentity" 
 fi
 
 newAssignments=0
+# ra: wrapper for managed-identity RBAC assignments.
+# Passes 'ServicePrincipal' to avoid graph.microsoft.com lookup on each call.
 ra() {
     local assignee="$1" role="$2" scope="$3"
-    ensure_role_assignment "$assignee" "$role" "$scope"
+    ensure_role_assignment "$assignee" "$role" "$scope" "ServicePrincipal"
     [[ $? -eq 1 ]] && ((newAssignments++)) || true
 }
 
@@ -1356,7 +1505,8 @@ echo "[INFO] Storage Blob Data Reader role for web app"
 ra "$WebAppIdentity" "Storage Blob Data Reader" "$StorageAccountId"
 if [[ -n "$CurrentUserId" ]]; then
     echo "[INFO] Storage Blob Data Contributor for admin user"
-    ra "$CurrentUserId" "Storage Blob Data Contributor" "$StorageAccountId"
+    ensure_role_assignment "$CurrentUserId" "Storage Blob Data Contributor" "$StorageAccountId" "User"
+    [[ $? -eq 1 ]] && ((newAssignments++)) || true
 fi
 if [[ -n "$CuIdentity" ]]; then
     echo "[INFO] Storage Blob Data Reader for Content Understanding"
