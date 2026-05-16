@@ -323,8 +323,9 @@ public class AzureEmailStore implements AutoCloseable {
                 fallback(text(item, "subject"), "(no subject)"),
                 text(item, "fromName"),
                 text(item, "fromAddress"),
-                text(item, "receivedDateTime"),
+                trimDatetime(text(item, "receivedDateTime")),
                 text(item, "extractedAt"),
+                text(item, "bodyPreview"),
                 attachmentCount
         );
     }
@@ -335,7 +336,7 @@ public class AzureEmailStore implements AutoCloseable {
                 fallback(text(item, "subject"), "(no subject)"),
                 text(item, "fromName"),
                 text(item, "fromAddress"),
-                text(item, "receivedDateTime"),
+                trimDatetime(text(item, "receivedDateTime")),
                 text(item, "extractedAt"),
                 text(item, "bodyPreview"),
                 text(item, "bodyContent"),
@@ -351,7 +352,7 @@ public class AzureEmailStore implements AutoCloseable {
                 text(item, "status"),
                 text(item, "analyzerName"),
                 text(item, "blobUrl"),
-                text(item, "createdAt"),
+                trimDatetime(text(item, "createdAt")),
                 text(item, "analyzeOperationId"),
                 formatAnalyzeResult(item.path("analyzeResult")),
                 text(item, "errorMessage")
@@ -436,6 +437,12 @@ public class AzureEmailStore implements AutoCloseable {
             return receivedDateTime;
         }
         return text(item, "extractedAt");
+    }
+
+    private String trimDatetime(String value) {
+        if (value == null || value.isBlank()) return value == null ? "" : value;
+        // Truncate ISO 8601 to "YYYY-MM-DDTHH:mm:ss" — drop fractional seconds and timezone
+        return value.length() > 19 ? value.substring(0, 19) : value;
     }
 
     private String text(JsonNode node, String fieldName) {

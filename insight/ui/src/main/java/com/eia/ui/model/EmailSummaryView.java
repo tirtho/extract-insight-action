@@ -7,6 +7,7 @@ public record EmailSummaryView(
         String fromAddress,
         String receivedDateTime,
         String extractedAt,
+        String bodyPreview,
         int attachmentCount
 ) {
 }
