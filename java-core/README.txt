@@ -5,7 +5,7 @@ Prerequisites
 -------------
 - Java 21+
 - Maven 3.9+
-- For integration tests: az login (or Managed Identity) + KEY_VAULT_URL env var
+- For integration tests: az login (or Managed Identity) + AZURE_KEY_VAULT_URL env var
 
 
 1. Compile only (no tests)
@@ -29,15 +29,15 @@ Prerequisites
   mvn clean verify -Dgroups=integration -Dkey.vault.url=https://your-vault.vault.azure.net
 
   Option B: Set the Key Vault URL as an environment variable
-  set KEY_VAULT_URL=https://your-vault.vault.azure.net
+  set AZURE_KEY_VAULT_URL=https://your-vault.vault.azure.net
   mvn clean verify -Dgroups=integration
 
   Option C: Run ..\deployment\1.config.ps1 (or .cmd or .sh) first,
-  which sets KEY_VAULT_URL from env.config, then run:
+  which sets AZURE_KEY_VAULT_URL from env.config, then run:
   mvn clean verify -Dgroups=integration
 
   Integration tests are run by the Failsafe plugin and require:
-    - KEY_VAULT_URL environment variable pointing to your Key Vault
+    - AZURE_KEY_VAULT_URL environment variable pointing to your Key Vault
     - Active Azure credentials (az login or Managed Identity)
     - All secrets referenced in AzEnvNames present in Key Vault
 

@@ -11,7 +11,7 @@
 .PARAMETER Suffix
     Required. The same suffix used when running deploy-infrastructure.ps1.
 .USAGE
-    .\6.deploy-code.ps1 -Suffix 999
+    .\9.deploy-code.ps1 -Suffix 999
 #>
 param(
     [Parameter(Mandatory=$true, HelpMessage="Suffix used during infrastructure deployment (e.g. 999)")]

@@ -84,20 +84,20 @@ if (Test-Path $configFile) {
     Write-Host "[INFO] Loaded $($loadedVars.Count) environment variable(s) from interactive prompts" -ForegroundColor Cyan
 }
 
-# Derived: SUFFIX / KEY_VAULT_NAME / KEY_VAULT_URL exported for downstream scripts.
-# Also write env.bat at the repo root so cmd-based tools can pick up KEY_VAULT_URL.
+# Derived: SUFFIX / KEY_VAULT_NAME / AZURE_KEY_VAULT_URL exported for downstream scripts.
+# Also write env.bat at the repo root so cmd-based tools can pick up AZURE_KEY_VAULT_URL.
 $_ProjectName = if ($env:PROJECT_NAME) { $env:PROJECT_NAME } else { "eia" }
 $_Environment = if ($env:ENVIRONMENT)  { $env:ENVIRONMENT }  else { "dev" }
 $_KvName      = "kv-$_ProjectName-$_Environment-$Suffix"
-$env:SUFFIX          = $Suffix
-$env:KEY_VAULT_NAME  = $_KvName
-$env:KEY_VAULT_URL   = "https://$_KvName.vault.azure.net"
-[System.Environment]::SetEnvironmentVariable('SUFFIX',         $env:SUFFIX,         'Process')
-[System.Environment]::SetEnvironmentVariable('KEY_VAULT_NAME', $env:KEY_VAULT_NAME, 'Process')
-[System.Environment]::SetEnvironmentVariable('KEY_VAULT_URL',  $env:KEY_VAULT_URL,  'Process')
+$env:SUFFIX                = $Suffix
+$env:KEY_VAULT_NAME        = $_KvName
+$env:AZURE_KEY_VAULT_URL   = "https://$_KvName.vault.azure.net"
+[System.Environment]::SetEnvironmentVariable('SUFFIX',               $env:SUFFIX,               'Process')
+[System.Environment]::SetEnvironmentVariable('KEY_VAULT_NAME',       $env:KEY_VAULT_NAME,       'Process')
+[System.Environment]::SetEnvironmentVariable('AZURE_KEY_VAULT_URL',  $env:AZURE_KEY_VAULT_URL,  'Process')
 
 $envBatPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'env.bat'
-$envBatContent = "@echo off`r`nset KEY_VAULT_URL=$($env:KEY_VAULT_URL)"
+$envBatContent = "@echo off`r`nset AZURE_KEY_VAULT_URL=$($env:AZURE_KEY_VAULT_URL)"
 try {
     Set-Content -Path $envBatPath -Value $envBatContent -Encoding ASCII -Force
     Write-Host "[INFO] Wrote $envBatPath" -ForegroundColor Cyan
@@ -282,6 +282,41 @@ function Ensure-RoleAssignment {
         $script:DeploymentErrors.Add("RBAC: '$Role' for '$Assignee'")
     }
     return $false  # newly created (or failed - caller increments counter; errors logged above)
+}
+
+# Creates a custom role definition if it does not already exist.
+# DataActions is a string array; AssignableScopes is a string array.
+function Ensure-CustomRoleDefinition {
+    param(
+        [string]$RoleName,
+        [string]$Description,
+        [string[]]$DataActions,
+        [string[]]$AssignableScopes
+    )
+    $existing = Invoke-AzCliSilent -Arguments @('role','definition','list','--name',$RoleName,'--query','[0].name','-o','tsv')
+    if ($existing.ExitCode -eq 0 -and $existing.Output.Trim()) {
+        Write-Host "[OK] Custom role '$RoleName' already exists" -ForegroundColor Green
+        return
+    }
+    Write-Host "[INFO] Creating custom role '$RoleName'" -ForegroundColor Cyan
+    $roleObj = [ordered]@{
+        Name             = $RoleName
+        Description      = $Description
+        Actions          = @()
+        DataActions      = $DataActions
+        AssignableScopes = $AssignableScopes
+    }
+    $roleJson = $roleObj | ConvertTo-Json -Depth 5
+    $tmpFile  = Join-Path ([System.IO.Path]::GetTempPath()) "custom-role-$([guid]::NewGuid().ToString('N')).json"
+    Set-Content -Path $tmpFile -Value $roleJson -Encoding UTF8
+    $result = Invoke-AzCliSilent -Arguments @('role','definition','create','--role-definition',"@$tmpFile")
+    Remove-Item $tmpFile -ErrorAction SilentlyContinue
+    if ($result.ExitCode -ne 0) {
+        Write-Host "[ERROR] Failed to create custom role '$RoleName': $($result.Error)" -ForegroundColor Red
+        $script:DeploymentErrors.Add("Custom role: '$RoleName'")
+    } else {
+        Write-Host "[SUCCESS] Custom role '$RoleName' created" -ForegroundColor Green
+    }
 }
 
 # Returns $true if the Cosmos DB role assignment was already in place
@@ -622,6 +657,10 @@ if (-not $UserEmail) {
     $StorageBlobEndpoint = (Invoke-AzCliSilent -Arguments @('storage','account','show','--name',$StorageAccountName,'--resource-group',$ResourceGroupName,'--query','primaryEndpoints.blob','-o','tsv')).Output
     Write-Host "[INFO] Storage blob endpoint: $StorageBlobEndpoint" -ForegroundColor Cyan
 
+    # Get the table endpoint
+    $StorageTableEndpoint = (Invoke-AzCliSilent -Arguments @('storage','account','show','--name',$StorageAccountName,'--resource-group',$ResourceGroupName,'--query','primaryEndpoints.table','-o','tsv')).Output
+    Write-Host "[INFO] Storage table endpoint: $StorageTableEndpoint" -ForegroundColor Cyan
+
     # Create the container (idempotent – skip if exists)
     $existing = Invoke-AzCliSilent -Arguments @('storage','container','show','--name',$StorageContainerName,'--account-name',$StorageAccountName,'--auth-mode','login','--query','name','-o','tsv')
     if ($existing.ExitCode -eq 0 -and $existing.Output) {
@@ -633,6 +672,21 @@ if (-not $UserEmail) {
         if ($null -ne $r) {
             Write-Host "[SUCCESS] Storage container '$StorageContainerName' created" -ForegroundColor Green
         }
+    }
+}
+
+# Create the AgentSessions table (idempotent – skip if exists)
+Write-Host "[INFO] Creating storage table: AgentSessions" -ForegroundColor Cyan
+$existingTable = Invoke-AzCliSilent -Arguments @('storage','table','exists','--name','AgentSessions',
+                     '--account-name',$StorageAccountName,'--auth-mode','login','--query','exists','-o','tsv')
+if ($existingTable.ExitCode -eq 0 -and $existingTable.Output -eq 'true') {
+    Write-Host "[WARNING] Storage table 'AgentSessions' already exists, skipping" -ForegroundColor Yellow
+} else {
+    $r = Invoke-AzCli -Description "Creating storage table: AgentSessions" `
+        -Arguments @('storage','table','create','--name','AgentSessions',
+                     '--account-name',$StorageAccountName,'--auth-mode','login','--output','none')
+    if ($null -ne $r) {
+        Write-Host "[SUCCESS] Storage table 'AgentSessions' created" -ForegroundColor Green
     }
 }
 
@@ -1284,6 +1338,103 @@ function Invoke-FoundryModelDeployment {
     return $false
 }
 
+# Prompts the user to select a Content Understanding model from those available
+# and deployable (with remaining quota) in the chosen region.
+# Returns a hashtable: @{ Name; Version; SkuName }
+function Select-CuModel {
+    param(
+        [Parameter(Mandatory=$true)][string]$Location,
+        [Parameter(Mandatory=$true)][string]$ModelType,          # 'completion' or 'embedding'
+        [Parameter(Mandatory=$true)][string[]]$SupportedModels,  # ordered list of CU-supported model names
+        [Parameter(Mandatory=$true)][string]$DefaultModelName,
+        [Parameter(Mandatory=$true)][string]$DefaultModelVersion,
+        [string]$SkuName = 'GlobalStandard'
+    )
+
+    Write-Host ""
+    Write-Host "[INFO] Fetching $ModelType model availability for Content Understanding in '$Location'..." -ForegroundColor Cyan
+
+    # Build preference-order lookup: lower index = more preferred
+    $preferenceOrder = @{}
+    for ($i = 0; $i -lt $SupportedModels.Count; $i++) { $preferenceOrder[$SupportedModels[$i]] = $i }
+
+    # Filter catalog to models that are CU-supported AND offer the required SKU in this region
+    $catalog = Get-FoundryModelCatalog -Location $Location
+    $rawCandidates = @(foreach ($entry in $catalog) {
+        $name    = $entry.model.name
+        $version = $entry.model.version
+        if (-not $preferenceOrder.ContainsKey($name)) { continue }
+        $skuNames = @($entry.model.skus | ForEach-Object { $_.name })
+        if ($skuNames -notcontains $SkuName) { continue }
+        [PSCustomObject]@{ Name = $name; Version = $version }
+    })
+    $candidates = @($rawCandidates | Sort-Object @{ Expression = { $preferenceOrder[$_.Name] }; Ascending = $true },
+                                                  @{ Expression = 'Version'; Descending = $true })
+
+    if ($candidates.Count -eq 0) {
+        Write-Host "[WARNING] No supported $ModelType models with '$SkuName' SKU found in '$Location'. Keeping hardcoded default: $DefaultModelName $DefaultModelVersion" -ForegroundColor Yellow
+        return @{ Name = $DefaultModelName; Version = $DefaultModelVersion; SkuName = $SkuName }
+    }
+
+    # Fetch quota usage for this subscription+location
+    # Format: name.value = "OpenAI.GlobalStandard.gpt-4.1", currentValue/limit in K TPM
+    $usageMap = @{}
+    $usageResult = Invoke-AzCliSilent -Arguments @('cognitiveservices','usage','list','--location',$Location,'-o','json')
+    if ($usageResult.ExitCode -eq 0 -and $usageResult.Output) {
+        try {
+            ($usageResult.Output | ConvertFrom-Json -ErrorAction Stop) | ForEach-Object {
+                if ($_.name.value -match '\.([^.]+)$') {
+                    $usageMap[$Matches[1].ToLower()] = @{ Current = [long]$_.currentValue; Limit = [long]$_.limit }
+                }
+            }
+        } catch {
+            Write-Host "[WARNING] Could not parse quota data — quota will show as unknown" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "[WARNING] Could not retrieve quota for '$Location' — proceeding without quota info" -ForegroundColor Yellow
+    }
+
+    # Display numbered menu
+    Write-Host ("  {0,4}  {1,-32} {2,-18} {3}" -f "#", "Model", "Version", "K TPM used / limit") -ForegroundColor DarkCyan
+    $defaultIdx = 1
+    for ($i = 0; $i -lt $candidates.Count; $i++) {
+        $c        = $candidates[$i]
+        $q        = $usageMap[$c.Name.ToLower()]
+        $quotaStr = if ($q) { "$($q.Current) / $($q.Limit)" } else { "unknown" }
+        $tag      = if     ($q -and $q.Limit -eq 0)              { " [NOT AVAILABLE]" } `
+                    elseif ($q -and $q.Current -ge $q.Limit)     { " [NO CAPACITY]"   } `
+                    else                                           { "" }
+        if ($c.Name -eq $DefaultModelName -and $c.Version -eq $DefaultModelVersion) {
+            $defaultIdx  = $i + 1
+            $defaultMark = "  <-- default"
+        } else { $defaultMark = "" }
+        $color = if ($tag) { 'DarkGray' } else { 'Cyan' }
+        Write-Host ("  [{0,2}]  {1,-32} {2,-18} {3}{4}{5}" -f ($i+1), $c.Name, $c.Version, $quotaStr, $tag, $defaultMark) -ForegroundColor $color
+    }
+
+    # Prompt user selection
+    do {
+        $userInput = Read-Host "Select $ModelType model [1-$($candidates.Count)] (default: $defaultIdx)"
+        if ([string]::IsNullOrWhiteSpace($userInput)) { $userInput = "$defaultIdx" }
+        $valid = $userInput -match '^\d+$' -and [int]$userInput -ge 1 -and [int]$userInput -le $candidates.Count
+        if (-not $valid) { Write-Host "[ERROR] Enter a number between 1 and $($candidates.Count)." -ForegroundColor Red }
+    } while (-not $valid)
+
+    $sel = $candidates[[int]$userInput - 1]
+    $q   = $usageMap[$sel.Name.ToLower()]
+    if ($q -and ($q.Limit -eq 0 -or $q.Current -ge $q.Limit)) {
+        Write-Host "[WARNING] '$($sel.Name)' has no remaining quota in '$Location'. Deployment may fail." -ForegroundColor Yellow
+    }
+    # Allocate 80% of available quota (limit - used). Falls back to the caller's
+    # hardcoded default when quota data is unavailable.
+    $available = if ($q -and $q.Limit -gt 0) { $q.Limit - $q.Current } else { $null }
+    $capacity  = if ($null -ne $available)   { [Math]::Max(1, [long][Math]::Floor($available * 0.80)) } else { $null }
+    $capInfo   = if ($null -ne $capacity)    { "${capacity}K TPM  (80% of ${available}K available)" }   else { 'quota unknown — keeping script default' }
+    Write-Host "[INFO] Selected $ModelType model: $($sel.Name) v$($sel.Version)" -ForegroundColor Green
+    Write-Host "[INFO] Capacity to allocate : $capInfo" -ForegroundColor Green
+    return @{ Name = $sel.Name; Version = $sel.Version; SkuName = $SkuName; Capacity = $capacity }
+}
+
 if (-not (Test-Path $DeployModelsCsvPath)) {
     Write-Host "[WARNING] $DeployModelsCsvPath not found - skipping model deployments" -ForegroundColor Yellow
 } else {
@@ -1336,7 +1487,40 @@ if (-not (Test-Path $DeployModelsCsvPath)) {
     }
 }
 
-# Deploy CU-compatible completion model on the CU resource itself (gpt-4.1)
+# Interactively select the completion and embedding models to deploy on the CU
+# resource, based on what is available and has quota in the chosen region.
+Write-Host ""
+Write-Host ">>> Selecting Content Understanding models for '$LocationContentUnderstanding'" -ForegroundColor White
+Write-Host "[INFO] Only models officially supported by Content Understanding are shown." -ForegroundColor DarkCyan
+Write-Host "[INFO] Supported completion models: gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-5.2" -ForegroundColor DarkCyan
+
+$cuCompletionModels = @('gpt-4.1','gpt-4.1-mini','gpt-4.1-nano','gpt-4o','gpt-4o-mini','gpt-5.2')
+$cuEmbeddingModels  = @('text-embedding-3-large','text-embedding-3-small','text-embedding-ada-002')
+
+$selCompletion = Select-CuModel `
+    -Location $LocationContentUnderstanding -ModelType 'completion' `
+    -SupportedModels $cuCompletionModels `
+    -DefaultModelName $CuCompletionModelName -DefaultModelVersion $CuCompletionModelVersion
+$CuCompletionModelName      = $selCompletion.Name
+$CuCompletionModelVersion   = $selCompletion.Version
+$CuCompletionDeploymentName = $selCompletion.Name
+if ($null -ne $selCompletion.Capacity) { $CuCompletionSkuCapacity = $selCompletion.Capacity }
+
+$selEmbedding = Select-CuModel `
+    -Location $LocationContentUnderstanding -ModelType 'embedding' `
+    -SupportedModels $cuEmbeddingModels `
+    -DefaultModelName $CuEmbeddingModelName -DefaultModelVersion $CuEmbeddingModelVersion
+$CuEmbeddingModelName      = $selEmbedding.Name
+$CuEmbeddingModelVersion   = $selEmbedding.Version
+$CuEmbeddingDeploymentName = $selEmbedding.Name
+if ($null -ne $selEmbedding.Capacity) { $CuEmbeddingSkuCapacity = $selEmbedding.Capacity }
+
+Write-Host ""
+Write-Host "[INFO] Content Understanding models selected:" -ForegroundColor Cyan
+Write-Host "  Completion : $CuCompletionModelName v$CuCompletionModelVersion" -ForegroundColor Cyan
+Write-Host "  Embedding  : $CuEmbeddingModelName v$CuEmbeddingModelVersion" -ForegroundColor Cyan
+
+# Deploy the selected completion model on the CU resource.
 # The PATCH /contentunderstanding/defaults resolves deployments from the CU
 # resource, not from a separate AI Foundry resource.
 $cuDeploymentExists = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','deployment','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--deployment-name',$CuCompletionDeploymentName,'--query','name','-o','tsv')).Output
@@ -1677,8 +1861,9 @@ foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity))
     }
 }
 
-Write-Host "[INFO] Storage Blob Data Reader role for web app" -ForegroundColor Cyan
-if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Blob Data Reader' -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+Write-Host "[INFO] Storage roles for web app" -ForegroundColor Cyan
+if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Blob Data Reader'        -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Table Data Contributor' -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 
 # Admin user needs blob access for container creation and direct blob operations
 if ($CurrentUserId) {
@@ -1709,12 +1894,41 @@ foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, 
     if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Cognitive Services User' -Scope $ContentUnderstandingId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 }
 
-# AI Foundry access (Cognitive Services OpenAI User)
-$AiFoundryId = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
+# AI Foundry access
+# - Cognitive Services OpenAI User : chat completions / embeddings (function apps + web app)
+# - Azure AI Developer (account)    : Agents API — account-level grant
+# - Azure AI Developer (project)    : Agents API — project-level grant (required by Foundry portal RBAC)
+$AiFoundryId      = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
+$AiFoundryProjectId = "$AiFoundryId/projects/$AiFoundryProjectName"
 
 Write-Host "[INFO] Cognitive Services OpenAI User role for function apps and web app" -ForegroundColor Cyan
 foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, $WebAppIdentity)) {
     if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Cognitive Services OpenAI User' -Scope $AiFoundryId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+}
+
+Write-Host "[INFO] Azure AI Developer role for web app — account scope" -ForegroundColor Cyan
+if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Azure AI Developer' -Scope $AiFoundryId        -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+Write-Host "[INFO] Azure AI Developer role for web app — project scope" -ForegroundColor Cyan
+if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Azure AI Developer' -Scope $AiFoundryProjectId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+
+# EIA AI Foundry Agent Writer (custom): Azure AI Developer only covers OpenAI/* data actions;
+# the AIServices/* path (used by AI Foundry agents endpoint) is absent from that role definition.
+$EiaAgentWriterRole = 'EIA AI Foundry Agent Writer'
+Ensure-CustomRoleDefinition `
+    -RoleName         $EiaAgentWriterRole `
+    -Description      'Grants AIServices/* data-plane access needed for AI Foundry agents API (AIServices/* absent from Azure AI Developer role definition)' `
+    -DataActions      @('Microsoft.CognitiveServices/accounts/AIServices/*') `
+    -AssignableScopes @("/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName")
+# Resolve by ID — az CLI cannot resolve custom role names at deep sub-resource scopes
+$EiaAgentWriterRoleId = (Invoke-AzCliSilent -Arguments @('role','definition','list','--name',$EiaAgentWriterRole,'--query','[0].id','-o','tsv')).Output.Trim()
+if (-not $EiaAgentWriterRoleId) {
+    Write-Host "[ERROR] Could not resolve definition ID for custom role '$EiaAgentWriterRole'" -ForegroundColor Red
+    $script:DeploymentErrors.Add("Custom role ID lookup failed: '$EiaAgentWriterRole'")
+} else {
+    Write-Host "[INFO] $EiaAgentWriterRole (custom) for web app — account scope" -ForegroundColor Cyan
+    if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role $EiaAgentWriterRoleId -Scope $AiFoundryId        -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+    Write-Host "[INFO] $EiaAgentWriterRole (custom) for web app — project scope" -ForegroundColor Cyan
+    if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role $EiaAgentWriterRoleId -Scope $AiFoundryProjectId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 }
 
 if ($newAssignments -gt 0) {
@@ -1794,6 +2008,8 @@ $SbUrl       = "https://$ServiceBusNamespace.servicebus.windows.net/"
 $CosmosDbEndpoint = (Invoke-AzCliSilent -Arguments @('cosmosdb','show','--name',$CosmosDbAccountName,'--resource-group',$ResourceGroupName,'--query','documentEndpoint','-o','tsv')).Output
 $ContentUnderstandingEndpoint = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','properties.endpoint','-o','tsv')).Output
 $AiFoundryEndpoint = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--query','properties.endpoint','-o','tsv')).Output
+# Project endpoint required by the Azure AI Agents SDK (AgentsClient)
+$AiFoundryProjectEndpoint = "https://$AiFoundryName.services.ai.azure.com/api/projects/$AiFoundryProjectName"
 
 $MailboxPollingSchedule = if ($env:MAILBOX_POLLING_SCHEDULE) { $env:MAILBOX_POLLING_SCHEDULE } else { "0 */5 * * * *" }
 
@@ -1816,10 +2032,12 @@ $kvSecrets = @{
     "ContentUnderstandingEndpoint"          = $ContentUnderstandingEndpoint
     "ContentUnderstandingCompletionModel"     = $CuCompletionModelName
     "AiFoundryEndpoint"                     = $AiFoundryEndpoint
+    "AiFoundryProjectEndpoint"              = $AiFoundryProjectEndpoint
     "AiFoundryDeploymentName"               = $AiFoundryDeploymentName
     "AiFoundryModelName"                    = $AiFoundryModelName
     "AiFoundryApiVersion"                   = $AiFoundryApiVersion
     "StorageEndpoint"                       = $StorageBlobEndpoint
+    "StorageTableEndpoint"                  = $StorageTableEndpoint
     "StorageContainerName"                  = $StorageContainerName
     "StorageQueueName"                      = $StorageQueueName
     "StorageQueuePollingSchedule"            = $StorageQueuePollingSchedule
@@ -1897,6 +2115,7 @@ foreach ($funcName in @($FuncMailboxName, $FuncQueueDbName, $FuncCuQueueDbName))
 # on Flex Consumption plans and must NOT be set as app settings.
 $mailboxSettings = @{
     "AzureWebJobsStorage__accountName" = $StorageAccountName
+    "AzureWebJobsStorage__credential"  = "managedidentity"
     "AZURE_KEY_VAULT_URL"              = $KvUrl
     "MailboxPollingSchedule"           = "@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=MailboxPollingSchedule)"
 }
@@ -1909,8 +2128,9 @@ if ($r1.ExitCode -ne 0) {
 
 $ServiceBusHostname = "$ServiceBusNamespace.servicebus.windows.net"
 $queueDbSettings = @{
-    "AzureWebJobsStorage__accountName"          = $StorageAccountName
-    "AZURE_KEY_VAULT_URL"                       = $KvUrl
+    "AzureWebJobsStorage__accountName"              = $StorageAccountName
+    "AzureWebJobsStorage__credential"               = "managedidentity"
+    "AZURE_KEY_VAULT_URL"                           = $KvUrl
     # Identity-based Service Bus connection for the @ServiceBusTopicTrigger binding
     "ServiceBusConnection__fullyQualifiedNamespace" = $ServiceBusHostname
     # Binding expressions used in the @ServiceBusTopicTrigger annotation
@@ -1926,6 +2146,7 @@ if ($r2.ExitCode -ne 0) {
 
 $cuQueueDbSettings = @{
     "AzureWebJobsStorage__accountName"          = $StorageAccountName
+    "AzureWebJobsStorage__credential"           = "managedidentity"
     "AZURE_KEY_VAULT_URL"                       = $KvUrl
     "StorageQueuePollingSchedule"               = "@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=StorageQueuePollingSchedule)"
 }
@@ -1958,6 +2179,10 @@ $webAppSettingsPayload = @{
         "COSMOS_CONTAINER_NAME"    = $CosmosDbContainerName
         "STORAGE_ENDPOINT"         = "https://$StorageAccountName.blob.core.windows.net/"
         "STORAGE_CONTAINER_NAME"   = $StorageContainerName
+        # Reasoning effort for the o-series model: low / medium / high / xhigh (default: medium)
+        "AI_FOUNDRY_REASONING_EFFORT" = "medium"
+        # Sliding TTL (hours) for agent conversations — reset on each access (default: 168 = 7 days)
+        "AGENT_CONVERSATION_TTL_HOURS" = "168"
     }
 } | ConvertTo-Json -Compress
 
@@ -2056,6 +2281,6 @@ if ($script:DeploymentErrors.Count -gt 0) {
     Write-Host "  3. Register Content Understanding analyzer schemas:"
     Write-Host "       .\5.content-understanding-add-schema.ps1 -Suffix $Suffix"
     Write-Host "  4. Build and deploy application code (functions + web app):"
-    Write-Host "       .\6.deploy-code.ps1 -Suffix $Suffix"
+    Write-Host "       .\9.deploy-code.ps1 -Suffix $Suffix"
     Write-Host "  5. Test the deployment with sample data"
 }

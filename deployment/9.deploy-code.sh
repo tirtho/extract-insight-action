@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Builds and deploys Azure Function apps and the Spring Boot web app to Azure.
-# Mirrors 6.deploy-code.ps1.
+# Mirrors 9.deploy-code.ps1.
 #
 # Requires: bash 4+, az CLI, mvn, curl, zip, sha256sum.
 #
 # Usage:
-#   ./6.deploy-code.sh <suffix>
+#   ./9.deploy-code.sh <suffix>
 #       [--maven-timeout-minutes N]      (default 15, 0 disables)
 #       [--retry-count N]                (default 3)
 #       [--retry-delay-seconds N]        (default 10)

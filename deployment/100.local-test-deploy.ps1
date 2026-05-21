@@ -14,7 +14,7 @@
     Start a single function host with Java remote debugging enabled on port 5005.
 .PARAMETER KeyVaultUrl
     Optional. Key Vault URL to pass to local workloads. If omitted, the script
-    uses AZURE_KEY_VAULT_URL, then KEY_VAULT_URL, then env.bat.
+    uses AZURE_KEY_VAULT_URL, then env.bat.
 .USAGE
     .\100.local-test-deploy.ps1
     .\100.local-test-deploy.ps1 -Debug
@@ -48,7 +48,7 @@ function Get-KeyVaultUrlFromEnvBat {
         return $null
     }
 
-    $match = Select-String -Path $envBatPath -Pattern '^\s*set\s+KEY_VAULT_URL\s*=\s*(.+)\s*$' | Select-Object -First 1
+    $match = Select-String -Path $envBatPath -Pattern '^\s*set\s+AZURE_KEY_VAULT_URL\s*=\s*(.+)\s*$' | Select-Object -First 1
     if (-not $match) {
         return $null
     }
@@ -62,7 +62,6 @@ function Resolve-KeyVaultUrl {
     foreach ($candidate in @(
         $ExplicitUrl,
         $env:AZURE_KEY_VAULT_URL,
-        $env:KEY_VAULT_URL,
         (Get-KeyVaultUrlFromEnvBat)
     )) {
         if (-not [string]::IsNullOrWhiteSpace($candidate)) {
@@ -93,11 +92,10 @@ if (-not (Get-Command mvn -ErrorAction SilentlyContinue)) {
 
 $script:ResolvedKeyVaultUrl = Resolve-KeyVaultUrl -ExplicitUrl $KeyVaultUrl
 if ($script:ResolvedKeyVaultUrl) {
-    $env:KEY_VAULT_URL = $script:ResolvedKeyVaultUrl
     $env:AZURE_KEY_VAULT_URL = $script:ResolvedKeyVaultUrl
     Write-Host "[INFO] Key Vault URL resolved: $script:ResolvedKeyVaultUrl" -ForegroundColor Cyan
 } else {
-    Write-Host "[WARNING] No Key Vault URL resolved. Use -KeyVaultUrl, set KEY_VAULT_URL/AZURE_KEY_VAULT_URL, or populate env.bat." -ForegroundColor Yellow
+    Write-Host "[WARNING] No Key Vault URL resolved. Use -KeyVaultUrl, set AZURE_KEY_VAULT_URL, or populate env.bat." -ForegroundColor Yellow
 }
 
 # =============================================================================
@@ -229,13 +227,13 @@ function Resolve-FunctionLocalSettings {
     param([Parameter(Mandatory=$true)][string]$StagingDir)
 
     $stagingSettings = Join-Path $StagingDir "local.settings.json"
-    if ($env:KEY_VAULT_URL -and (Test-Path $stagingSettings)) {
+    if ($env:AZURE_KEY_VAULT_URL -and (Test-Path $stagingSettings)) {
         Write-Host "[INFO] Resolving local.settings.json in staging directory..." -ForegroundColor Cyan
-        Write-Host "[INFO] KEY_VAULT_URL = $env:KEY_VAULT_URL" -ForegroundColor Cyan
-        $kvName = ([Uri]$env:KEY_VAULT_URL).Host -replace '\.vault\.azure\.net$',''
+        Write-Host "[INFO] AZURE_KEY_VAULT_URL = $env:AZURE_KEY_VAULT_URL" -ForegroundColor Cyan
+        $kvName = ([Uri]$env:AZURE_KEY_VAULT_URL).Host -replace '\.vault\.azure\.net$',''
         $settings = Get-Content $stagingSettings -Raw | ConvertFrom-Json
 
-        $settings.Values.AZURE_KEY_VAULT_URL = $env:KEY_VAULT_URL
+        $settings.Values.AZURE_KEY_VAULT_URL = $env:AZURE_KEY_VAULT_URL
 
         foreach ($prop in ($settings.Values.PSObject.Properties | Where-Object { $_.Value -match '@Microsoft\.KeyVault\(' })) {
             if ($prop.Value -match 'SecretName=([^;)]+)') {
@@ -257,8 +255,8 @@ function Resolve-FunctionLocalSettings {
 
         $settings | ConvertTo-Json -Depth 10 | Set-Content $stagingSettings -Encoding UTF8
         Write-Host "[OK] Staging local.settings.json updated with resolved secrets" -ForegroundColor Green
-    } elseif (-not $env:KEY_VAULT_URL) {
-        Write-Host "[WARNING] KEY_VAULT_URL environment variable is not set. Run env.bat first or set it manually." -ForegroundColor Yellow
+    } elseif (-not $env:AZURE_KEY_VAULT_URL) {
+        Write-Host "[WARNING] AZURE_KEY_VAULT_URL environment variable is not set. Run env.bat first or set it manually." -ForegroundColor Yellow
         Write-Host "          local.settings.json will use its existing values." -ForegroundColor Yellow
     }
 }
@@ -272,7 +270,7 @@ function Start-TargetWindow {
     $shell = Get-HostShell
     $envPrefix = ''
     if ($script:ResolvedKeyVaultUrl) {
-        $envPrefix = "`$env:KEY_VAULT_URL='$($script:ResolvedKeyVaultUrl)'; `$env:AZURE_KEY_VAULT_URL='$($script:ResolvedKeyVaultUrl)'; "
+        $envPrefix = "`$env:AZURE_KEY_VAULT_URL='$($script:ResolvedKeyVaultUrl)'; "
     }
 
     if ($Target.Kind -eq 'function') {

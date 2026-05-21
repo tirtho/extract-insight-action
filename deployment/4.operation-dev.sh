@@ -173,6 +173,8 @@ CosmosDbAccountId=$(az cosmosdb show --name "$CosmosDbAccountName" --resource-gr
 KeyVaultId=$(az keyvault show --name "$KeyVaultName" --resource-group "$ResourceGroupName" --query id -o tsv 2>/dev/null || true)
 ContentUnderstandingId=$(az cognitiveservices account show --name "$ContentUnderstandingName" --resource-group "$ResourceGroupName" --query id -o tsv 2>/dev/null || true)
 AiFoundryId=$(az cognitiveservices account show --name "$AiFoundryName" --resource-group "$ResourceGroupName" --query id -o tsv 2>/dev/null || true)
+AiFoundryProjectName="${AI_FOUNDRY_PROJECT_NAME:-proj-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
+AiFoundryProjectId="${AiFoundryId}/projects/${AiFoundryProjectName}"
 ServiceBusId=$(az servicebus namespace show --name "$ServiceBusNamespace" --resource-group "$ResourceGroupName" --query id -o tsv 2>/dev/null || true)
 
 CuIdentity=$(az cognitiveservices account identity show --name "$ContentUnderstandingName" --resource-group "$ResourceGroupName" --query principalId -o tsv 2>/dev/null || true)
@@ -208,9 +210,33 @@ for r in 'Cognitive Services User' 'Cognitive Services Contributor'; do
     ASSIGNMENTS+=("arm|$CurrentUserId|$r|$ContentUnderstandingId|$r (Content Understanding)")
 done
 
-for r in 'Cognitive Services User' 'Cognitive Services Contributor' 'Cognitive Services OpenAI User' 'Cognitive Services OpenAI Contributor'; do
-    ASSIGNMENTS+=("arm|$CurrentUserId|$r|$AiFoundryId|$r (AI Foundry)")
+for r in 'Cognitive Services User' 'Cognitive Services Contributor' 'Cognitive Services OpenAI User' 'Cognitive Services OpenAI Contributor' 'Azure AI Developer'; do
+    ASSIGNMENTS+=("arm|$CurrentUserId|$r|$AiFoundryId|$r (AI Foundry account)")
 done
+# Also grant Azure AI Developer at the project scope (Foundry project-level RBAC requires this)
+ASSIGNMENTS+=("arm|$CurrentUserId|Azure AI Developer|$AiFoundryProjectId|Azure AI Developer (AI Foundry project)")
+
+# EIA AI Foundry Agent Writer (custom): covers AIServices/* data actions missing from Azure AI Developer
+EiaAgentWriterRole="EIA AI Foundry Agent Writer"
+existing_custom=$(az role definition list --name "$EiaAgentWriterRole" --query '[0].name' -o tsv 2>/dev/null || true)
+if [[ -z "$existing_custom" ]]; then
+    echo "  [INFO] Creating custom role '$EiaAgentWriterRole'"
+    sub_id=$(az account show --query id -o tsv 2>/dev/null || true)
+    tmp_role=$(mktemp /tmp/eia-custom-role-XXXXXX.json)
+    cat > "$tmp_role" <<EOF
+{
+  "Name": "$EiaAgentWriterRole",
+  "Description": "Grants AIServices/* data-plane access needed for AI Foundry agents API (AIServices/* absent from Azure AI Developer role definition)",
+  "Actions": [],
+  "DataActions": ["Microsoft.CognitiveServices/accounts/AIServices/*"],
+  "AssignableScopes": ["/subscriptions/${sub_id}/resourceGroups/${ResourceGroupName}"]
+}
+EOF
+    az role definition create --role-definition "@$tmp_role" --output none 2>/dev/null || true
+    rm -f "$tmp_role"
+fi
+ASSIGNMENTS+=("arm|$CurrentUserId|$EiaAgentWriterRole|$AiFoundryId|$EiaAgentWriterRole (AI Foundry account)")
+ASSIGNMENTS+=("arm|$CurrentUserId|$EiaAgentWriterRole|$AiFoundryProjectId|$EiaAgentWriterRole (AI Foundry project)")
 
 if [[ -n "$CuIdentity" ]]; then
     ASSIGNMENTS+=("arm|$CuIdentity|Storage Blob Data Reader|$StorageAccountId|Storage Blob Data Reader (Content Understanding)")
@@ -321,6 +347,6 @@ REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 ENV_BAT="$REPO_ROOT/env.bat"
 {
     printf '@echo off\r\n'
-    printf 'set KEY_VAULT_URL=https://%s.vault.azure.net\r\n' "$KeyVaultName"
+    printf 'set AZURE_KEY_VAULT_URL=https://%s.vault.azure.net\r\n' "$KeyVaultName"
 } > "$ENV_BAT"
 echo "[OK] Created $ENV_BAT"

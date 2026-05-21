@@ -80,14 +80,14 @@ else
     echo "[INFO] Loaded ${#GEN_LINES[@]} environment variable(s) from interactive prompts"
 fi
 
-# Derived env vars (SUFFIX / KEY_VAULT_NAME / KEY_VAULT_URL) + write env.bat
+# Derived env vars (SUFFIX / KEY_VAULT_NAME / AZURE_KEY_VAULT_URL) + write env.bat
 _PN="${PROJECT_NAME:-eia}"; _EN="${ENVIRONMENT:-dev}"
 export KEY_VAULT_NAME="kv-${_PN}-${_EN}-${SUFFIX}"
-export KEY_VAULT_URL="https://${KEY_VAULT_NAME}.vault.azure.net"
+export AZURE_KEY_VAULT_URL="https://${KEY_VAULT_NAME}.vault.azure.net"
 export SUFFIX
 {
     printf '@echo off\r\n'
-    printf 'set KEY_VAULT_URL=%s\r\n' "$KEY_VAULT_URL"
+    printf 'set AZURE_KEY_VAULT_URL=%s\r\n' "$AZURE_KEY_VAULT_URL"
 } > "$REPO_ROOT/env.bat" && echo "[INFO] Wrote $REPO_ROOT/env.bat" || \
     echo "[WARNING] Could not write $REPO_ROOT/env.bat"
 
@@ -244,6 +244,39 @@ ensure_cosmos_role_assignment() {
         --role-definition-id "$role_def" --principal-id "$principal" --scope "$scope" \
         --output none 2>/dev/null || true
     return 1
+}
+
+# Creates a custom role definition if it does not already exist.
+# Usage: ensure_custom_role_definition <role_name> <description> <data_actions_json_array> <assignable_scope>
+ensure_custom_role_definition() {
+    local role_name="$1" description="$2" data_actions_json="$3" assignable_scope="$4"
+    local existing
+    existing=$(az role definition list --name "$role_name" --query '[0].name' -o tsv 2>/dev/null || true)
+    if [[ -n "$existing" ]]; then
+        echo "[OK] Custom role '$role_name' already exists"
+        return 0
+    fi
+    echo "[INFO] Creating custom role '$role_name'"
+    local tmp_file
+    tmp_file=$(mktemp /tmp/custom-role-XXXXXX.json)
+    cat > "$tmp_file" <<EOF
+{
+  "Name": "$role_name",
+  "Description": "$description",
+  "Actions": [],
+  "DataActions": $data_actions_json,
+  "AssignableScopes": ["$assignable_scope"]
+}
+EOF
+    if ! az role definition create --role-definition "@$tmp_file" --output none 2>/tmp/crd_err.$$; then
+        echo "[ERROR] Failed to create custom role '$role_name'" >&2
+        cat /tmp/crd_err.$$ >&2 || true
+        rm -f /tmp/crd_err.$$ "$tmp_file"
+        DEPLOYMENT_ERRORS+=("Custom role: '$role_name'")
+        return 1
+    fi
+    rm -f /tmp/crd_err.$$ "$tmp_file"
+    echo "[SUCCESS] Custom role '$role_name' created"
 }
 
 # Merge + PUT function app settings via ARM REST API (mirrors Set-FunctionAppSettings)
@@ -1501,8 +1534,9 @@ for identity in "$MailboxIdentity" "$QueueDbIdentity" "$CuQueueDbIdentity"; do
         ra "$identity" "$role" "$StorageAccountId"
     done
 done
-echo "[INFO] Storage Blob Data Reader role for web app"
-ra "$WebAppIdentity" "Storage Blob Data Reader" "$StorageAccountId"
+echo "[INFO] Storage roles for web app"
+ra "$WebAppIdentity" "Storage Blob Data Reader"        "$StorageAccountId"
+ra "$WebAppIdentity" "Storage Table Data Contributor" "$StorageAccountId"
 if [[ -n "$CurrentUserId" ]]; then
     echo "[INFO] Storage Blob Data Contributor for admin user"
     ensure_role_assignment "$CurrentUserId" "Storage Blob Data Contributor" "$StorageAccountId" "User"
@@ -1533,12 +1567,42 @@ for identity in "$MailboxIdentity" "$QueueDbIdentity" "$CuQueueDbIdentity" "$Web
 done
 
 # AI Foundry
+# - Cognitive Services OpenAI User : chat completions / embeddings (function apps + web app)
+# - Azure AI Developer (account)    : Agents API — account-level grant
+# - Azure AI Developer (project)    : Agents API — project-level grant (required by Foundry portal RBAC)
 AiFoundryId=$(az cognitiveservices account show --name "$AiFoundryName" \
     --resource-group "$ResourceGroupName" --query id -o tsv 2>/dev/null || true)
+AiFoundryProjectId="${AiFoundryId}/projects/${AiFoundryProjectName}"
+
 echo "[INFO] Cognitive Services OpenAI User role for function apps and web app"
 for identity in "$MailboxIdentity" "$QueueDbIdentity" "$CuQueueDbIdentity" "$WebAppIdentity"; do
     ra "$identity" "Cognitive Services OpenAI User" "$AiFoundryId"
 done
+
+echo "[INFO] Azure AI Developer role for web app — account scope"
+ra "$WebAppIdentity" "Azure AI Developer" "$AiFoundryId"
+echo "[INFO] Azure AI Developer role for web app — project scope"
+ra "$WebAppIdentity" "Azure AI Developer" "$AiFoundryProjectId"
+
+# EIA AI Foundry Agent Writer (custom): Azure AI Developer only covers OpenAI/* data actions;
+# the AIServices/* path (used by AI Foundry agents endpoint) is absent from that role definition.
+EiaAgentWriterRole="EIA AI Foundry Agent Writer"
+ensure_custom_role_definition \
+    "$EiaAgentWriterRole" \
+    "Grants AIServices/* data-plane access needed for AI Foundry agents API (AIServices/* absent from Azure AI Developer role definition)" \
+    '["Microsoft.CognitiveServices/accounts/AIServices/*"]' \
+    "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName"
+# Resolve by ID — az CLI cannot resolve custom role names at deep sub-resource scopes
+EiaAgentWriterRoleId=$(az role definition list --name "$EiaAgentWriterRole" --query '[0].id' -o tsv 2>/dev/null || true)
+if [[ -z "$EiaAgentWriterRoleId" ]]; then
+    echo "[ERROR] Could not resolve definition ID for custom role '$EiaAgentWriterRole'" >&2
+    DEPLOYMENT_ERRORS+=("Custom role ID lookup failed: '$EiaAgentWriterRole'")
+else
+    echo "[INFO] $EiaAgentWriterRole (custom) for web app — account scope"
+    ra "$WebAppIdentity" "$EiaAgentWriterRoleId" "$AiFoundryId"
+    echo "[INFO] $EiaAgentWriterRole (custom) for web app — project scope"
+    ra "$WebAppIdentity" "$EiaAgentWriterRoleId" "$AiFoundryProjectId"
+fi
 
 if (( newAssignments > 0 )); then
     echo "[SUCCESS] $newAssignments new RBAC assignment(s) created"
@@ -1736,7 +1800,9 @@ web_settings_body=$(jq -n \
         COSMOS_DATABASE_NAME:$cdb,
         COSMOS_CONTAINER_NAME:$ccont,
         STORAGE_ENDPOINT:    $stg,
-        STORAGE_CONTAINER_NAME:$scont
+        STORAGE_CONTAINER_NAME:$scont,
+        AI_FOUNDRY_REASONING_EFFORT:"medium",
+        AGENT_CONVERSATION_TTL_HOURS:"168"
     }}')
 web_settings_file=$(mktemp)
 echo "$web_settings_body" > "$web_settings_file"
@@ -1828,5 +1894,5 @@ echo "       ./4.operation-dev.sh $SUFFIX"
 echo "  3. Register Content Understanding analyzer schemas:"
 echo "       ./5.content-understanding-add-schema.sh $SUFFIX"
 echo "  4. Build and deploy application code (functions + web app):"
-echo "       ./6.deploy-code.sh $SUFFIX"
+echo "       ./9.deploy-code.sh $SUFFIX"
 echo "  5. Test the deployment with sample data"

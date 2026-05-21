@@ -96,6 +96,24 @@ public class AzConnection implements AutoCloseable {
         });
     }
 
+    /**
+     * Writes (or updates) a secret value in Key Vault and updates the local cache.
+     *
+     * @param secretName  The name of the secret to set.
+     * @param secretValue The value to store.
+     */
+    public void setSecret(String secretName, String secretValue) {
+        LOG.info("Writing secret '{}' to Key Vault", secretName);
+        try {
+            secretClient.setSecret(secretName, secretValue);
+            secretCache.put(secretName, secretValue);
+            LOG.info("Secret '{}' written successfully", secretName);
+        } catch (Exception e) {
+            LOG.error("Failed to write secret '{}' to Key Vault", secretName, e);
+            throw e;
+        }
+    }
+
     // ---------------------------------------------------------------
     //  Azure Cosmos DB
     // ---------------------------------------------------------------

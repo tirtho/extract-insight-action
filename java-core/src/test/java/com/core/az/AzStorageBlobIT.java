@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * <p><b>Prerequisites:</b></p>
  * <ul>
- *   <li>Set the environment variable {@code KEY_VAULT_URL} to your Key Vault URL
+ *   <li>Set the environment variable {@code AZURE_KEY_VAULT_URL} to your Key Vault URL
  *       (e.g. {@code https://my-vault.vault.azure.net}).</li>
  *   <li>Authenticate via {@code az login} or run on a host with Managed Identity.</li>
  *   <li>Ensure the Key Vault contains {@code StorageEndpoint} and {@code StorageContainerName}.</li>
@@ -81,9 +81,9 @@ class AzStorageBlobIT {
 
     @BeforeAll
     static void initConnection() {
-        String kvUrl = System.getenv("KEY_VAULT_URL");
+        String kvUrl = System.getenv("AZURE_KEY_VAULT_URL");
         assumeTrue(kvUrl != null && !kvUrl.isBlank(),
-                "Skipping integration tests: KEY_VAULT_URL environment variable is not set");
+                "Skipping integration tests: AZURE_KEY_VAULT_URL environment variable is not set");
         connection = new AzConnection(kvUrl);
         storageBlob = new AzStorageBlob(connection);
     }

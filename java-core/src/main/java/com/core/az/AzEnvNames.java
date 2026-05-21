@@ -30,10 +30,13 @@ public class AzEnvNames {
     public static final String KV_CONTENT_UNDERSTANDING_COMPLETION_MODEL = "ContentUnderstandingCompletionModel";
     public static final String KV_CONTENT_UNDERSTANDING_ANALYZERS = "ContentUnderstandingAnalyzers";
     public static final String KV_AI_FOUNDRY_ENDPOINT = "AiFoundryEndpoint";
+    public static final String KV_AI_FOUNDRY_PROJECT_ENDPOINT = "AiFoundryProjectEndpoint";
     public static final String KV_AI_FOUNDRY_DEPLOYMENT_NAME = "AiFoundryDeploymentName";
     public static final String KV_AI_FOUNDRY_MODEL_NAME = "AiFoundryModelName";
     public static final String KV_AI_FOUNDRY_API_VERSION = "AiFoundryApiVersion";
+    public static final String KV_AI_FOUNDRY_AGENTS = "AiFoundryAgents";
     public static final String KV_STORAGE_ENDPOINT = "StorageEndpoint";
+    public static final String KV_STORAGE_TABLE_ENDPOINT = "StorageTableEndpoint";
     public static final String KV_STORAGE_CONTAINER_NAME = "StorageContainerName";
     public static final String KV_STORAGE_QUEUE_NAME = "StorageQueueName";
     public static final String KV_STORAGE_QUEUE_POLLING_SCHEDULE = "StorageQueuePollingSchedule";

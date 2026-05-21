@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * <p><b>Prerequisites:</b></p>
  * <ul>
- *   <li>Set the environment variable {@code KEY_VAULT_URL} to your Key Vault URL
+ *   <li>Set the environment variable {@code AZURE_KEY_VAULT_URL} to your Key Vault URL
  *       (e.g. {@code https://my-vault.vault.azure.net}).</li>
  *   <li>Authenticate via {@code az login} or run on a host with Managed Identity.</li>
  *   <li>The Key Vault must contain the secret
@@ -117,9 +117,9 @@ class AzContentUnderstandingIT {
 
     @BeforeAll
     static void initConnection() {
-        String kvUrl = System.getenv("KEY_VAULT_URL");
+        String kvUrl = System.getenv("AZURE_KEY_VAULT_URL");
         assumeTrue(kvUrl != null && !kvUrl.isBlank(),
-                "Skipping integration tests: KEY_VAULT_URL environment variable is not set");
+                "Skipping integration tests: AZURE_KEY_VAULT_URL environment variable is not set");
 
         connection = new AzConnection(kvUrl);
         cu = new AzContentUnderstanding(connection);

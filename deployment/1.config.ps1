@@ -2,7 +2,7 @@
 # Configuration for extract-insight-action Infrastructure Deployment (PowerShell)
 #
 # Reads variables from env.config and sets them as environment variables,
-# then prompts for the deployment suffix to derive KEY_VAULT_URL.
+# then prompts for the deployment suffix to derive AZURE_KEY_VAULT_URL.
 #
 # Dot-source this file before running deployment scripts:
 #   . .\1.config.ps1
@@ -35,7 +35,7 @@ foreach ($n in $loadedVars) {
 }
 
 # =============================================================================
-# Prompt for suffix and derive KEY_VAULT_URL
+# Prompt for suffix and derive AZURE_KEY_VAULT_URL
 # =============================================================================
 $ProjectName = if ($env:PROJECT_NAME) { $env:PROJECT_NAME } else { "eia" }
 $Environment = if ($env:ENVIRONMENT)  { $env:ENVIRONMENT }  else { "dev" }
@@ -47,22 +47,22 @@ if (-not $Suffix) {
 }
 
 $KeyVaultName = "kv-$ProjectName-$Environment-$Suffix"
-$env:SUFFIX          = $Suffix
-$env:KEY_VAULT_NAME  = $KeyVaultName
-$env:KEY_VAULT_URL   = "https://$KeyVaultName.vault.azure.net"
-[System.Environment]::SetEnvironmentVariable('SUFFIX',         $env:SUFFIX,         'Process')
-[System.Environment]::SetEnvironmentVariable('KEY_VAULT_NAME', $env:KEY_VAULT_NAME, 'Process')
-[System.Environment]::SetEnvironmentVariable('KEY_VAULT_URL',  $env:KEY_VAULT_URL,  'Process')
+$env:SUFFIX                = $Suffix
+$env:KEY_VAULT_NAME        = $KeyVaultName
+$env:AZURE_KEY_VAULT_URL   = "https://$KeyVaultName.vault.azure.net"
+[System.Environment]::SetEnvironmentVariable('SUFFIX',               $env:SUFFIX,               'Process')
+[System.Environment]::SetEnvironmentVariable('KEY_VAULT_NAME',       $env:KEY_VAULT_NAME,       'Process')
+[System.Environment]::SetEnvironmentVariable('AZURE_KEY_VAULT_URL',  $env:AZURE_KEY_VAULT_URL,  'Process')
 
-Write-Host "[OK] SUFFIX          = $env:SUFFIX" -ForegroundColor Green
-Write-Host "[OK] KEY_VAULT_NAME  = $env:KEY_VAULT_NAME" -ForegroundColor Green
-Write-Host "[OK] KEY_VAULT_URL   = $env:KEY_VAULT_URL" -ForegroundColor Green
+Write-Host "[OK] SUFFIX                = $env:SUFFIX" -ForegroundColor Green
+Write-Host "[OK] KEY_VAULT_NAME        = $env:KEY_VAULT_NAME" -ForegroundColor Green
+Write-Host "[OK] AZURE_KEY_VAULT_URL   = $env:AZURE_KEY_VAULT_URL" -ForegroundColor Green
 
 # =============================================================================
-# Generate env.bat in the repo root (KEY_VAULT_URL for tools that source env.bat)
+# Generate env.bat in the repo root (AZURE_KEY_VAULT_URL for tools that source env.bat)
 # =============================================================================
 $envBatPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'env.bat'
-$envBatContent = "@echo off`r`nset KEY_VAULT_URL=$($env:KEY_VAULT_URL)"
+$envBatContent = "@echo off`r`nset AZURE_KEY_VAULT_URL=$($env:AZURE_KEY_VAULT_URL)`r`nset AI_FOUNDRY_REASONING_EFFORT=medium`r`nset AGENT_CONVERSATION_TTL_HOURS=168"
 Set-Content -Path $envBatPath -Value $envBatContent -Encoding ASCII -Force
 Write-Host "[OK] Wrote $envBatPath" -ForegroundColor Green
 

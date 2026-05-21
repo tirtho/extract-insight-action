@@ -151,7 +151,7 @@
                     <forkedProcessExitTimeoutInSeconds>5</forkedProcessExitTimeoutInSeconds>
                     <shutdown>kill</shutdown>
                     <environmentVariables>
-                        <KEY_VAULT_URL>${key.vault.url}</KEY_VAULT_URL>
+                        <AZURE_KEY_VAULT_URL>${key.vault.url}</AZURE_KEY_VAULT_URL>
                     </environmentVariables>
                 </configuration>
                 <executions>

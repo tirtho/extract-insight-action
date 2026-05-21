@@ -1,6 +1,7 @@
 package com.eia.ui.controller;
 
 import com.eia.ui.model.EmailDetailView;
+import com.eia.ui.service.AgentChatService;
 import com.eia.ui.service.AzureEmailStore;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
@@ -30,9 +31,11 @@ import java.util.Set;
 public class EmailController {
 
     private final AzureEmailStore azureEmailStore;
+    private final AgentChatService agentChatService;
 
-    public EmailController(AzureEmailStore azureEmailStore) {
-        this.azureEmailStore = azureEmailStore;
+    public EmailController(AzureEmailStore azureEmailStore, AgentChatService agentChatService) {
+        this.azureEmailStore  = azureEmailStore;
+        this.agentChatService = agentChatService;
     }
 
     @GetMapping({"/", "/emails"})
@@ -73,6 +76,8 @@ public class EmailController {
         model.addAttribute("oidcEnabled", isOidcConfigured());
         model.addAttribute("userDisplayName", resolveUserDisplayName(authentication));
         model.addAttribute("userLogin", resolveUserLogin(authentication));
+        model.addAttribute("agentAvailable", agentChatService.isAvailable());
+        model.addAttribute("agentError", agentChatService.getUnavailableReason());
         return "emails";
     }
 

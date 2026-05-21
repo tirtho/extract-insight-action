@@ -7,9 +7,26 @@
     <link rel="stylesheet" th:href="@{/app.css}">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+    <meta name="_csrf" th:content="${_csrf.token}" th:if="${_csrf != null}"/>
+    <meta name="_csrf_header" th:content="${_csrf.headerName}" th:if="${_csrf != null}"/>
 </head>
 <body>
 <main class="shell">
+
+    <!-- AI agent error banner — shown when agent initialisation failed -->
+    <div class="agent-status-bar" id="agentStatusBar" th:if="${!agentAvailable}" role="alert">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"
+             fill="currentColor" aria-hidden="true" class="agent-status-icon" flex-shrink="0">
+            <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5m.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2"/>
+        </svg>
+        <span class="agent-status-message">
+            <strong>AI Insight unavailable —</u></strong>
+            <span th:text="${agentError}"></span>
+        </span>
+        <button class="agent-status-dismiss" type="button" aria-label="Dismiss"
+                onclick="document.getElementById('agentStatusBar').remove()">&times;</button>
+    </div>
+
     <section class="top-banner">
         <div>
             <div class="eyebrow">Extract Insight Action</div>
@@ -102,9 +119,20 @@
             <section class="email-overview">
                 <div class="email-overview-title">
                     <h2>Email Details</h2>
-                    <button class="body-button body-button-sm" type="button"
-                            data-dialog-target="emailBodyDialog"
-                            th:if="${!selectedEmail.bodyPreview().isBlank()}">Body</button>
+                    <div class="email-overview-actions">
+                        <button class="body-button body-button-sm" type="button"
+                                data-dialog-target="emailBodyDialog"
+                                th:if="${!selectedEmail.bodyPreview().isBlank()}">Body</button>
+                        <button class="ai-insight-btn" type="button"
+                                th:attr="data-email-id=${selectedEmail.id()}"
+                                onclick="openAgentChat(this.dataset.emailId)"
+                                aria-label="AI Insight" title="Ask AI about this email">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                                <path d="M7.657 6.247c.11-.33.576-.33.686 0l.645 1.937a2.89 2.89 0 0 0 1.829 1.828l1.936.645c.33.11.33.576 0 .686l-1.937.645a2.89 2.89 0 0 0-1.828 1.829l-.645 1.936a.361.361 0 0 1-.686 0l-.645-1.937a2.89 2.89 0 0 0-1.828-1.828l-1.937-.645a.361.361 0 0 1 0-.686l1.937-.645a2.89 2.89 0 0 0 1.828-1.828zM3.794 1.148a.217.217 0 0 1 .412 0l.387 1.162c.173.518.579.924 1.097 1.097l1.162.387a.217.217 0 0 1 0 .412l-1.162.387A1.73 1.73 0 0 0 4.593 5.69l-.387 1.162a.217.217 0 0 1-.412 0L3.407 5.69A1.73 1.73 0 0 0 2.31 4.593l-1.162-.387a.217.217 0 0 1 0-.412l1.162-.387A1.73 1.73 0 0 0 3.407 2.31zM10.863.099a.145.145 0 0 1 .274 0l.258.774c.115.346.386.617.732.732l.774.258a.145.145 0 0 1 0 .274l-.774.258a1.16 1.16 0 0 0-.732.732l-.258.774a.145.145 0 0 1-.274 0l-.258-.774a1.16 1.16 0 0 0-.732-.732L9.1 2.137a.145.145 0 0 1 0-.274l.774-.258c.346-.115.617-.386.732-.732z"/>
+                            </svg>
+                            AI Insight
+                        </button>
+                    </div>
                 </div>
             </section>
 
@@ -127,6 +155,30 @@
                     <button class="body-dialog-close" type="button" aria-label="Close body preview">Close</button>
                 </div>
                 <div class="body-dialog-content" th:text="${selectedEmail.bodyContent() != null && !selectedEmail.bodyContent().isBlank() ? selectedEmail.bodyContent() : selectedEmail.bodyPreview()}"></div>
+            </dialog>
+
+            <dialog class="body-dialog agent-chat-dialog" id="agentChatDialog">
+                <div class="body-dialog-head">
+                    <div>
+                        <h2>AI Email Insight</h2>
+                        <p class="body-dialog-title" th:text="${selectedEmail.subject()}"></p>
+                    </div>
+                    <div class="chat-effort-bar" id="chatEffortBar">
+                        <span class="chat-effort-label">Thinking:</span>
+                        <button class="chat-effort-btn" type="button" data-effort="low">Low</button>
+                        <button class="chat-effort-btn chat-effort-active" type="button" data-effort="medium">Med</button>
+                        <button class="chat-effort-btn" type="button" data-effort="high">High</button>
+                        <button class="chat-effort-btn" type="button" data-effort="xhigh">Max</button>
+                    </div>
+                    <button class="body-dialog-close" type="button" aria-label="Close AI chat">Close</button>
+                </div>
+                <div class="agent-chat-messages" id="agentChatMessages"></div>
+                <div class="agent-chat-input-row">
+                    <textarea id="agentChatInput" class="agent-chat-input" rows="2"
+                              placeholder="Ask about this email… (Ctrl+Enter to send)"></textarea>
+                    <button type="button" id="agentChatSend" class="agent-chat-send"
+                            onclick="sendAgentMessage()">Send</button>
+                </div>
             </dialog>
 
             <section class="attachments-section">
@@ -312,6 +364,120 @@
         document.getElementById('filterEmail').value = '';
         document.getElementById('filterSubject').value = '';
         window.location.href = '/emails';
+    }
+
+    // =========================================================================
+    // AI Agent Chat
+    // =========================================================================
+    var _agentEmailId  = null;
+    var _agentFirstMsg = true;
+    var _agentSending  = false;
+    var _agentReasoningEffort = 'medium';
+
+    document.addEventListener('DOMContentLoaded', function () {
+        var agentInput = document.getElementById('agentChatInput');
+        if (agentInput) {
+            agentInput.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { sendAgentMessage(); }
+            });
+        }
+        document.querySelectorAll('.chat-effort-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                _agentReasoningEffort = btn.dataset.effort;
+                document.querySelectorAll('.chat-effort-btn').forEach(function (b) {
+                    b.classList.toggle('chat-effort-active', b === btn);
+                });
+            });
+        });
+    });
+
+    function openAgentChat(emailId) {
+        _agentEmailId  = emailId;
+        _agentFirstMsg = true;
+        _agentSending  = false;
+        _agentReasoningEffort = 'medium';
+        document.querySelectorAll('.chat-effort-btn').forEach(function (b) {
+            b.classList.toggle('chat-effort-active', b.dataset.effort === 'medium');
+        });
+        var messages = document.getElementById('agentChatMessages');
+        if (messages) messages.innerHTML = '';
+        var input = document.getElementById('agentChatInput');
+        if (input) input.value = '';
+        var sendBtn = document.getElementById('agentChatSend');
+        if (sendBtn) sendBtn.disabled = false;
+        var dialog = document.getElementById('agentChatDialog');
+        if (dialog) dialog.showModal();
+        setTimeout(function () { if (input) input.focus(); }, 60);
+    }
+
+    async function sendAgentMessage() {
+        if (_agentSending) return;
+        var input   = document.getElementById('agentChatInput');
+        var sendBtn = document.getElementById('agentChatSend');
+        var prompt  = input.value.trim();
+        if (!prompt) return;
+
+        _agentSending = true;
+        if (sendBtn) sendBtn.disabled = true;
+        appendChatMsg('user', prompt, false);
+        input.value = '';
+
+        var loadingId = appendChatMsg('agent', 'Thinking…', true);
+        try {
+            var csrfMeta       = document.querySelector('meta[name="_csrf"]');
+            var csrfHeaderMeta = document.querySelector('meta[name="_csrf_header"]');
+            var headers = { 'Content-Type': 'application/json' };
+            if (csrfMeta && csrfHeaderMeta) {
+                headers[csrfHeaderMeta.getAttribute('content')] = csrfMeta.getAttribute('content');
+            }
+            var resp = await fetch('/api/agent/chat', {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify({
+                    emailId: _agentEmailId,
+                    prompt: prompt,
+                    isFirstMessage: _agentFirstMsg,
+                    reasoningEffort: _agentReasoningEffort
+                })
+            });
+            var data = await resp.json();
+            var loadingEl = document.getElementById(loadingId);
+            if (loadingEl) loadingEl.remove();
+            if (resp.ok) {
+                appendChatMsg('agent', data.content || '', false);
+                _agentFirstMsg = false;
+            } else {
+                appendChatMsg('error', data.error || 'An error occurred.', false);
+            }
+        } catch (e) {
+            var loadingEl = document.getElementById(loadingId);
+            if (loadingEl) loadingEl.remove();
+            appendChatMsg('error', 'Network error: ' + e.message, false);
+        } finally {
+            _agentSending = false;
+            if (sendBtn) sendBtn.disabled = false;
+            if (input) input.focus();
+        }
+    }
+
+    function appendChatMsg(role, text, isLoading) {
+        var container = document.getElementById('agentChatMessages');
+        var id = 'chatmsg-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+        var row = document.createElement('div');
+        row.id = id;
+        row.className = 'chat-message chat-message-' + role + (isLoading ? ' chat-message-loading' : '');
+        var bubble = document.createElement('div');
+        bubble.className = 'chat-bubble';
+        if (role === 'agent' && !isLoading && typeof marked !== 'undefined') {
+            var rawHtml = marked.parse(text);
+            bubble.innerHTML = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(rawHtml) : rawHtml;
+        } else {
+            bubble.textContent = text;
+        }
+        row.appendChild(bubble);
+        container.appendChild(row);
+        container.scrollTop = container.scrollHeight;
+        return id;
     }
 </script>
 </body>

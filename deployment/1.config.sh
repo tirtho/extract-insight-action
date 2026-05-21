@@ -3,7 +3,7 @@
 # Configuration for extract-insight-action Infrastructure Deployment (bash)
 #
 # Reads variables from env.config and exports them, then prompts for the
-# deployment suffix to derive KEY_VAULT_URL.
+# deployment suffix to derive AZURE_KEY_VAULT_URL.
 #
 # Source this file before running deployment scripts:
 #   source ./1.config.sh
@@ -39,7 +39,7 @@ for n in "${LOADED_VARS[@]}"; do
 done
 
 # =============================================================================
-# Prompt for suffix and derive KEY_VAULT_URL
+# Prompt for suffix and derive AZURE_KEY_VAULT_URL
 # =============================================================================
 PROJECT_NAME="${PROJECT_NAME:-eia}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
@@ -53,20 +53,22 @@ fi
 KEY_VAULT_NAME="kv-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}"
 export SUFFIX
 export KEY_VAULT_NAME
-export KEY_VAULT_URL="https://${KEY_VAULT_NAME}.vault.azure.net"
+export AZURE_KEY_VAULT_URL="https://${KEY_VAULT_NAME}.vault.azure.net"
 
-echo "[OK] SUFFIX          = $SUFFIX"
-echo "[OK] KEY_VAULT_NAME  = $KEY_VAULT_NAME"
-echo "[OK] KEY_VAULT_URL   = $KEY_VAULT_URL"
+echo "[OK] SUFFIX                = $SUFFIX"
+echo "[OK] KEY_VAULT_NAME        = $KEY_VAULT_NAME"
+echo "[OK] AZURE_KEY_VAULT_URL   = $AZURE_KEY_VAULT_URL"
 
 # =============================================================================
-# Generate env.bat in the repo root (KEY_VAULT_URL for tools that source env.bat)
+# Generate env.bat in the repo root (AZURE_KEY_VAULT_URL for tools that source env.bat)
 # =============================================================================
 REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 ENV_BAT="$REPO_ROOT/env.bat"
 {
     printf '@echo off\r\n'
-    printf 'set KEY_VAULT_URL=%s\r\n' "$KEY_VAULT_URL"
+    printf 'set AZURE_KEY_VAULT_URL=%s\r\n' "$AZURE_KEY_VAULT_URL"
+    printf 'set AI_FOUNDRY_REASONING_EFFORT=medium\r\n'
+    printf 'set AGENT_CONVERSATION_TTL_HOURS=168\r\n'
 } > "$ENV_BAT"
 echo "[OK] Wrote $ENV_BAT"
 
