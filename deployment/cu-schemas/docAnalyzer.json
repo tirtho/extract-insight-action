@@ -1,5 +1,50 @@
 {
   "description": "Document analyzer – extracts text, structure, and key-value pairs from documents (PDF, DOCX, etc.)",
   "baseAnalyzerId": "prebuilt-document",
-  "scenario": "document"
+  "scenario": "document",
+  "fieldSchema": {
+    "fields": {
+      "Summary": {
+        "type": "string",
+        "description": "A concise summary of the document's overall content and purpose"
+      },
+      "KeyPhrases": {
+        "type": "array",
+        "description": "Key phrases and terms extracted from the document",
+        "items": {
+          "type": "string"
+        }
+      },
+      "NamedEntities": {
+        "type": "string",
+        "description": "Named entities identified in the document as a comma-separated list of 'Text (Category)' pairs, e.g. 'Alice (Person), London (Location), Acme Corp (Organization)'"
+      },
+      "PiiData": {
+        "type": "string",
+        "description": "Any personally identifiable information detected in the document (names, SSNs, account numbers, addresses); null if none"
+      },
+      "AnyAnomaly": {
+        "type": "string",
+        "description": "Description of any anomaly detected in the document (inconsistencies, suspicious content, signs of tampering); null if none"
+      },
+      "Classification": {
+        "type": "object",
+        "description": "Hierarchical classification of the document content (up to 3 levels deep)",
+        "properties": {
+          "Category": {
+            "type": "string",
+            "description": "Top-level category of the document (e.g. Legal, Financial, Medical, Technical, HR)"
+          },
+          "Subcategory": {
+            "type": "string",
+            "description": "Second-level classification within the category (e.g. Contract, Invoice, LabReport, UserManual, JobOffer)"
+          },
+          "Tag": {
+            "type": "string",
+            "description": "Third-level specific tag within the subcategory (e.g. NDA, PurchaseOrder, BloodTest, API, OfferLetter)"
+          }
+        }
+      }
+    }
+  }
 }

@@ -140,6 +140,28 @@ function Write-NewLogContent {
     $LineCount.Value = $lines.Count
 }
 
+function Remove-BuildOutputDirectory {
+    param(
+        [Parameter(Mandatory=$true)][string]$SourceDir,
+        [Parameter(Mandatory=$true)][string]$FunctionLabel
+    )
+
+    $targetDir = Join-Path $SourceDir 'target'
+    if (-not (Test-Path $targetDir)) {
+        return
+    }
+
+    try {
+        cmd.exe /c "rd /s /q `"$targetDir`"" | Out-Null
+    } catch {
+        throw "Failed to clear build output directory for $FunctionLabel at $targetDir. Close any process locking the folder and try again."
+    }
+
+    if (Test-Path $targetDir) {
+        throw "Failed to clear build output directory for $FunctionLabel at $targetDir. Close any process locking the folder and try again."
+    }
+}
+
 function Invoke-MavenPackage {
     param(
         [Parameter(Mandatory=$true)][string]$SourceDir,
@@ -326,6 +348,56 @@ function Get-ArtifactSha256 {
     }
 }
 
+function Test-JarArchiveIntegrity {
+    param(
+        [Parameter(Mandatory=$true)][string]$JarPath
+    )
+
+    if (-not (Test-Path $JarPath)) {
+        return $false
+    }
+
+    $item = Get-Item -LiteralPath $JarPath -ErrorAction SilentlyContinue
+    if ($null -eq $item -or $item.Length -le 0) {
+        return $false
+    }
+
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
+        try {
+            # Touch entries to force central directory/header read.
+            $null = $archive.Entries.Count
+        } finally {
+            $archive.Dispose()
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-HttpStatusCodeFromException {
+    param(
+        [Parameter(Mandatory=$true)]$Exception
+    )
+
+    if ($null -eq $Exception) {
+        return $null
+    }
+
+    $response = $Exception.Response
+    if ($null -eq $response) {
+        return $null
+    }
+
+    try {
+        return [int]$response.StatusCode
+    } catch {
+        return $null
+    }
+}
+
 # =============================================================================
 # STEP 1: Select which workload(s) to deploy
 # =============================================================================
@@ -471,7 +543,12 @@ foreach ($target in $targets) {
             Write-Host "[INFO] Maven timeout disabled for this build." -ForegroundColor DarkCyan
         }
 
-        Invoke-MavenPackage -SourceDir $SourceDir -FunctionLabel $FunctionLabel -MavenPath $mvn.Source -TimeoutMinutes $MavenTimeoutMinutes -SkipClean:($TargetKind -eq 'webapp')
+        # Remove the previous build output first so Maven does not have to delete a locked target tree.
+        Remove-BuildOutputDirectory -SourceDir $SourceDir -FunctionLabel $FunctionLabel
+
+        # Package only after the output directory is removed; this is equivalent to a clean build without
+        # relying on the Maven clean plugin to delete locked files.
+        Invoke-MavenPackage -SourceDir $SourceDir -FunctionLabel $FunctionLabel -MavenPath $mvn.Source -TimeoutMinutes $MavenTimeoutMinutes -SkipClean
     } catch {
         Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
         $deploymentErrors.Add($FunctionLabel)
@@ -486,6 +563,13 @@ foreach ($target in $targets) {
             Select-Object -First 1
         if (-not $jarFile) {
             Write-Host "[ERROR] Spring Boot JAR not found under $(Join-Path $SourceDir 'target')" -ForegroundColor Red
+            $deploymentErrors.Add($FunctionLabel)
+            continue
+        }
+
+        if (-not (Test-JarArchiveIntegrity -JarPath $jarFile.FullName)) {
+            Write-Host "[ERROR] Built JAR is invalid or corrupted: $($jarFile.FullName)" -ForegroundColor Red
+            Write-Host "[ERROR] Rebuild the project and ensure no process is locking files under target before deployment." -ForegroundColor Red
             $deploymentErrors.Add($FunctionLabel)
             continue
         }
@@ -515,28 +599,81 @@ foreach ($target in $targets) {
             $appUrl = "https://$defaultHostName"
             Write-Host "[INFO] Web app URL: $appUrl" -ForegroundColor Cyan
 
-            # Poll the app URL until it responds HTTP 2xx/3xx or we time out.
+            # Poll lightweight anonymous URLs and require consecutive healthy checks
+            # so transient startup states do not look like a successful deployment.
             $pollStart    = [DateTime]::UtcNow
             $pollDeadline = $pollStart.AddMinutes($WebAppDeployTimeoutMinutes)
             $pollInterval = 15
             $appReady = $false
+            $lastObservedStatus = $null
+            $lastObservedError  = ""
+            $smokeUrls = @($appUrl, "$appUrl/actuator/health")
+            $requiredStablePasses = 2
+            $stablePasses = 0
+            $lastSmokeSummary = ""
             while ([DateTime]::UtcNow -lt $pollDeadline) {
-                try {
-                    $resp = Invoke-WebRequest -Uri $appUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
-                    if ($resp.StatusCode -lt 500) {
-                        Write-Host "[SUCCESS] App is responding (HTTP $($resp.StatusCode))." -ForegroundColor Green
+                $allHealthy = $true
+                $currentStatuses = [System.Collections.Generic.List[string]]::new()
+
+                foreach ($smokeUrl in $smokeUrls) {
+                    try {
+                        $resp = Invoke-WebRequest -Uri $smokeUrl -UseBasicParsing -TimeoutSec 10 -MaximumRedirection 0 -ErrorAction Stop
+                        $statusCode = [int]$resp.StatusCode
+                        $currentStatuses.Add("$smokeUrl=$statusCode")
+                        $lastObservedStatus = $statusCode
+
+                        if ($statusCode -ge 500) {
+                            $allHealthy = $false
+                        }
+                    } catch {
+                        $statusCode = Get-HttpStatusCodeFromException -Exception $_.Exception
+                        if ($null -ne $statusCode) {
+                            $currentStatuses.Add("$smokeUrl=$statusCode")
+                            $lastObservedStatus = $statusCode
+                            if ($statusCode -ge 500) {
+                                $allHealthy = $false
+                            }
+                        } else {
+                            $currentStatuses.Add("$smokeUrl=ERR")
+                            $allHealthy = $false
+                            $lastObservedError = $_.Exception.Message
+                        }
+                    }
+                }
+
+                $lastSmokeSummary = ($currentStatuses -join '; ')
+
+                if ($allHealthy) {
+                    $stablePasses++
+                    if ($stablePasses -ge $requiredStablePasses) {
+                        Write-Host "[SUCCESS] App smoke checks passed ($lastSmokeSummary)." -ForegroundColor Green
                         $appReady = $true
                         break
                     }
-                } catch {
-                    # Non-2xx or connection refused — still starting
+                } else {
+                    $stablePasses = 0
                 }
+
                 $elapsed = [int]([DateTime]::UtcNow - $pollStart).TotalSeconds
-                Write-Host "[INFO] App not yet ready (${elapsed}s elapsed), retrying in ${pollInterval}s..." -ForegroundColor DarkCyan
+                if ($lastSmokeSummary) {
+                    Write-Host "[INFO] App not yet ready (${elapsed}s elapsed, checks: $lastSmokeSummary, stable passes: $stablePasses/$requiredStablePasses), retrying in ${pollInterval}s..." -ForegroundColor DarkCyan
+                } elseif ($null -ne $lastObservedStatus) {
+                    Write-Host "[INFO] App not yet ready (${elapsed}s elapsed, last HTTP: $lastObservedStatus), retrying in ${pollInterval}s..." -ForegroundColor DarkCyan
+                } else {
+                    Write-Host "[INFO] App not yet ready (${elapsed}s elapsed), retrying in ${pollInterval}s..." -ForegroundColor DarkCyan
+                }
                 Start-Sleep -Seconds $pollInterval
             }
             if (-not $appReady) {
-                Write-Host "[WARNING] App did not respond within $WebAppDeployTimeoutMinutes min. Check Azure portal for status." -ForegroundColor Yellow
+                if ($lastSmokeSummary) {
+                    Write-Host "[WARNING] App did not become ready within $WebAppDeployTimeoutMinutes min (last smoke checks: $lastSmokeSummary). Check Azure portal for status." -ForegroundColor Yellow
+                } elseif ($null -ne $lastObservedStatus) {
+                    Write-Host "[WARNING] App did not become ready within $WebAppDeployTimeoutMinutes min (last HTTP: $lastObservedStatus). Check Azure portal for status." -ForegroundColor Yellow
+                } elseif ($lastObservedError) {
+                    Write-Host "[WARNING] App did not become ready within $WebAppDeployTimeoutMinutes min (last error: $lastObservedError). Check Azure portal for status." -ForegroundColor Yellow
+                } else {
+                    Write-Host "[WARNING] App did not respond within $WebAppDeployTimeoutMinutes min. Check Azure portal for status." -ForegroundColor Yellow
+                }
             }
         }
         continue

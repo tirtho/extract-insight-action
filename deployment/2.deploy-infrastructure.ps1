@@ -2031,6 +2031,7 @@ $kvSecrets = @{
     "CosmosDbContainerName"               = $CosmosDbContainerName
     "ContentUnderstandingEndpoint"          = $ContentUnderstandingEndpoint
     "ContentUnderstandingCompletionModel"     = $CuCompletionModelName
+    "ContentUnderstandingEmbeddingModel"      = $CuEmbeddingModelName
     "AiFoundryEndpoint"                     = $AiFoundryEndpoint
     "AiFoundryProjectEndpoint"              = $AiFoundryProjectEndpoint
     "AiFoundryDeploymentName"               = $AiFoundryDeploymentName

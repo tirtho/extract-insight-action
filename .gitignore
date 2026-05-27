@@ -47,3 +47,11 @@ __queuestorage__/
 **/__queuestorage__/
 __*__.json
 **/__*__.json
+
+# Generated log folders
+*-logs/
+*-logs-latest/
+*-logs-now/
+**/*-logs/
+**/*-logs-latest/
+**/*-logs-now/

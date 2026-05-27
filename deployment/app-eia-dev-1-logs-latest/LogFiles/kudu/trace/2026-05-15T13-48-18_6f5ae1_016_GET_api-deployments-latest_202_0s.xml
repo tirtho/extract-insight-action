@@ -1,0 +1,8 @@
+<step title="Incoming Request" date="2026-05-15T13:48:18.226" instance="6f5ae1" url="/api/deployments/latest" method="GET" type="request" pid="831,1,80" Accept="*/*" Host="app-eia-dev-1.scm.azurewebsites.net" User-Agent="AZURECLI/2.84.0 (MSI)" Accept-Encoding="gzip, deflate" Authorization="Bea..." x-ms-client-request-id="aa1565fd-5064-11f1-8546-68f7d8d00d38" X-ARR-LOG-ID="aa1565fd-5064-11f1-8546-68f7d8d00d38" CLIENT-IP="71.184.147.154:53946" X-SITE-DEPLOYMENT-ID="app-eia-dev-1" WAS-DEFAULT-HOSTNAME="app-eia-dev-1.scm.azurewebsites.net" X-Forwarded-Proto="https" X-AppService-Proto="https" X-Forwarded-TlsVersion="1.3" X-WAWS-Unencoded-URL="/api/deployments/latest" X-Client-IP="71.184.147.154" X-Client-Port="53946" >
+  <step title="DeploymentService.GetResult" date="2026-05-15T13:48:18.232" >
+    <step title="DeploymentService.GetLatestDeployment" date="2026-05-15T13:48:18.235" >
+      <step title="DeploymentManager.GetResults" date="2026-05-15T13:48:18.237" /><!-- duration: 268ms -->
+    </step><!-- duration: 272ms -->
+  </step><!-- duration: 277ms -->
+  <step title="Outgoing response" date="2026-05-15T13:48:18.515" type="response" statusCode="202" statusText="Accepted" /><!-- duration: 6ms -->
+</step><!-- duration: 296ms -->

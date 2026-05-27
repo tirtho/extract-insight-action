@@ -1,5 +1,93 @@
 {
-  "description": "Audio analyzer – transcribes and extracts insights from audio files (WAV, MP3, OGG, FLAC, etc.)",
+  "description": "Audio analyzer – transcribes and extracts insights, entities, anomalies, and classification from audio files (WAV, MP3, OGG, FLAC, etc.)",
   "baseAnalyzerId": "prebuilt-audio",
-  "scenario": "audio"
+  "scenario": "audio",
+  "fieldSchema": {
+    "fields": {
+      "Description": {
+        "type": "string",
+        "description": "A comprehensive description of the overall audio content and context"
+      },
+      "TranscriptSummary": {
+        "type": "string",
+        "description": "A high-level summary of the full audio transcript"
+      },
+      "KeyPhrases": {
+        "type": "array",
+        "description": "Key phrases extracted from the audio transcript",
+        "items": {
+          "type": "string"
+        }
+      },
+      "NamedEntities": {
+        "type": "array",
+        "description": "Named entities (people, places, organizations, dates) identified in the audio",
+        "items": {
+          "type": "object",
+          "properties": {
+            "Text": {
+              "type": "string",
+              "description": "The entity text as it appears in the transcript"
+            },
+            "Category": {
+              "type": "string",
+              "description": "Entity category (Person, Location, Organization, DateTime, Product, Event)"
+            }
+          }
+        }
+      },
+      "PiiData": {
+        "type": "array",
+        "description": "Personally identifiable information detected in the audio (names, phone numbers, account numbers)",
+        "items": {
+          "type": "object",
+          "properties": {
+            "Description": {
+              "type": "string",
+              "description": "Description of the PII detected"
+            },
+            "TimeLocation": {
+              "type": "string",
+              "description": "Timestamp or time range where the PII occurs (e.g. 00:01:23 or 00:01:23-00:01:45)"
+            }
+          }
+        }
+      },
+      "AnyAnomaly": {
+        "type": "array",
+        "description": "Anomalies detected in the audio (unusual speech patterns, background sounds, tampering indicators)",
+        "items": {
+          "type": "object",
+          "properties": {
+            "Description": {
+              "type": "string",
+              "description": "Description of the anomaly detected"
+            },
+            "TimeLocation": {
+              "type": "string",
+              "description": "Timestamp or time range where the anomaly occurs (e.g. 00:03:10 or 00:03:10-00:03:25)"
+            }
+          }
+        }
+      },
+      "Classification": {
+        "type": "object",
+        "description": "Hierarchical classification of the audio content (up to 3 levels deep)",
+        "properties": {
+          "Category": {
+            "type": "string",
+            "description": "Top-level category of the audio content (e.g. CustomerService, Meeting, Broadcast)"
+          },
+          "Subcategory": {
+            "type": "string",
+            "description": "Second-level classification within the category (e.g. SupportCall, BoardMeeting, NewsReport)"
+          },
+          "Tag": {
+            "type": "string",
+            "description": "Third-level specific tag within the subcategory (e.g. Escalation, QuarterlyReview, BreakingNews)"
+          }
+        }
+      }
+    }
+  }
 }

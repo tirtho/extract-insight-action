@@ -1,0 +1,13 @@
+<step title="Incoming Request" date="2026-05-21T02:14:29.772" instance="604bcd" url="/api/publish?type=jar&amp;async=True&amp;clean=True" method="POST" type="request" pid="831,1,21" Accept="*/*" Host="app-eia-dev-1.scm.azurewebsites.net" User-Agent="AZURECLI/2.84.0 (MSI)" Accept-Encoding="gzip, deflate" Authorization="Bea..." Cache-Control="no-cache" Content-Type="application/octet-stream" Cookie="ARRAffinity=604bcd5508d4741f4e5fd3cc7c05ab058dfd50911f1d71d95d041dfee1e596d1; ARRAffinitySameSite=604bcd5508d4741f4e5fd3cc7c05ab058dfd50911f1d71d95d041dfee1e596d1" Content-Length="93547275" x-ms-client-request-id="c91b0d44-54ba-11f1-9176-68f7d8d00d38" x-ms-artifact-checksum="f328c4075d4ecbe6a64025fcaf7fe6fd32bc7d278d96818f83bdfa88952fa0b0" X-ARR-LOG-ID="c91b0d44-54ba-11f1-9176-68f7d8d00d38" CLIENT-IP="71.184.147.154:64693" X-SITE-DEPLOYMENT-ID="app-eia-dev-1" WAS-DEFAULT-HOSTNAME="app-eia-dev-1.scm.azurewebsites.net" X-Forwarded-Proto="https" X-AppService-Proto="https" X-Forwarded-TlsVersion="1.3" X-WAWS-Unencoded-URL="/api/publish?type=jar&amp;async=True&amp;clean=True" X-Client-IP="71.184.147.154" X-Client-Port="64693" >
+  <step title="OneDeploy" date="2026-05-21T02:14:29.788" >
+    <step title="Starting PushDeployAsync" date="2026-05-21T02:14:29.794" /><!-- duration: 3ms -->
+    <step title="Writing artifact to /tmp/zipdeploy/app.jar" date="2026-05-21T02:14:29.813" >
+      <step title="Writing multipart request body to /tmp/zipdeploy/app.jar" date="2026-05-21T02:14:29.816" /><!-- duration: 7ms -->
+    </step><!-- duration: 10105ms -->
+    <step title="Start deployment in the background" date="2026-05-21T02:14:39.934" >
+      <step title="Acquiring Deployment Lock" date="2026-05-21T02:14:39.944" /><!-- duration: 3ms -->
+      <step title="Acquired Deployment Lock" date="2026-05-21T02:14:39.975" /><!-- duration: 3ms -->
+    </step><!-- duration: 103ms -->
+  </step><!-- duration: 10253ms -->
+  <step title="Outgoing response" date="2026-05-21T02:14:40.045" type="response" statusCode="202" statusText="Accepted" /><!-- duration: 3ms -->
+</step><!-- duration: 10283ms -->

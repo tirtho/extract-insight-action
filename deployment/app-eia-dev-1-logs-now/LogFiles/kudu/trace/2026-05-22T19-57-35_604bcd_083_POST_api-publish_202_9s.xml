@@ -1,0 +1,13 @@
+<step title="Incoming Request" date="2026-05-22T19:57:35.079" instance="604bcd" url="/api/publish?type=jar&amp;async=True&amp;clean=True" method="POST" type="request" pid="831,1,39" Accept="*/*" Host="app-eia-dev-1.scm.azurewebsites.net" User-Agent="AZURECLI/2.84.0 (MSI)" Accept-Encoding="gzip, deflate" Authorization="Bea..." Cache-Control="no-cache" Content-Type="application/octet-stream" Cookie="ARRAffinity=604bcd5508d4741f4e5fd3cc7c05ab058dfd50911f1d71d95d041dfee1e596d1; ARRAffinitySameSite=604bcd5508d4741f4e5fd3cc7c05ab058dfd50911f1d71d95d041dfee1e596d1" Content-Length="93554221" x-ms-client-request-id="75e6e2b7-5618-11f1-b537-68f7d8d00d38" x-ms-artifact-checksum="caf745b10e8c6e0de1e6af5c83f19ba4d3453c6e5dad4ae11dcc7f6fff724ead" X-ARR-LOG-ID="75e6e2b7-5618-11f1-b537-68f7d8d00d38" CLIENT-IP="52.177.6.131:57678" X-SITE-DEPLOYMENT-ID="app-eia-dev-1" WAS-DEFAULT-HOSTNAME="app-eia-dev-1.scm.azurewebsites.net" X-Forwarded-Proto="https" X-AppService-Proto="https" X-Forwarded-TlsVersion="1.3" X-WAWS-Unencoded-URL="/api/publish?type=jar&amp;async=True&amp;clean=True" X-Client-IP="52.177.6.131" X-Client-Port="57678" >
+  <step title="OneDeploy" date="2026-05-22T19:57:35.085" >
+    <step title="Starting PushDeployAsync" date="2026-05-22T19:57:35.092" /><!-- duration: 3ms -->
+    <step title="Writing artifact to /tmp/zipdeploy/app.jar" date="2026-05-22T19:57:35.111" >
+      <step title="Writing multipart request body to /tmp/zipdeploy/app.jar" date="2026-05-22T19:57:35.114" /><!-- duration: 4ms -->
+    </step><!-- duration: 8735ms -->
+    <step title="Start deployment in the background" date="2026-05-22T19:57:43.864" >
+      <step title="Acquiring Deployment Lock" date="2026-05-22T19:57:43.875" /><!-- duration: 3ms -->
+      <step title="Acquired Deployment Lock" date="2026-05-22T19:57:43.901" /><!-- duration: 3ms -->
+    </step><!-- duration: 116ms -->
+  </step><!-- duration: 8899ms -->
+  <step title="Outgoing response" date="2026-05-22T19:57:43.987" type="response" statusCode="202" statusText="Accepted" /><!-- duration: 3ms -->
+</step><!-- duration: 8913ms -->

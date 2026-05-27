@@ -168,6 +168,24 @@ public class ExtractMail {
             String graphMessageId    = emailRef.path("graphMessageId").asText();
             String internetMessageId = emailRef.path("internetMessageId").asText();
 
+            // Short-circuit if this email was already fully processed.
+            // StoreInCosmos writes the email document as its very last step, so its
+            // presence in Cosmos means the complete pipeline ran at least once.
+            String emailDocId = (!internetMessageId.isBlank()) ? internetMessageId : graphMessageId;
+            {
+                String dbName = azConnection.getSecret(AzEnvNames.KV_COSMOS_DB_DATABASE_NAME);
+                String cName  = azConnection.getSecret(AzEnvNames.KV_COSMOS_DB_CONTAINER_NAME);
+                CosmosContainer cosmosContainer = azConnection.getCosmosClient()
+                        .getDatabase(dbName).getContainer(cName);
+                try {
+                    cosmosContainer.readItem(emailDocId, new PartitionKey(emailDocId), ObjectNode.class);
+                    logger.info("Email already processed in Cosmos, skipping: " + emailDocId);
+                    return null;
+                } catch (Exception ignored) {
+                    // Item not found – proceed with processing
+                }
+            }
+
             logger.info("Fetching email from mailbox: " + targetMailbox
                     + ", messageId: " + graphMessageId);
 
@@ -410,18 +428,33 @@ public class ExtractMail {
                         attDoc.put("errorMessage", att.getErrorMessage());
                     attDoc.put("createdAt", LocalDateTime.now().toString());
 
-                    container.upsertItem(attDoc, new PartitionKey(attDocId),
-                            new CosmosItemRequestOptions());
-                    logger.info("Stored attachment document: " + attDocId);
+                    // Safety net: never overwrite an attachment that already has analysis results.
+                    // This guards against race conditions where a second orchestration starts
+                    // before FetchEmail's Cosmos check can short-circuit it.
+                    boolean alreadyAnalyzed = false;
+                    try {
+                        ObjectNode existingAtt = container.readItem(
+                                attDocId, new PartitionKey(attDocId), ObjectNode.class).getItem();
+                        alreadyAnalyzed = existingAtt.has("analyzeResult")
+                                || "succeeded".equals(existingAtt.path("status").asText(""));
+                    } catch (Exception ignored) { }
 
-                    // Queue a poll message for attachments with pending CU analysis
-                    if ("accepted".equals(att.getStatus()) && att.getAnalyzeOperationId() != null) {
-                        ObjectNode queueMsg = objectMapper.createObjectNode();
-                        queueMsg.put("attachmentDocId", attDocId);
-                        queueMsg.put("analyzerName", att.getAnalyzerName());
-                        queueMsg.put("operationId", att.getAnalyzeOperationId());
-                        storageQueue.sendMessage(queueMsg.toString());
-                        logger.info("Queued CU poll message for attachment: " + attDocId);
+                    if (alreadyAnalyzed) {
+                        logger.info("Skipping upsert – attachment already analyzed: " + attDocId);
+                    } else {
+                        container.upsertItem(attDoc, new PartitionKey(attDocId),
+                                new CosmosItemRequestOptions());
+                        logger.info("Stored attachment document: " + attDocId);
+
+                        // Queue a poll message for attachments with pending CU analysis
+                        if ("accepted".equals(att.getStatus()) && att.getAnalyzeOperationId() != null) {
+                            ObjectNode queueMsg = objectMapper.createObjectNode();
+                            queueMsg.put("attachmentDocId", attDocId);
+                            queueMsg.put("analyzerName", att.getAnalyzerName());
+                            queueMsg.put("operationId", att.getAnalyzeOperationId());
+                            storageQueue.sendMessage(queueMsg.toString());
+                            logger.info("Queued CU poll message for attachment: " + attDocId);
+                        }
                     }
 
                     // Add reference to the attachment document

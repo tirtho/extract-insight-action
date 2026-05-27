@@ -1,0 +1,13 @@
+<step title="Incoming Request" date="2026-05-22T18:23:30.807" instance="604bcd" url="/api/publish?type=jar&amp;async=True&amp;clean=True" method="POST" type="request" pid="831,1,37" Accept="*/*" Host="app-eia-dev-1.scm.azurewebsites.net" User-Agent="AZURECLI/2.84.0 (MSI)" Accept-Encoding="gzip, deflate" Authorization="Bea..." Cache-Control="no-cache" Content-Type="application/octet-stream" Cookie="ARRAffinity=604bcd5508d4741f4e5fd3cc7c05ab058dfd50911f1d71d95d041dfee1e596d1; ARRAffinitySameSite=604bcd5508d4741f4e5fd3cc7c05ab058dfd50911f1d71d95d041dfee1e596d1" Content-Length="93550567" x-ms-client-request-id="4fd2280f-560b-11f1-9444-68f7d8d00d38" x-ms-artifact-checksum="1c7143ff70658abe5f7d55ac68db4f6279ea9914cb4405095e4bf330dd293aef" X-ARR-LOG-ID="4fd2280f-560b-11f1-9444-68f7d8d00d38" CLIENT-IP="52.179.129.152:43042" X-SITE-DEPLOYMENT-ID="app-eia-dev-1" WAS-DEFAULT-HOSTNAME="app-eia-dev-1.scm.azurewebsites.net" X-Forwarded-Proto="https" X-AppService-Proto="https" X-Forwarded-TlsVersion="1.3" X-WAWS-Unencoded-URL="/api/publish?type=jar&amp;async=True&amp;clean=True" X-Client-IP="52.179.129.152" X-Client-Port="43042" >
+  <step title="OneDeploy" date="2026-05-22T18:23:30.886" >
+    <step title="Starting PushDeployAsync" date="2026-05-22T18:23:30.897" /><!-- duration: 9ms -->
+    <step title="Writing artifact to /tmp/zipdeploy/app.jar" date="2026-05-22T18:23:30.923" >
+      <step title="Writing multipart request body to /tmp/zipdeploy/app.jar" date="2026-05-22T18:23:30.926" /><!-- duration: 11ms -->
+    </step><!-- duration: 10093ms -->
+    <step title="Start deployment in the background" date="2026-05-22T18:23:41.027" >
+      <step title="Acquiring Deployment Lock" date="2026-05-22T18:23:41.038" /><!-- duration: 3ms -->
+      <step title="Acquired Deployment Lock" date="2026-05-22T18:23:41.065" /><!-- duration: 3ms -->
+    </step><!-- duration: 222ms -->
+  </step><!-- duration: 10376ms -->
+  <step title="Outgoing response" date="2026-05-22T18:23:41.266" type="response" statusCode="202" statusText="Accepted" /><!-- duration: 4ms -->
+</step><!-- duration: 10466ms -->

@@ -1,0 +1,16 @@
+<step title="Incoming Request" date="2026-05-11T19:20:54.201" instance="6f5ae1" url="/api/publish?type=jar&amp;async=True&amp;clean=True" method="POST" type="request" pid="831,1,25" Accept="*/*" Host="app-eia-dev-1.scm.azurewebsites.net" User-Agent="AZURECLI/2.84.0 (MSI)" Accept-Encoding="gzip, deflate" Authorization="Bea..." Cache-Control="no-cache" Content-Type="application/octet-stream" Cookie="ARRAffinity=6f5ae15a90e81f830f948db38443d5e454693d1fa09bf939b833a1d16b78eafb; ARRAffinitySameSite=6f5ae15a90e81f830f948db38443d5e454693d1fa09bf939b833a1d16b78eafb" Content-Length="54523154" x-ms-client-request-id="843d31b7-4d6e-11f1-843e-68f7d8d00d38" x-ms-artifact-checksum="91dc6f35e5ab1fe9f9bf1a06d3be5ab8f13c03ec295d6c51bb955f3d801e5b8a" X-ARR-LOG-ID="843d31b7-4d6e-11f1-843e-68f7d8d00d38" CLIENT-IP="71.184.147.154:59449" X-SITE-DEPLOYMENT-ID="app-eia-dev-1" WAS-DEFAULT-HOSTNAME="app-eia-dev-1.scm.azurewebsites.net" X-Forwarded-Proto="https" X-AppService-Proto="https" X-Forwarded-TlsVersion="1.3" X-WAWS-Unencoded-URL="/api/publish?type=jar&amp;async=True&amp;clean=True" X-Client-IP="71.184.147.154" X-Client-Port="59449" >
+  <step title="OneDeploy" date="2026-05-11T19:20:54.229" >
+    <step title="None repository commit" date="2026-05-11T19:20:54.234" >
+      <step title="Commit id: 909ade6a-fdfd-4878-9f99-844a94b73c9f" date="2026-05-11T19:20:54.235" Message="N/A" AuthorName="N/A" AuthorEmail="N/A" /><!-- duration: 2ms -->
+    </step><!-- duration: 5ms -->
+    <step title="Starting PushDeployAsync" date="2026-05-11T19:20:54.241" /><!-- duration: 2ms -->
+    <step title="Writing artifact to /tmp/zipdeploy/app.jar" date="2026-05-11T19:20:54.252" >
+      <step title="Writing multipart request body to /tmp/zipdeploy/app.jar" date="2026-05-11T19:20:54.254" /><!-- duration: 4ms -->
+    </step><!-- duration: 4827ms -->
+    <step title="Start deployment in the background" date="2026-05-11T19:20:59.092" >
+      <step title="Acquiring Deployment Lock" date="2026-05-11T19:20:59.101" /><!-- duration: 2ms -->
+      <step title="Acquired Deployment Lock" date="2026-05-11T19:20:59.143" /><!-- duration: 2ms -->
+    </step><!-- duration: 97ms -->
+  </step><!-- duration: 4964ms -->
+  <step title="Outgoing response" date="2026-05-11T19:20:59.199" type="response" statusCode="202" statusText="Accepted" /><!-- duration: 2ms -->
+</step><!-- duration: 5003ms -->

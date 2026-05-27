@@ -65,12 +65,17 @@ public class SecurityConfig {
         if (oidcConfigured) {
             http
                     .authorizeHttpRequests(auth -> auth
-                            .requestMatchers("/error", "/favicon.ico", "/*.css", "/*.js", "/webjars/**").permitAll()
+                            .requestMatchers("/error", "/logout-success", "/favicon.ico", "/*.css", "/*.js", "/webjars/**").permitAll()
                             .anyRequest().authenticated())
                 .oauth2Login(oauth2 -> oauth2
                     .authorizationEndpoint(authorization -> authorization
                         .authorizationRequestResolver(forcePromptLoginResolver(clientRegistrationRepository))))
-                    .logout(logout -> logout.logoutSuccessUrl("/").permitAll());
+                    .logout(logout -> logout
+                            .invalidateHttpSession(true)
+                            .clearAuthentication(true)
+                            .deleteCookies("JSESSIONID")
+                            .logoutSuccessUrl("/logout-success")
+                            .permitAll());
         } else {
             // No OIDC credentials configured — allow all traffic (local / offline dev).
             http

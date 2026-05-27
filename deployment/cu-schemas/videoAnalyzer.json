@@ -1,5 +1,68 @@
 {
-  "description": "Video analyzer – extracts scenes, transcripts, and visual content from video files (MP4, MOV, AVI, etc.)",
+  "description": "Video analyzer – extracts scenes, transcripts, entities, anomalies, and classification from video files (MP4, MOV, AVI, etc.)",
   "baseAnalyzerId": "prebuilt-video",
-  "scenario": "video"
+  "scenario": "video",
+  "fieldSchema": {
+    "fields": {
+      "Description": {
+        "type": "string",
+        "description": "A comprehensive description of the overall video content and context"
+      },
+      "TranscriptSummary": {
+        "type": "string",
+        "description": "A high-level summary of the complete video transcript"
+      },
+      "AnomalyOrFraudDetected": {
+        "type": "string",
+        "description": "Description of any anomaly or fraudulent activity detected across the entire video; null if none"
+      },
+      "Classification": {
+        "type": "string",
+        "description": "Hierarchical classification of the video content as 'Category > Subcategory > Tag', e.g. 'Security > Surveillance > NightFootage'"
+      },
+      "Shots": {
+        "type": "array",
+        "description": "Per-shot analysis of the video; each entry represents one scene or shot",
+        "items": {
+          "type": "object",
+          "properties": {
+            "Description": {
+              "type": "string",
+              "description": "A detailed description of the scene or visual content in this shot"
+            },
+            "Transcript": {
+              "type": "string",
+              "description": "Speech transcript captured during this shot"
+            },
+            "KeyPhrases": {
+              "type": "array",
+              "description": "Key phrases extracted from speech or on-screen text in this shot",
+              "items": {
+                "type": "string"
+              }
+            },
+            "NamedEntities": {
+              "type": "string",
+              "description": "Named entities identified in this shot as a comma-separated list of 'Text (Category)' pairs, e.g. 'Alice (Person), London (Location)'"
+            },
+            "IdentifiedObjects": {
+              "type": "array",
+              "description": "Objects visually identified in this shot",
+              "items": {
+                "type": "string"
+              }
+            },
+            "PiiData": {
+              "type": "string",
+              "description": "Any personally identifiable information detected in this shot (faces, license plates, ID numbers); null if none"
+            },
+            "AnyAnomaly": {
+              "type": "string",
+              "description": "Description of any anomaly detected in this shot (unusual behavior, tampering, unauthorized access); null if none"
+            }
+          }
+        }
+      }
+    }
+  }
 }

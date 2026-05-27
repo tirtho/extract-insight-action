@@ -1,5 +1,5 @@
 {
-  "description": "Image analyzer – extracts visual content, captions, and text from images (JPEG, PNG, TIFF, BMP, etc.)",
+  "description": "Image analyzer – extracts visual content, captions, entities, anomalies, and classification from images (JPEG, PNG, TIFF, BMP, etc.)",
   "baseAnalyzerId": "prebuilt-image",
   "scenario": "image",
   "fieldSchema": {
@@ -7,6 +7,36 @@
       "Description": {
         "type": "string",
         "description": "A detailed description of the image content"
+      },
+      "KeyPhrases": {
+        "type": "array",
+        "description": "Key phrases extracted from visible text or scene context in the image",
+        "items": {
+          "type": "string"
+        }
+      },
+      "NamedEntities": {
+        "type": "string",
+        "description": "Named entities identified in the image as a comma-separated list of 'Text (Category)' pairs, e.g. 'Alice (Person), London (Location), Acme Corp (Organization)'"
+      },
+      "IdentifiedObjects": {
+        "type": "array",
+        "description": "Objects visually identified in the image",
+        "items": {
+          "type": "string"
+        }
+      },
+      "PiiData": {
+        "type": "string",
+        "description": "Any personally identifiable information detected in the image (faces, license plates, ID numbers); null if none"
+      },
+      "AnyAnomaly": {
+        "type": "string",
+        "description": "Description of any anomaly detected in the image (tampering, unusual content, unauthorized presence); null if none"
+      },
+      "Classification": {
+        "type": "string",
+        "description": "Hierarchical classification of the image content as 'Category > Subcategory > Tag', e.g. 'Security > Surveillance > NightVision'"
       }
     }
   }

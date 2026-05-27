@@ -175,6 +175,16 @@ if ($r.ExitCode -ne 0 -or -not $r.Output) {
 }
 $CompletionModel = $r.Output
 Write-Host "[OK]   Completion model: $CompletionModel" -ForegroundColor Green
+
+Write-Host "[INFO] Reading embedding model from Key Vault..." -ForegroundColor Cyan
+$r = Invoke-AzCliSilent -Arguments @('keyvault','secret','show','--vault-name',$KeyVaultName,'--name','ContentUnderstandingEmbeddingModel','--query','value','-o','tsv')
+if ($r.ExitCode -ne 0 -or -not $r.Output) {
+    Write-Host "[WARN] ContentUnderstandingEmbeddingModel not found in Key Vault – defaulting to 'text-embedding-3-large'" -ForegroundColor Yellow
+    $EmbeddingModel = 'text-embedding-3-large'
+} else {
+    $EmbeddingModel = $r.Output
+}
+Write-Host "[OK]   Embedding model: $EmbeddingModel" -ForegroundColor Green
 Write-Host ""
 
 # =============================================================================
@@ -226,12 +236,26 @@ foreach ($file in $schemaFiles) {
 
     Write-Host "[INFO] Creating analyzer '$analyzerId' from $($file.Name)..." -ForegroundColor Cyan
 
-    # Read and inject completion model if missing
+    # Read and inject models.
+    # - models.embedding is injected for ALL schemas (prebuilt-document, prebuilt-image,
+    #   prebuilt-audio, prebuilt-video all require an embedding deployment at the
+    #   analyzer level; service-level defaults alone are not sufficient).
+    # - models.completion is only injected for schemas that declare a fieldSchema,
+    #   since only those perform LLM-based field extraction.
     $schemaJson = Get-Content -Path $file.FullName -Raw | ConvertFrom-Json
     if (-not $schemaJson.models) {
-        $schemaJson | Add-Member -NotePropertyName "models" -NotePropertyValue ([PSCustomObject]@{ completion = $CompletionModel })
-    } elseif (-not $schemaJson.models.completion) {
-        $schemaJson.models | Add-Member -NotePropertyName "completion" -NotePropertyValue $CompletionModel
+        $models = [PSCustomObject]@{ embedding = $EmbeddingModel }
+        if ($schemaJson.fieldSchema) {
+            $models | Add-Member -NotePropertyName "completion" -NotePropertyValue $CompletionModel
+        }
+        $schemaJson | Add-Member -NotePropertyName "models" -NotePropertyValue $models
+    } else {
+        if (-not $schemaJson.models.embedding) {
+            $schemaJson.models | Add-Member -NotePropertyName "embedding" -NotePropertyValue $EmbeddingModel
+        }
+        if ($schemaJson.fieldSchema -and -not $schemaJson.models.completion) {
+            $schemaJson.models | Add-Member -NotePropertyName "completion" -NotePropertyValue $CompletionModel
+        }
     }
     $body = $schemaJson | ConvertTo-Json -Depth 10 -Compress
 

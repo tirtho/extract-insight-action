@@ -1,0 +1,31 @@
+<step title="BackgroundTrace" date="2026-05-15T23:22:57.708" instance="604bcd" url="/api/publish" method="POST" >
+  <step title="Creating temporary deployment - FetchDeploymentManager" date="2026-05-15T23:22:57.753" /><!-- duration: 3ms -->
+  <step title="Creating temporary deployment" date="2026-05-15T23:22:57.759" /><!-- duration: 37ms -->
+  <step title="Performing fetch based deployment" date="2026-05-15T23:22:57.826" >
+    <step title="Moving /tmp/zipdeploy/extracted to /tmp/zipdeploy/extracted/app.jar" date="2026-05-15T23:22:58.999" /><!-- duration: 4ms -->
+    <step title="Deployment timer started" date="2026-05-15T23:23:01.021" >
+      <step title="DeploymentManager.Deploy(id:04cfa56e-6445-43d1-a60a-a3af1cdccc0f)" date="2026-05-15T23:23:01.039" >
+        <step title="Collecting changeset information" date="2026-05-15T23:23:01.054" /><!-- duration: 108ms -->
+        <step title="Updating submodules" date="2026-05-15T23:23:01.167" /><!-- duration: 1109ms -->
+        <step title="Determining deployment builder" date="2026-05-15T23:23:02.544" >
+          <step title="Builder is OneDeployBuilder" date="2026-05-15T23:23:02.551" /><!-- duration: 3ms -->
+        </step><!-- duration: 13ms -->
+        <step title="PreDeployment: context.CleanOutputPath False" date="2026-05-15T23:23:02.606" >
+          <step title="PreDeployment: context.OutputPath /home/site/wwwroot" date="2026-05-15T23:23:02.740" >
+            <step title="Building" date="2026-05-15T23:23:02.871" >
+              <step title="Executing external process" date="2026-05-15T23:23:03.580" type="process" path="starter.sh" arguments="/opt/Kudu/Scripts/parallel_rsync.sh /tmp/zipdeploy/extracted /home/site/wwwroot 8 /tmp/ True False  " /><!-- duration: 10296ms -->
+              <step title="Modified file to trigger a restart of the app container." date="2026-05-15T23:23:14.287" /><!-- duration: 3ms -->
+              <step title="Skip function trigger and logicapp sync because function is not enabled." date="2026-05-15T23:23:14.293" /><!-- duration: 5ms -->
+              <step title="Purge deployment items" date="2026-05-15T23:23:15.280" >
+                <step title="Remove 0a562c65-, Success, received at 05/15/2026 14:01:35" date="2026-05-15T23:23:15.337" /><!-- duration: 3ms -->
+              </step><!-- duration: 62ms -->
+            </step><!-- duration: 12540ms -->
+          </step><!-- duration: 12674ms -->
+          <step title="Cleaning up temp files" date="2026-05-15T23:23:15.417" /><!-- duration: 4ms -->
+          <step title="Cleaning up temp files" date="2026-05-15T23:23:15.424" /><!-- duration: 503ms -->
+          <step title="Reloading status file with latest updates" date="2026-05-15T23:23:15.975" >
+            <step title="WebHooksManager.PublishEventAsync: PostDeployment" date="2026-05-15T23:23:15.978" /><!-- duration: 33ms -->
+          </step><!-- duration: 39ms -->
+          <step title="Cleaning up temporary deployment - fetch deployment was successful" date="2026-05-15T23:23:16.018" /><!-- duration: 3ms -->
+        </step><!-- duration: 13512ms -->
+      </step><!-- duration: 15091ms -->

@@ -303,9 +303,469 @@
                 try { items = JSON.parse(jsonStr); } catch (e) { return; }
                 if (!Array.isArray(items)) items = [items];
 
+                function normalizeFieldKey(name) {
+                    return String(name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                }
+
+                function findFieldByCandidateNames(fields, candidateNames) {
+                    if (!fields || typeof fields !== 'object') return null;
+
+                    for (var i = 0; i < candidateNames.length; i++) {
+                        var direct = fields[candidateNames[i]];
+                        if (direct !== undefined && direct !== null) {
+                            return direct;
+                        }
+                    }
+
+                    var normalizedCandidates = candidateNames.map(normalizeFieldKey);
+                    var keys = Object.keys(fields);
+                    for (var j = 0; j < keys.length; j++) {
+                        var key = keys[j];
+                        if (normalizedCandidates.indexOf(normalizeFieldKey(key)) !== -1) {
+                            return fields[key];
+                        }
+                    }
+
+                    return null;
+                }
+
+                function extractFieldValue(fieldNode) {
+                    if (fieldNode === null || fieldNode === undefined) return null;
+
+                    if (typeof fieldNode === 'string' || typeof fieldNode === 'number' || typeof fieldNode === 'boolean') {
+                        return fieldNode;
+                    }
+
+                    if (Array.isArray(fieldNode)) {
+                        return fieldNode.map(extractFieldValue);
+                    }
+
+                    if (typeof fieldNode === 'object') {
+                        if (fieldNode.valueString !== undefined) return fieldNode.valueString;
+                        if (fieldNode.content !== undefined && typeof fieldNode.content !== 'object') return fieldNode.content;
+
+                        if (fieldNode.valueArray !== undefined) {
+                            return Array.isArray(fieldNode.valueArray)
+                                ? fieldNode.valueArray.map(extractFieldValue)
+                                : extractFieldValue(fieldNode.valueArray);
+                        }
+
+                        if (fieldNode.valueObject !== undefined) {
+                            var obj = fieldNode.valueObject;
+                            var converted = {};
+                            Object.keys(obj || {}).forEach(function (k) {
+                                converted[k] = extractFieldValue(obj[k]);
+                            });
+                            return converted;
+                        }
+
+                        var flattened = {};
+                        Object.keys(fieldNode).forEach(function (k) {
+                            flattened[k] = extractFieldValue(fieldNode[k]);
+                        });
+                        return flattened;
+                    }
+
+                    return String(fieldNode);
+                }
+
+                function hasRenderableValue(value) {
+                    if (value === null || value === undefined) return false;
+                    if (typeof value === 'string') return value.trim().length > 0;
+                    if (Array.isArray(value)) return value.length > 0;
+                    if (typeof value === 'object') return Object.keys(value).length > 0;
+                    return true;
+                }
+
+                function isTypeOnlyObject(value) {
+                    return !!value
+                        && typeof value === 'object'
+                        && !Array.isArray(value)
+                        && Object.keys(value).length === 1
+                        && Object.prototype.hasOwnProperty.call(value, 'type');
+                }
+
+                function filterTypeOnlyEntries(value) {
+                    if (Array.isArray(value)) {
+                        return value
+                            .filter(function (entry) { return !isTypeOnlyObject(entry); })
+                            .map(filterTypeOnlyEntries)
+                            .filter(hasRenderableValue);
+                    }
+
+                    if (value && typeof value === 'object') {
+                        if (isTypeOnlyObject(value)) return null;
+                        var filteredObj = {};
+                        Object.keys(value).forEach(function (k) {
+                            var filtered = filterTypeOnlyEntries(value[k]);
+                            if (hasRenderableValue(filtered)) {
+                                filteredObj[k] = filtered;
+                            }
+                        });
+                        return filteredObj;
+                    }
+
+                    return value;
+                }
+
+                function hasValuePayload(fieldNode) {
+                    if (fieldNode === null || fieldNode === undefined) return false;
+                    if (typeof fieldNode !== 'object') return hasRenderableValue(fieldNode);
+                    if (Array.isArray(fieldNode)) return fieldNode.some(hasValuePayload);
+                    if (fieldNode.valueString !== undefined) return hasRenderableValue(fieldNode.valueString);
+                    if (fieldNode.valueArray !== undefined) {
+                        var valueArray = fieldNode.valueArray;
+                        if (Array.isArray(valueArray)) return valueArray.some(hasValuePayload);
+                        return hasValuePayload(valueArray);
+                    }
+                    if (fieldNode.valueObject !== undefined) {
+                        var valueObject = fieldNode.valueObject;
+                        if (!valueObject || typeof valueObject !== 'object') return false;
+                        return Object.keys(valueObject).some(function (k) {
+                            return hasValuePayload(valueObject[k]);
+                        });
+                    }
+                    if (fieldNode.content !== undefined && typeof fieldNode.content !== 'object') {
+                        return hasRenderableValue(fieldNode.content);
+                    }
+                    return false;
+                }
+
+                function formatConfidenceScore(confidence) {
+                    return typeof confidence === 'number' && !Number.isNaN(confidence)
+                        ? confidence.toFixed(3)
+                        : null;
+                }
+
+                function appendConfidenceLine(sectionBox, confidence) {
+                    var formatted = formatConfidenceScore(confidence);
+                    if (!formatted) return;
+
+                    var fieldText = document.createElement('p');
+                    fieldText.className = 'cu-field-value';
+                    fieldText.textContent = 'Confidence: ' + formatted;
+                    sectionBox.appendChild(fieldText);
+                }
+
+                function splitNamedEntityValues(value) {
+                    if (typeof value !== 'string') return [];
+                    return value
+                        .split(/\),\s*/)
+                        .map(function (entry) {
+                            var trimmed = entry.trim();
+                            if (!trimmed) return '';
+                            return trimmed.endsWith(')') ? trimmed : trimmed + ')';
+                        })
+                        .filter(function (entry) { return entry.length > 0; });
+                }
+
+                function splitSemicolonValues(value) {
+                    if (typeof value !== 'string') return [];
+                    return value
+                        .split(';')
+                        .map(function (entry) { return entry.trim(); })
+                        .filter(function (entry) { return entry.length > 0; });
+                }
+
+                function renderImageFieldSection(segment, label, fieldValue, options) {
+                    options = options || {};
+                    var sectionBox = document.createElement('div');
+                    sectionBox.className = 'cu-description-box';
+
+                    var fieldLabel = document.createElement('p');
+                    fieldLabel.className = 'cu-field-label';
+                    fieldLabel.textContent = label;
+                    sectionBox.appendChild(fieldLabel);
+
+                    var value = extractFieldValue(fieldValue);
+                    if (options.skipTypeOnlyEntries) {
+                        value = filterTypeOnlyEntries(value);
+                    }
+
+                    if (!hasRenderableValue(value)) {
+                        return;
+                    }
+
+                    if (Array.isArray(value)) {
+                        var list = document.createElement('ul');
+                        list.className = 'cu-field-list';
+                        value.forEach(function (entry) {
+                            var li = document.createElement('li');
+                            if (typeof entry === 'object') {
+                                li.textContent = JSON.stringify(entry);
+                            } else {
+                                li.textContent = String(entry);
+                            }
+                            list.appendChild(li);
+                        });
+                        sectionBox.appendChild(list);
+                    } else if (typeof value === 'object') {
+                        var wrap = document.createElement('div');
+                        wrap.className = 'cu-scroll-x';
+                        var pre = document.createElement('pre');
+                        pre.className = 'cu-field-json';
+                        pre.textContent = JSON.stringify(value, null, 2);
+                        wrap.appendChild(pre);
+                        sectionBox.appendChild(wrap);
+                    } else {
+                        var fieldText = document.createElement('p');
+                        fieldText.className = 'cu-field-value';
+                        fieldText.textContent = String(value);
+                        sectionBox.appendChild(fieldText);
+                    }
+
+                    segment.appendChild(sectionBox);
+                }
+
+                function renderMappedFields(segment, sourceFields, fieldMap, options) {
+                    if (!sourceFields || typeof sourceFields !== 'object' || !Array.isArray(fieldMap)) return;
+
+                    fieldMap.forEach(function (entry) {
+                        var field = findFieldByCandidateNames(sourceFields, entry.keys || []);
+                        var resolved = extractFieldValue(field);
+                        if (options && options.skipTypeOnlyEntries) {
+                            resolved = filterTypeOnlyEntries(resolved);
+                        }
+                        if (hasRenderableValue(resolved)) {
+                            renderImageFieldSection(segment, entry.label, field, {
+                                skipTypeOnlyEntries: !!(options && options.skipTypeOnlyEntries)
+                            });
+                        }
+                    });
+                }
+
+                function renderVideoFieldSections(segment, item) {
+                    if (!item || !item.fields) return;
+
+                    var topLevelVideoFieldMap = [
+                        {
+                            label: 'Classification',
+                            keys: ['Classification']
+                        },
+                        {
+                            label: 'TranscriptSummary',
+                            keys: ['TranscriptSummary', 'Transcript Summary']
+                        }
+                    ];
+
+                    renderMappedFields(segment, item.fields, topLevelVideoFieldMap, {
+                        skipTypeOnlyEntries: true
+                    });
+
+                    var shotField = findFieldByCandidateNames(item.fields, ['Shots', 'Shot']);
+                    var shots = filterTypeOnlyEntries(extractFieldValue(shotField));
+                    if (!Array.isArray(shots) || shots.length === 0) return;
+
+                    var perShotFieldMap = [
+                        {
+                            label: 'Description',
+                            keys: ['Description']
+                        },
+                        {
+                            label: 'Transcript',
+                            keys: ['Transcript']
+                        },
+                        {
+                            label: 'KeyPhrases',
+                            keys: ['KeyPhrases', 'Key Phrases']
+                        },
+                        {
+                            label: 'NamedEntities',
+                            keys: ['NamedEntities', 'Named Entities']
+                        },
+                        {
+                            label: 'IdentifiedObjects',
+                            keys: ['IdentifiedObjects', 'Identified Objects', 'Objects']
+                        },
+                        {
+                            label: 'PiiData',
+                            keys: ['PiiData', 'PIIData', 'PII Data']
+                        }
+                    ];
+
+                    shots.forEach(function (shot, index) {
+                        if (!shot || typeof shot !== 'object' || Array.isArray(shot)) return;
+
+                        var shotSection = document.createElement('div');
+                        shotSection.className = 'cu-description-box';
+
+                        var shotLabel = document.createElement('p');
+                        shotLabel.className = 'cu-field-label';
+                        shotLabel.textContent = 'Shot ' + (index + 1);
+                        shotSection.appendChild(shotLabel);
+
+                        renderMappedFields(shotSection, shot, perShotFieldMap, {
+                            skipTypeOnlyEntries: true
+                        });
+
+                        if (shotSection.childElementCount > 1) {
+                            segment.appendChild(shotSection);
+                        }
+                    });
+                }
+
+                function renderAudioFieldSections(segment, item) {
+                    if (!item || !item.fields) return;
+
+                    var audioFieldMap = [
+                        {
+                            label: 'Classification',
+                            keys: ['Classification']
+                        },
+                        {
+                            label: 'TranscriptSummary',
+                            keys: ['TranscriptSummary', 'Transcript Summary']
+                        },
+                        {
+                            label: 'KeyPhrases',
+                            keys: ['KeyPhrases', 'Key Phrases']
+                        },
+                        {
+                            label: 'NamedEntities',
+                            keys: ['NamedEntities', 'Named Entities']
+                        },
+                        {
+                            label: 'PiiData',
+                            keys: ['PiiData', 'PIIData', 'PII Data']
+                        }
+                    ];
+
+                    renderMappedFields(segment, item.fields, audioFieldMap, {
+                        skipTypeOnlyEntries: true
+                    });
+                }
+
+                function renderDocumentClassificationSection(segment, fieldNode) {
+                    if (!fieldNode || !fieldNode.valueObject || typeof fieldNode.valueObject !== 'object') return;
+
+                    var sectionBox = document.createElement('div');
+                    sectionBox.className = 'cu-description-box';
+
+                    var fieldLabel = document.createElement('p');
+                    fieldLabel.className = 'cu-field-label';
+                    fieldLabel.textContent = 'Classification';
+                    sectionBox.appendChild(fieldLabel);
+
+                    var list = document.createElement('ul');
+                    list.className = 'cu-field-list';
+
+                    Object.keys(fieldNode.valueObject).forEach(function (key) {
+                        var entry = fieldNode.valueObject[key];
+                        if (!hasValuePayload(entry)) return;
+
+                        var value = extractFieldValue(entry);
+                        if (!hasRenderableValue(value)) return;
+
+                        var li = document.createElement('li');
+                        var confidence = formatConfidenceScore(entry && entry.confidence);
+                        li.textContent = key + ': ' + String(value) + (confidence ? ' (confidence: ' + confidence + ')' : '');
+                        list.appendChild(li);
+                    });
+
+                    if (list.childElementCount === 0) return;
+                    sectionBox.appendChild(list);
+                    segment.appendChild(sectionBox);
+                }
+
+                function renderDocumentArrayWithConfidence(segment, label, fieldNode) {
+                    if (!fieldNode || !Array.isArray(fieldNode.valueArray)) return;
+
+                    var sectionBox = document.createElement('div');
+                    sectionBox.className = 'cu-description-box';
+
+                    var fieldLabel = document.createElement('p');
+                    fieldLabel.className = 'cu-field-label';
+                    fieldLabel.textContent = label;
+                    sectionBox.appendChild(fieldLabel);
+
+                    var list = document.createElement('ul');
+                    list.className = 'cu-field-list';
+
+                    fieldNode.valueArray.forEach(function (entry) {
+                        if (!hasValuePayload(entry)) return;
+
+                        var value = extractFieldValue(entry);
+                        if (!hasRenderableValue(value)) return;
+
+                        var li = document.createElement('li');
+                        var confidence = formatConfidenceScore(entry && entry.confidence);
+                        li.textContent = String(value) + (confidence ? ' (confidence: ' + confidence + ')' : '');
+                        list.appendChild(li);
+                    });
+
+                    if (list.childElementCount === 0) return;
+                    sectionBox.appendChild(list);
+                    segment.appendChild(sectionBox);
+                }
+
+                function renderDocumentStringListSection(segment, label, fieldNode, splitFn) {
+                    if (!hasValuePayload(fieldNode)) return;
+
+                    var value = extractFieldValue(fieldNode);
+                    if (!hasRenderableValue(value)) return;
+
+                    var sectionBox = document.createElement('div');
+                    sectionBox.className = 'cu-description-box';
+
+                    var fieldLabel = document.createElement('p');
+                    fieldLabel.className = 'cu-field-label';
+                    fieldLabel.textContent = label;
+                    sectionBox.appendChild(fieldLabel);
+
+                    appendConfidenceLine(sectionBox, fieldNode && fieldNode.confidence);
+
+                    var values = typeof splitFn === 'function' ? splitFn(String(value)) : [String(value)];
+                    if (!Array.isArray(values) || values.length === 0) {
+                        values = [String(value)];
+                    }
+
+                    var list = document.createElement('ul');
+                    list.className = 'cu-field-list';
+                    values.forEach(function (entry) {
+                        if (!entry) return;
+                        var li = document.createElement('li');
+                        li.textContent = entry;
+                        list.appendChild(li);
+                    });
+
+                    if (list.childElementCount === 0) return;
+                    sectionBox.appendChild(list);
+                    segment.appendChild(sectionBox);
+                }
+
+                function renderDocumentFieldSections(segment, item) {
+                    if (!item || !item.fields) return;
+
+                    renderDocumentClassificationSection(
+                        segment,
+                        findFieldByCandidateNames(item.fields, ['Classification'])
+                    );
+
+                    renderDocumentArrayWithConfidence(
+                        segment,
+                        'KeyPhrases',
+                        findFieldByCandidateNames(item.fields, ['KeyPhrases', 'Key Phrases'])
+                    );
+
+                    renderDocumentStringListSection(
+                        segment,
+                        'NamedEntities',
+                        findFieldByCandidateNames(item.fields, ['NamedEntities', 'Named Entities']),
+                        splitNamedEntityValues
+                    );
+
+                    renderDocumentStringListSection(
+                        segment,
+                        'PiiData',
+                        findFieldByCandidateNames(item.fields, ['PiiData', 'PIIData', 'PII Data']),
+                        splitSemicolonValues
+                    );
+                }
+
                 items.forEach(function (item) {
                     var kind = (item.kind || '').toLowerCase();
                     var analyzerId = item.analyzerId || '';
+                    var mimeType = (item.mimeType || '').toLowerCase();
                     var md = item.markdown || '';
 
                     var segment = document.createElement('div');
@@ -336,6 +796,60 @@
                         segment.appendChild(descBox);
                     }
 
+                    if (analyzerId === 'imageAnalyzer' && item.fields) {
+                        var imageFieldMap = [
+                            {
+                                label: 'Classification hierarchy',
+                                keys: ['ClassificationHierarchy', 'Classification hierarchy', 'Classification']
+                            },
+                            {
+                                label: 'KeyPhrases',
+                                keys: ['KeyPhrases', 'Key Phrases'],
+                                skipTypeOnlyEntries: true
+                            },
+                            {
+                                label: 'NamedEntities',
+                                keys: ['NamedEntities', 'Named Entities'],
+                                skipTypeOnlyEntries: true
+                            },
+                            {
+                                label: 'IdentifiedObjects',
+                                keys: ['IdentifiedObjects', 'Identified Objects', 'Objects'],
+                                skipTypeOnlyEntries: true
+                            },
+                            {
+                                label: 'PiiData',
+                                keys: ['PiiData', 'PIIData', 'PII Data'],
+                                skipTypeOnlyEntries: true
+                            }
+                        ];
+
+                        imageFieldMap.forEach(function (entry) {
+                            var field = findFieldByCandidateNames(item.fields, entry.keys);
+                            var resolved = extractFieldValue(field);
+                            if (hasRenderableValue(resolved)) {
+                                renderImageFieldSection(segment, entry.label, field, {
+                                    skipTypeOnlyEntries: !!entry.skipTypeOnlyEntries
+                                });
+                            }
+                        });
+                    }
+
+                    var isAudio = analyzerId === 'audioAnalyzer' || mimeType.indexOf('audio/') === 0;
+                    var isVideo = analyzerId === 'videoAnalyzer' || mimeType.indexOf('video/') === 0 || (kind === 'audiovisual' && !isAudio);
+
+                    if (isVideo && item.fields) {
+                        renderVideoFieldSections(segment, item);
+                    }
+
+                    if (isAudio && item.fields) {
+                        renderAudioFieldSections(segment, item);
+                    }
+
+                    if ((kind === 'document' || analyzerId === 'docAnalyzer') && item.fields) {
+                        renderDocumentFieldSections(segment, item);
+                    }
+
                     if (md) {
                         var mdDiv = document.createElement('div');
                         mdDiv.className = 'cu-md-body';
@@ -350,6 +864,21 @@
                             span.textContent = (alt && !alt.startsWith('<!--')) ? '[' + alt + ']' : '[image]';
                             img.replaceWith(span);
                         });
+
+                        // Give wide markdown blocks their own horizontal scrollbar,
+                        // instead of expanding the entire right panel/module width.
+                        function wrapForHorizontalScroll(el) {
+                            if (!el || !el.parentNode) return;
+                            if (el.parentElement.classList.contains('cu-scroll-x')) return;
+                            var wrap = document.createElement('div');
+                            wrap.className = 'cu-scroll-x';
+                            el.parentNode.insertBefore(wrap, el);
+                            wrap.appendChild(el);
+                        }
+
+                        mdDiv.querySelectorAll('table').forEach(wrapForHorizontalScroll);
+                        mdDiv.querySelectorAll('pre').forEach(wrapForHorizontalScroll);
+
                         segment.appendChild(mdDiv);
                     }
 

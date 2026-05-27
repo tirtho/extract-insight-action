@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error</title>
+    <link rel="stylesheet" th:href="@{/app.css}">
+</head>
+<body>
+<div class="shell">
+    <header class="top-banner glass">
+        <div>
+            <div class="eyebrow">Extract Insight Action</div>
+            <h1>Something Went Wrong</h1>
+            <p class="subtitle">The application hit an unexpected error while processing your request.</p>
+        </div>
+    </header>
+
+    <section class="detail-panel glass" style="margin-top: 24px;">
+        <h2 style="margin-top: 0;">Error Details</h2>
+        <div class="kv" style="margin-top: 10px;">
+            <div>Status</div>
+            <div><strong th:text="${status}">500</strong></div>
+
+            <div>Error</div>
+            <div th:text="${error}">Internal Server Error</div>
+
+            <div>Message</div>
+            <div th:text="${message}">No message available</div>
+
+            <div>Path</div>
+            <div th:text="${path}">/</div>
+
+            <div>Time</div>
+            <div th:text="${timestamp}">N/A</div>
+
+            <div>Exception</div>
+            <div th:text="${exception} ?: 'N/A'">N/A</div>
+        </div>
+
+        <details th:if="${trace != null and !#strings.isEmpty(trace)}" style="margin-top: 18px;">
+            <summary>Stack Trace</summary>
+            <pre class="cu-md-body" th:text="${trace}"></pre>
+        </details>
+
+        <div style="display: flex; gap: 10px; margin-top: 18px;">
+            <a class="profile-action-link" th:href="@{/emails}">Back to Emails</a>
+            <a class="profile-action-link" th:href="@{/logout-success}">Signed Out Page</a>
+        </div>
+    </section>
+</div>
+</body>
+</html>

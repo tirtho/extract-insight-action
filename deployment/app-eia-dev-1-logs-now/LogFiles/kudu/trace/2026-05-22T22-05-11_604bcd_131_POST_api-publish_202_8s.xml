@@ -1,0 +1,13 @@
+<step title="Incoming Request" date="2026-05-22T22:05:11.383" instance="604bcd" url="/api/publish?type=jar&amp;async=True&amp;clean=True" method="POST" type="request" pid="831,1,6" Accept="*/*" Host="app-eia-dev-1.scm.azurewebsites.net" User-Agent="AZURECLI/2.84.0 (MSI)" Accept-Encoding="gzip, deflate" Authorization="Bea..." Cache-Control="no-cache" Content-Type="application/octet-stream" Cookie="ARRAffinity=604bcd5508d4741f4e5fd3cc7c05ab058dfd50911f1d71d95d041dfee1e596d1; ARRAffinitySameSite=604bcd5508d4741f4e5fd3cc7c05ab058dfd50911f1d71d95d041dfee1e596d1" Content-Length="93553618" x-ms-client-request-id="49a937e9-562a-11f1-8582-68f7d8d00d38" x-ms-artifact-checksum="5e9e3467337c0e4d817887ed6e7d138771175ebfc3d204f1fd85e78ff1a40444" X-ARR-LOG-ID="49a937e9-562a-11f1-8582-68f7d8d00d38" CLIENT-IP="71.184.147.154:64328" X-SITE-DEPLOYMENT-ID="app-eia-dev-1" WAS-DEFAULT-HOSTNAME="app-eia-dev-1.scm.azurewebsites.net" X-Forwarded-Proto="https" X-AppService-Proto="https" X-Forwarded-TlsVersion="1.3" X-WAWS-Unencoded-URL="/api/publish?type=jar&amp;async=True&amp;clean=True" X-Client-IP="71.184.147.154" X-Client-Port="64328" >
+  <step title="OneDeploy" date="2026-05-22T22:05:11.390" >
+    <step title="Starting PushDeployAsync" date="2026-05-22T22:05:11.395" /><!-- duration: 3ms -->
+    <step title="Writing artifact to /tmp/zipdeploy/app.jar" date="2026-05-22T22:05:11.419" >
+      <step title="Writing multipart request body to /tmp/zipdeploy/app.jar" date="2026-05-22T22:05:11.422" /><!-- duration: 5ms -->
+    </step><!-- duration: 8202ms -->
+    <step title="Start deployment in the background" date="2026-05-22T22:05:19.639" >
+      <step title="Acquiring Deployment Lock" date="2026-05-22T22:05:19.650" /><!-- duration: 4ms -->
+      <step title="Acquired Deployment Lock" date="2026-05-22T22:05:19.678" /><!-- duration: 4ms -->
+    </step><!-- duration: 105ms -->
+  </step><!-- duration: 8357ms -->
+  <step title="Outgoing response" date="2026-05-22T22:05:19.750" type="response" statusCode="202" statusText="Accepted" /><!-- duration: 4ms -->
+</step><!-- duration: 8374ms -->
