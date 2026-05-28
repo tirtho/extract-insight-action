@@ -370,6 +370,66 @@ function Set-FunctionAppSettings {
     return $r
 }
 
+function Test-ContainsKeyVaultReferences {
+    param([hashtable]$Settings)
+    foreach ($entry in $Settings.GetEnumerator()) {
+        if ($entry.Value -is [string] -and $entry.Value -match '^@Microsoft\.KeyVault\(') {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Invoke-ConfigReferenceRefresh {
+    param(
+        [Parameter(Mandatory=$true)][string]$ResourceId,
+        [Parameter(Mandatory=$true)][string]$DisplayName,
+        [int]$MaxAttempts = 6,
+        [int]$DelaySeconds = 10
+    )
+
+    $lastUnresolved = @()
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $refresh = Invoke-AzCliSilent -Arguments @(
+            'rest','--method','POST',
+            '--uri',"https://management.azure.com$ResourceId/config/configreferences/appsettings/refresh?api-version=2022-03-01",
+            '-o','json'
+        )
+
+        if ($refresh.ExitCode -ne 0) {
+            Write-Host "[WARNING] Key Vault reference refresh failed for $DisplayName (attempt $attempt/$MaxAttempts)" -ForegroundColor Yellow
+            if ($refresh.Error) { Write-Host "  $($refresh.Error)" -ForegroundColor Yellow }
+        } else {
+            $lastUnresolved = @()
+            try {
+                $payload = $refresh.Output | ConvertFrom-Json
+                if ($payload.value) {
+                    $lastUnresolved = @($payload.value | Where-Object { $_.properties.status -ne 'Resolved' })
+                }
+            } catch {
+                $lastUnresolved = @()
+            }
+
+            if ($lastUnresolved.Count -eq 0) {
+                Write-Host "[SUCCESS] Key Vault references refreshed for $DisplayName" -ForegroundColor Green
+                return $true
+            }
+
+            Write-Host "[INFO] $DisplayName still has unresolved Key Vault references (attempt $attempt/$MaxAttempts)" -ForegroundColor Cyan
+            foreach ($item in $lastUnresolved) {
+                Write-Host "  - $($item.name): $($item.properties.status)" -ForegroundColor Yellow
+            }
+        }
+
+        if ($attempt -lt $MaxAttempts) {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    Write-Host "[WARNING] Key Vault references not fully resolved for $DisplayName after $MaxAttempts attempts" -ForegroundColor Yellow
+    return $false
+}
+
 # Polls provisioningState of an ARM resource until Succeeded or timeout.
 # Returns $true on success, $false on failure/timeout.
 function Wait-ForArmResource {
@@ -2125,6 +2185,11 @@ if ($r1.ExitCode -ne 0) {
     Write-Host "[ERROR] Failed to configure settings for $FuncMailboxName" -ForegroundColor Red
     if ($r1.Error) { Write-Host "  $($r1.Error)" -ForegroundColor Red }
     $script:DeploymentErrors.Add("Function app settings: $FuncMailboxName")
+} elseif (Test-ContainsKeyVaultReferences -Settings $mailboxSettings) {
+    $mailboxResourceId = (Invoke-AzCliSilent -Arguments @('functionapp','show','--name',$FuncMailboxName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
+    if ($mailboxResourceId) {
+        Invoke-ConfigReferenceRefresh -ResourceId $mailboxResourceId -DisplayName $FuncMailboxName | Out-Null
+    }
 }
 
 $ServiceBusHostname = "$ServiceBusNamespace.servicebus.windows.net"
@@ -2156,6 +2221,11 @@ if ($r3cu.ExitCode -ne 0) {
     Write-Host "[ERROR] Failed to configure settings for $FuncCuQueueDbName" -ForegroundColor Red
     if ($r3cu.Error) { Write-Host "  $($r3cu.Error)" -ForegroundColor Red }
     $script:DeploymentErrors.Add("Function app settings: $FuncCuQueueDbName")
+} elseif (Test-ContainsKeyVaultReferences -Settings $cuQueueDbSettings) {
+    $cuQueueResourceId = (Invoke-AzCliSilent -Arguments @('functionapp','show','--name',$FuncCuQueueDbName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
+    if ($cuQueueResourceId) {
+        Invoke-ConfigReferenceRefresh -ResourceId $cuQueueResourceId -DisplayName $FuncCuQueueDbName | Out-Null
+    }
 }
 
 Write-Host "[SUCCESS] Function App settings configured" -ForegroundColor Green
@@ -2202,6 +2272,7 @@ if ($r3.ExitCode -ne 0) {
     $script:DeploymentErrors.Add("Web app settings: $WebAppName")
 } else {
     Write-Host "[SUCCESS] Web App settings configured" -ForegroundColor Green
+    Invoke-ConfigReferenceRefresh -ResourceId $webAppResourceId -DisplayName $WebAppName | Out-Null
 }
 
 # =============================================================================

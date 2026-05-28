@@ -176,6 +176,29 @@ strong, b {
     margin: 0;
 }
 
+.profile-job-form {
+    display: grid;
+    gap: 8px;
+    margin: 0 0 8px;
+}
+
+.profile-input {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0.45rem 0.6rem;
+    font: inherit;
+    font-size: 0.82rem;
+    color: var(--ink);
+    background: #fff;
+}
+
+.profile-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(11, 110, 79, 0.14);
+}
+
 .profile-action-btn {
     width: 100%;
     border: 1px solid rgba(11, 110, 79, 0.2);
@@ -198,6 +221,19 @@ strong, b {
     margin: 8px 0 0;
     font-size: 0.8rem;
     color: var(--muted);
+}
+
+.profile-msg {
+    margin: 8px 0;
+    font-size: 0.78rem;
+}
+
+.profile-msg-success {
+    color: #1f7a43;
+}
+
+.profile-msg-error {
+    color: #b42318;
 }
 
 .banner-stats article {

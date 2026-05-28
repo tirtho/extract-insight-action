@@ -44,7 +44,7 @@ public class SecurityConfig {
                 .clientSecret(clientSecret)
                 .authorizationGrantType(AuthorizationGrantType.AUTHORIZATION_CODE)
                 .redirectUri("{baseUrl}/login/oauth2/code/{registrationId}")
-                .scope("openid", "profile", "email")
+            .scope("openid", "profile", "email", "User.Read", "User.ReadWrite")
                 .authorizationUri("https://login.microsoftonline.com/" + tenantId + "/oauth2/v2.0/authorize")
                 .tokenUri("https://login.microsoftonline.com/" + tenantId + "/oauth2/v2.0/token")
                 .jwkSetUri("https://login.microsoftonline.com/" + tenantId + "/discovery/v2.0/keys")

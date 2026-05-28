@@ -30,7 +30,7 @@
     <section class="top-banner">
         <div>
             <div class="eyebrow">Extract Insight Action</div>
-            <h1>Chief of Email Stuff</h1>
+            <h1 th:text="${userJobTitle != null && !userJobTitle.isBlank() ? 'Agentic ' + userJobTitle : 'Chief of Email Stuff'}">Chief of Email Stuff</h1>
             <p>Current items in the system, with the selected email and its attachments visible side by side.</p>
         </div>
         <div class="banner-tools">
@@ -45,6 +45,18 @@
                 <div class="profile-dropdown">
                     <p class="profile-dropdown-title">Account</p>
                     <p class="profile-dropdown-user" th:text="${userLogin}"></p>
+                    <p class="profile-dropdown-title">Job Title</p>
+                    <p class="profile-dropdown-user" th:text="${userJobTitle != null && !userJobTitle.isBlank() ? userJobTitle : 'Not set'}"></p>
+                    <form th:if="${isAuthenticated}" th:action="@{/account/job-title}" method="post" class="profile-action-form profile-job-form">
+                        <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}">
+                        <input type="text" name="jobTitle" class="profile-input"
+                               th:value="${userJobTitle}"
+                               maxlength="128"
+                               placeholder="Enter job title">
+                        <button type="submit" class="profile-action-btn">Save Job Title</button>
+                    </form>
+                    <p th:if="${profileMessage != null}" class="profile-msg profile-msg-success" th:text="${profileMessage}"></p>
+                    <p th:if="${profileError != null}" class="profile-msg profile-msg-error" th:text="${profileError}"></p>
                     <form th:if="${isAuthenticated}" th:action="@{/logout}" method="post" class="profile-action-form">
                         <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}">
                         <button type="submit" class="profile-action-btn">Logout</button>

@@ -3,8 +3,12 @@ package com.eia.ui.controller;
 import com.eia.ui.model.EmailDetailView;
 import com.eia.ui.service.AgentChatService;
 import com.eia.ui.service.AzureEmailStore;
+import com.eia.ui.service.GraphUserProfileService;
+import com.eia.ui.service.GraphUserProfileService.GraphProfileUpdateException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientService;
 import org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.security.oauth2.core.user.OAuth2User;
@@ -17,8 +21,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.servlet.mvc.support.RedirectAttributes;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.security.Principal;
@@ -32,10 +38,17 @@ public class EmailController {
 
     private final AzureEmailStore azureEmailStore;
     private final AgentChatService agentChatService;
+    private final OAuth2AuthorizedClientService authorizedClientService;
+    private final GraphUserProfileService graphUserProfileService;
 
-    public EmailController(AzureEmailStore azureEmailStore, AgentChatService agentChatService) {
+    public EmailController(AzureEmailStore azureEmailStore,
+                           AgentChatService agentChatService,
+                           OAuth2AuthorizedClientService authorizedClientService,
+                           GraphUserProfileService graphUserProfileService) {
         this.azureEmailStore  = azureEmailStore;
         this.agentChatService = agentChatService;
+        this.authorizedClientService = authorizedClientService;
+        this.graphUserProfileService = graphUserProfileService;
     }
 
     @GetMapping({"/", "/emails"})
@@ -76,9 +89,73 @@ public class EmailController {
         model.addAttribute("oidcEnabled", isOidcConfigured());
         model.addAttribute("userDisplayName", resolveUserDisplayName(authentication));
         model.addAttribute("userLogin", resolveUserLogin(authentication));
+        model.addAttribute("userJobTitle", resolveUserJobTitle(authentication));
         model.addAttribute("agentAvailable", agentChatService.isAvailable());
         model.addAttribute("agentError", agentChatService.getUnavailableReason());
         return "emails";
+    }
+
+    @PostMapping("/account/job-title")
+    public String updateJobTitle(@RequestParam(value = "jobTitle", required = false) String jobTitle,
+                                 Authentication authentication,
+                                 RedirectAttributes redirectAttributes) {
+        if (!isUserAuthenticated(authentication)) {
+            redirectAttributes.addFlashAttribute("profileError", "Sign in first to update job title.");
+            return "redirect:/emails";
+        }
+
+        String accessToken = resolveAccessToken(authentication);
+        if (accessToken == null || accessToken.isBlank()) {
+            redirectAttributes.addFlashAttribute("profileError", "Could not obtain Graph access token. Please sign out and sign in again.");
+            return "redirect:/emails";
+        }
+
+        String normalized = jobTitle == null ? "" : jobTitle.trim();
+        if (normalized.length() > 128) {
+            redirectAttributes.addFlashAttribute("profileError", "Job title must be 128 characters or less.");
+            return "redirect:/emails";
+        }
+
+        try {
+            graphUserProfileService.updateJobTitle(accessToken, normalized);
+            String msg = normalized.isBlank()
+                    ? "Job title cleared in Entra profile."
+                    : "Job title saved to Entra profile.";
+            redirectAttributes.addFlashAttribute("profileMessage", msg);
+        } catch (GraphProfileUpdateException ex) {
+            String graphBody = ex.getResponseBody() == null ? "" : ex.getResponseBody();
+            String normalizedBody = graphBody.toLowerCase();
+            String graphCode = ex.getGraphErrorCode();
+            String graphMessage = ex.getGraphErrorMessage();
+            String graphDetails = (graphCode != null && !graphCode.isBlank())
+                ? " (Graph: " + graphCode + ")"
+                : "";
+
+            if (ex.getStatusCode() == 401) {
+                redirectAttributes.addFlashAttribute(
+                        "profileError",
+                "Your Graph token is expired or invalid. Sign out and sign in again, then retry Save Job Title." + graphDetails);
+            } else if (ex.getStatusCode() == 403 || normalizedBody.contains("insufficient privileges") || normalizedBody.contains("accessdenied")) {
+                redirectAttributes.addFlashAttribute(
+                        "profileError",
+                "Graph denied profile update. Ensure User.ReadWrite is consented and your account has the Entra custom role EIAUserProfileEditor, then sign out/sign in to refresh token claims." + graphDetails);
+            } else if (ex.getStatusCode() == 400 && normalizedBody.contains("invalid") && normalizedBody.contains("jobtitle")) {
+                redirectAttributes.addFlashAttribute(
+                        "profileError",
+                "Graph rejected the provided job title value. Try a simpler title and retry." + graphDetails);
+            } else {
+            String tail = (graphMessage != null && !graphMessage.isBlank())
+                ? " " + graphMessage
+                : "";
+                redirectAttributes.addFlashAttribute(
+                        "profileError",
+                "Unable to save job title (Graph status " + ex.getStatusCode() + ")" + graphDetails + "." + tail);
+            }
+        } catch (Exception ex) {
+            redirectAttributes.addFlashAttribute("profileError", "Unable to save job title due to an unexpected error. Check application logs for details.");
+        }
+
+        return "redirect:/emails";
     }
 
     private boolean isUserAuthenticated(Authentication authentication) {
@@ -198,6 +275,30 @@ public class EmailController {
         if (value != null && !value.isBlank()) {
             target.add(value.trim());
         }
+    }
+
+    private String resolveUserJobTitle(Authentication authentication) {
+        String accessToken = resolveAccessToken(authentication);
+        if (accessToken == null || accessToken.isBlank()) {
+            return "";
+        }
+        return graphUserProfileService.getJobTitle(accessToken).orElse("");
+    }
+
+    private String resolveAccessToken(Authentication authentication) {
+        if (!(authentication instanceof OAuth2AuthenticationToken oauthToken)) {
+            return null;
+        }
+
+        OAuth2AuthorizedClient client = authorizedClientService.loadAuthorizedClient(
+                oauthToken.getAuthorizedClientRegistrationId(),
+                oauthToken.getName());
+
+        if (client == null || client.getAccessToken() == null) {
+            return null;
+        }
+
+        return client.getAccessToken().getTokenValue();
     }
 
     /**

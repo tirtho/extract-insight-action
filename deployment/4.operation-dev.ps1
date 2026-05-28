@@ -8,13 +8,21 @@
     Run this after deploy-infrastructure.ps1 has completed successfully.
 .PARAMETER Suffix
     Required. The same suffix used when running deploy-infrastructure.ps1.
+.PARAMETER SkipSteps
+    Optional. Skip selected setup steps using numbers or aliases.
+    If not provided, the script prompts you to choose which steps to run.
+      1/Network, 2/RBAC, 3/KVRefresh, 4/GraphConsent
 .USAGE
     .\operation-dev.ps1 -Suffix 999
+    .\operation-dev.ps1 -Suffix 999 -SkipSteps 3,4
 #>
 param(
     [Parameter(Mandatory=$true, HelpMessage="Suffix used during infrastructure deployment (e.g. 999)")]
     [ValidateNotNullOrEmpty()]
-    [string]$Suffix
+    [string]$Suffix,
+
+    [ValidateSet('1','2','3','4','Network','RBAC','KVRefresh','GraphConsent')]
+    [string[]]$SkipSteps = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +40,48 @@ function Invoke-AzCliSilent {
     $stdout = ($allOutput | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] }) -join "`n"
     $stderr = ($allOutput | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] }) -join "`n"
     return @{ ExitCode = $code; Output = $stdout.Trim(); Error = $stderr.Trim() }
+}
+
+function Get-CurrentDirectoryRoleNames {
+    $rolesResp = Invoke-AzCliSilent -Arguments @(
+        'rest',
+        '--method','GET',
+        '--uri','https://graph.microsoft.com/v1.0/me/memberOf/microsoft.graph.directoryRole?$select=displayName',
+        '-o','json'
+    )
+
+    if ($rolesResp.ExitCode -ne 0 -or -not $rolesResp.Output -or $rolesResp.Output -eq 'null') {
+        return $null
+    }
+
+    try {
+        $parsed = $rolesResp.Output | ConvertFrom-Json
+        if ($parsed -and $parsed.value) {
+            return @($parsed.value | ForEach-Object { $_.displayName })
+        }
+    } catch {
+        return $null
+    }
+
+    return @()
+}
+
+function Warn-IfCannotManageDirectoryRoles {
+    $roleNames = Get-CurrentDirectoryRoleNames
+    if ($null -eq $roleNames) {
+        Write-Host "  [WARNING] Could not verify Entra directory roles for the signed-in operator." -ForegroundColor Yellow
+        Write-Host "  [INFO] Directory custom role operations may fail without Privileged Role Administrator or Global Administrator." -ForegroundColor Cyan
+        return
+    }
+
+    $accepted = @('Global Administrator', 'Privileged Role Administrator')
+    $hasRequired = ($roleNames | Where-Object { $accepted -contains $_ }).Count -gt 0
+    if (-not $hasRequired) {
+        $currentRoles = if ($roleNames.Count -gt 0) { $roleNames -join ', ' } else { '(none)' }
+        Write-Host "  [WARNING] Signed-in operator may not manage directory custom roles." -ForegroundColor Yellow
+        Write-Host "  [INFO] Current roles: $currentRoles" -ForegroundColor Cyan
+        Write-Host "  [INFO] Required role: Privileged Role Administrator or Global Administrator." -ForegroundColor Cyan
+    }
 }
 
 function Ensure-RoleAssignment {
@@ -60,6 +110,264 @@ function Ensure-CosmosRoleAssignment {
     return $false  # newly created
 }
 
+function Invoke-ConfigReferenceRefresh {
+    param(
+        [Parameter(Mandatory=$true)][string]$ResourceId,
+        [Parameter(Mandatory=$true)][string]$DisplayName,
+        [int]$MaxAttempts = 6,
+        [int]$DelaySeconds = 10
+    )
+
+    $lastUnresolved = @()
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $refresh = Invoke-AzCliSilent -Arguments @(
+            'rest','--method','POST',
+            '--uri',"https://management.azure.com$ResourceId/config/configreferences/appsettings/refresh?api-version=2022-03-01",
+            '-o','json'
+        )
+
+        if ($refresh.ExitCode -ne 0) {
+            Write-Host "  [WARNING] Key Vault reference refresh failed for $DisplayName (attempt $attempt/$MaxAttempts)" -ForegroundColor Yellow
+            if ($refresh.Error) { Write-Host "    $($refresh.Error)" -ForegroundColor Yellow }
+        } else {
+            $lastUnresolved = @()
+            try {
+                $payload = $refresh.Output | ConvertFrom-Json
+                if ($payload.value) {
+                    $lastUnresolved = @($payload.value | Where-Object { $_.properties.status -ne 'Resolved' })
+                }
+            } catch {
+                $lastUnresolved = @()
+            }
+
+            if ($lastUnresolved.Count -eq 0) {
+                Write-Host "  [SUCCESS] Key Vault references refreshed for $DisplayName" -ForegroundColor Green
+                return $true
+            }
+
+            Write-Host "  [INFO] $DisplayName still has unresolved Key Vault references (attempt $attempt/$MaxAttempts)" -ForegroundColor Cyan
+            foreach ($item in $lastUnresolved) {
+                Write-Host "    - $($item.name): $($item.properties.status)" -ForegroundColor Yellow
+            }
+        }
+
+        if ($attempt -lt $MaxAttempts) {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    Write-Host "  [WARNING] Key Vault references not fully resolved for $DisplayName after $MaxAttempts attempts" -ForegroundColor Yellow
+    return $false
+}
+
+function Ensure-GraphDelegatedConsent {
+    param(
+        [Parameter(Mandatory=$true)][string]$ClientAppId,
+        [string[]]$Scopes = @('User.Read', 'User.ReadWrite')
+    )
+
+    if (-not $ClientAppId) {
+        return 'skipped'
+    }
+
+    $clientSpId = (Invoke-AzCliSilent -Arguments @('ad','sp','show','--id',$ClientAppId,'--query','id','-o','tsv')).Output
+    if (-not $clientSpId) {
+        throw "Could not resolve service principal for appId '$ClientAppId'."
+    }
+
+    $graphSpId = (Invoke-AzCliSilent -Arguments @('ad','sp','show','--id','00000003-0000-0000-c000-000000000000','--query','id','-o','tsv')).Output
+    if (-not $graphSpId) {
+        throw "Could not resolve Microsoft Graph service principal in this tenant."
+    }
+
+    $filter = [uri]::EscapeDataString("clientId eq '$clientSpId' and resourceId eq '$graphSpId' and consentType eq 'AllPrincipals'")
+    $grantResp = Invoke-AzCliSilent -Arguments @(
+        'rest','--method','GET',
+        '--uri',"https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$filter=$filter",
+        '-o','json'
+    )
+
+    if ($grantResp.ExitCode -ne 0 -or -not $grantResp.Output) {
+        throw "Failed to query existing delegated Graph consent grants. $($grantResp.Error)"
+    }
+
+    $grantObj = $grantResp.Output | ConvertFrom-Json
+    $existingGrant = if ($grantObj.value -and $grantObj.value.Count -gt 0) { $grantObj.value[0] } else { $null }
+
+    $existingScopes = @()
+    if ($existingGrant -and $existingGrant.scope) {
+        $existingScopes = @($existingGrant.scope -split ' ' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+
+    $desiredScopes = @($Scopes | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique)
+    $mergedScopes = @($existingScopes + $desiredScopes | Sort-Object -Unique)
+
+    if (($existingScopes | Sort-Object -Unique) -join ' ' -eq $mergedScopes -join ' ') {
+        return 'unchanged'
+    }
+
+    $scopeString = $mergedScopes -join ' '
+
+    if ($existingGrant) {
+        $body = @{ scope = $scopeString } | ConvertTo-Json -Compress
+        $patch = Invoke-AzCliSilent -Arguments @(
+            'rest','--method','PATCH',
+            '--uri',"https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($existingGrant.id)",
+            '--headers','Content-Type=application/json',
+            '--body',$body,
+            '-o','json'
+        )
+        if ($patch.ExitCode -ne 0) {
+            throw "Failed to update delegated Graph consent grant. $($patch.Error)"
+        }
+        return 'updated'
+    }
+
+    $createBody = @{
+        clientId = $clientSpId
+        consentType = 'AllPrincipals'
+        principalId = $null
+        resourceId = $graphSpId
+        scope = $scopeString
+    } | ConvertTo-Json -Compress
+
+    $create = Invoke-AzCliSilent -Arguments @(
+        'rest','--method','POST',
+        '--uri','https://graph.microsoft.com/v1.0/oauth2PermissionGrants',
+        '--headers','Content-Type=application/json',
+        '--body',$createBody,
+        '-o','json'
+    )
+    if ($create.ExitCode -ne 0) {
+        throw "Failed to create delegated Graph consent grant. $($create.Error)"
+    }
+
+    return 'created'
+}
+
+function Ensure-EIAUserProfileEditorRole {
+    param(
+        [string]$RoleName = 'EIAUserProfileEditor'
+    )
+
+    $escapedRoleName = $RoleName.Replace("'", "''")
+    $filter = [uri]::EscapeDataString("displayName eq '$escapedRoleName'")
+    $list = Invoke-AzCliSilent -Arguments @(
+        'rest','--method','GET',
+        '--uri',"https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$filter=$filter",
+        '-o','json'
+    )
+
+    if ($list.ExitCode -ne 0 -or -not $list.Output) {
+        throw "Failed to query directory role definitions. $($list.Error)"
+    }
+
+    $parsed = $list.Output | ConvertFrom-Json
+    if ($parsed.value -and $parsed.value.Count -gt 0) {
+        return @{ Status = 'unchanged'; RoleId = $parsed.value[0].id; RoleName = $parsed.value[0].displayName }
+    }
+
+    $body = @{
+        displayName = $RoleName
+        description = 'Allows updating user job title/profile job info via Microsoft Graph.'
+        isEnabled = $true
+        rolePermissions = @(
+            @{
+                allowedResourceActions = @('microsoft.directory/users/jobInfo/update')
+            }
+        )
+    } | ConvertTo-Json -Depth 6 -Compress
+
+    $tmpBodyPath = Join-Path $env:TEMP ("eia-role-definition-" + [guid]::NewGuid().ToString('N') + ".json")
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tmpBodyPath, $body, $utf8NoBom)
+
+    try {
+        $create = Invoke-AzCliSilent -Arguments @(
+            'rest','--method','POST',
+            '--uri','https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions',
+            '--headers','Content-Type=application/json',
+            '--body',"@$tmpBodyPath",
+            '-o','json'
+        )
+    } finally {
+        Remove-Item $tmpBodyPath -ErrorAction SilentlyContinue
+    }
+
+    if ($create.ExitCode -ne 0 -or -not $create.Output) {
+        throw "Failed to create directory custom role '$RoleName'. $($create.Error)"
+    }
+
+    $created = $create.Output | ConvertFrom-Json
+    return @{ Status = 'created'; RoleId = $created.id; RoleName = $created.displayName }
+}
+
+function Resolve-WebAppClientId {
+    param(
+        [Parameter(Mandatory=$true)][string]$WebAppName,
+        [Parameter(Mandatory=$true)][string]$ResourceGroupName,
+        [Parameter(Mandatory=$true)][string]$DefaultKeyVaultName
+    )
+
+    # App Service authsettingsV2 path (when built-in auth is enabled)
+    $clientId = (Invoke-AzCliSilent -Arguments @(
+        'webapp','auth','show',
+        '--name',$WebAppName,
+        '--resource-group',$ResourceGroupName,
+        '--query','identityProviders.azureActiveDirectory.registration.clientId',
+        '-o','tsv'
+    )).Output
+    if ($clientId) { return $clientId }
+
+    # App Service authsettings (v1 schema)
+    $clientId = (Invoke-AzCliSilent -Arguments @(
+        'webapp','auth','show',
+        '--name',$WebAppName,
+        '--resource-group',$ResourceGroupName,
+        '--query','clientId',
+        '-o','tsv'
+    )).Output
+    if ($clientId) { return $clientId }
+
+    # Spring app setting convention used by this repo
+    $rawSettingValue = (Invoke-AzCliSilent -Arguments @(
+        'webapp','config','appsettings','list',
+        '--name',$WebAppName,
+        '--resource-group',$ResourceGroupName,
+        '--query',"[?name=='WEBAPP_CLIENT_ID'].value | [0]",
+        '-o','tsv'
+    )).Output
+
+    if (-not $rawSettingValue) { return $null }
+
+    # If setting is a Key Vault reference, resolve the secret value.
+    if ($rawSettingValue -match '^@Microsoft\.KeyVault\(') {
+        $vaultName = $DefaultKeyVaultName
+        $secretName = $null
+
+        if ($rawSettingValue -match 'VaultName=([^;\)]+)') {
+            $vaultName = $matches[1]
+        }
+        if ($rawSettingValue -match 'SecretName=([^;\)]+)') {
+            $secretName = $matches[1]
+        }
+
+        if (-not $vaultName -or -not $secretName) {
+            return $null
+        }
+
+        return (Invoke-AzCliSilent -Arguments @(
+            'keyvault','secret','show',
+            '--vault-name',$vaultName,
+            '--name',$secretName,
+            '--query','value',
+            '-o','tsv'
+        )).Output
+    }
+
+    return $rawSettingValue
+}
+
 # =============================================================================
 # CONFIGURATION (must match deploy-infrastructure.ps1)
 # =============================================================================
@@ -73,6 +381,58 @@ $ContentUnderstandingName = if ($env:CONTENT_UNDERSTANDING_NAME) { $env:CONTENT_
 $AiFoundryName       = if ($env:AI_FOUNDRY_NAME)     { $env:AI_FOUNDRY_NAME }     else { "oai-$ProjectName-$Environment-$Suffix" }
 $KeyVaultName        = if ($env:KEY_VAULT_NAME)      { $env:KEY_VAULT_NAME }      else { "kv-$ProjectName-$Environment-$Suffix" }
 $ServiceBusNamespace = if ($env:SERVICE_BUS_NAMESPACE) { $env:SERVICE_BUS_NAMESPACE } else { "sb-$ProjectName-$Environment-$Suffix" }
+$FuncMailboxName      = if ($env:FUNCTION_APP_MAILBOX_NAME) { $env:FUNCTION_APP_MAILBOX_NAME } else { "func-mailbox-$ProjectName-$Environment-$Suffix" }
+$FuncCuQueueDbName    = if ($env:FUNCTION_APP_CU_QUEUE_DB_NAME) { $env:FUNCTION_APP_CU_QUEUE_DB_NAME } else { "func-cuqueuedb-$ProjectName-$Environment-$Suffix" }
+$WebAppName           = if ($env:WEB_APP_NAME) { $env:WEB_APP_NAME } else { "app-$ProjectName-$Environment-$Suffix" }
+
+$skipStep1 = $false
+$skipStep2 = $false
+$skipStep3 = $false
+$skipStep4 = $false
+
+if ($SkipSteps.Count -gt 0) {
+    $skipStep1 = (@('1','Network') | Where-Object { $SkipSteps -contains $_ }).Count -gt 0
+    $skipStep2 = (@('2','RBAC') | Where-Object { $SkipSteps -contains $_ }).Count -gt 0
+    $skipStep3 = (@('3','KVRefresh') | Where-Object { $SkipSteps -contains $_ }).Count -gt 0
+    $skipStep4 = (@('4','GraphConsent') | Where-Object { $SkipSteps -contains $_ }).Count -gt 0
+} else {
+    Write-Host "Which operation step(s) do you want to run?" -ForegroundColor White
+    Write-Host "  1. Configure Network Access"
+    Write-Host "  2. Grant RBAC Roles to Current User"
+    Write-Host "  3. Refresh Key Vault App Setting References"
+    Write-Host "  4. Ensure Graph Delegated Admin Consent (Web App)"
+    Write-Host "  5. All"
+    Write-Host ""
+    Write-Host "  You can enter a single number or comma-separated list (e.g. 1,3)" -ForegroundColor DarkCyan
+    Write-Host ""
+
+    $validOptions = @('1','2','3','4','5')
+    do {
+        $rawInput = (Read-Host "Enter selection(s)").Trim()
+        $selections = $rawInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+        $allValid = ($selections.Count -gt 0) -and ($selections | Where-Object { $_ -notin $validOptions }).Count -eq 0
+        if (-not $allValid) {
+            Write-Host "[ERROR] Please enter 1, 2, 3, 4, 5, or a comma-separated list (e.g. 1,4)." -ForegroundColor Red
+        }
+    } while (-not $allValid)
+
+    if ($selections -contains '5') {
+        $selections = @('1','2','3','4')
+    } else {
+        $selections = $selections | Select-Object -Unique
+    }
+
+    $skipStep1 = -not ($selections -contains '1')
+    $skipStep2 = -not ($selections -contains '2')
+    $skipStep3 = -not ($selections -contains '3')
+    $skipStep4 = -not ($selections -contains '4')
+}
+
+$networkChanges = 0
+$newAssignments = 0
+$graphConsentChanges = 0
+$directoryRoleChanges = 0
+$MyPublicIp = '(skipped)'
 
 # =============================================================================
 # BANNER
@@ -135,6 +495,11 @@ Write-Host "[OK] Resources verified" -ForegroundColor Green
 # =============================================================================
 # STEP 1: Configure Network Access (laptop IP + Azure services only)
 # =============================================================================
+if ($skipStep1) {
+    Write-Host ""
+    Write-Host ">>> Step 1: Configure Network Access" -ForegroundColor White
+    Write-Host "  [SKIPPED] Step 1 skipped by -SkipSteps" -ForegroundColor Yellow
+} else {
 Write-Host ""
 Write-Host ">>> Step 1: Configure Network Access" -ForegroundColor White
 
@@ -159,8 +524,6 @@ function Normalize-Bypass([string]$Bypass) {
     if (-not $Bypass) { return '' }
     ($Bypass -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object) -join ','
 }
-
-$networkChanges = 0
 
 # --- Gather current state (quick reads, sequential) ---
 $DesiredCosmosIpFilter = "$MyPublicIp,104.42.195.92,40.76.54.131,52.176.6.30,52.169.50.45,52.187.184.26,0.0.0.0"
@@ -257,10 +620,16 @@ if ($jobs.Count -gt 0) {
         Remove-Job $job -Force
     }
 }
+}
 
 # =============================================================================
 # STEP 2: Grant Logged-In User Read/Write & Admin Access
 # =============================================================================
+if ($skipStep2) {
+Write-Host ""
+Write-Host ">>> Step 2: Grant RBAC Roles to Current User" -ForegroundColor White
+Write-Host "  [SKIPPED] Step 2 skipped by -SkipSteps" -ForegroundColor Yellow
+} else {
 Write-Host ""
 Write-Host ">>> Step 2: Grant RBAC Roles to Current User" -ForegroundColor White
 
@@ -387,7 +756,6 @@ foreach ($a in $allAssignments) {
 
 # --- Wait for all RBAC jobs ---
 $rbacJobs | Wait-Job | Out-Null
-$newAssignments = 0
 foreach ($job in $rbacJobs) {
     $result = Receive-Job $job -ErrorAction SilentlyContinue
     if ($job.State -eq 'Completed' -and $result -eq 'exists') {
@@ -402,14 +770,109 @@ foreach ($job in $rbacJobs) {
     }
     Remove-Job $job -Force
 }
+}
+
+# =============================================================================
+# STEP 3: Refresh Key Vault App Setting References
+# =============================================================================
+if ($skipStep3) {
+Write-Host ""
+Write-Host ">>> Step 3: Refresh Key Vault App Setting References" -ForegroundColor White
+Write-Host "  [SKIPPED] Step 3 skipped by -SkipSteps" -ForegroundColor Yellow
+} else {
+Write-Host ""
+Write-Host ">>> Step 3: Refresh Key Vault App Setting References" -ForegroundColor White
+
+$servicesWithKvRefs = @(
+    @{ Type = 'functionapp'; Name = $FuncMailboxName },
+    @{ Type = 'functionapp'; Name = $FuncCuQueueDbName },
+    @{ Type = 'webapp'; Name = $WebAppName }
+)
+
+foreach ($svc in $servicesWithKvRefs) {
+    $idArgs = @($svc.Type, 'show', '--name', $svc.Name, '--resource-group', $ResourceGroupName, '--query', 'id', '-o', 'tsv')
+    $resourceId = (Invoke-AzCliSilent -Arguments $idArgs).Output
+    if (-not $resourceId) {
+        Write-Host "  [WARNING] Could not find $($svc.Type) '$($svc.Name)'; skipping Key Vault reference refresh" -ForegroundColor Yellow
+        continue
+    }
+    Invoke-ConfigReferenceRefresh -ResourceId $resourceId -DisplayName $svc.Name | Out-Null
+}
+}
+
+# =============================================================================
+# STEP 4: Ensure Graph Delegated Admin Consent for Web App
+# =============================================================================
+if ($skipStep4) {
+Write-Host ""
+Write-Host ">>> Step 4: Ensure Graph Delegated Admin Consent (Web App)" -ForegroundColor White
+Write-Host "  [SKIPPED] Step 4 skipped by -SkipSteps" -ForegroundColor Yellow
+} else {
+Write-Host ""
+Write-Host ">>> Step 4: Ensure Graph Delegated Admin Consent (Web App)" -ForegroundColor White
+
+Warn-IfCannotManageDirectoryRoles
+
+try {
+    $defaultRoleName = 'EIAUserProfileEditor'
+    $roleNameInput = Read-Host "Enter Entra custom role name for profile updates [default: $defaultRoleName]"
+    $roleName = if ($roleNameInput -and $roleNameInput.Trim()) { $roleNameInput.Trim() } else { $defaultRoleName }
+    $roleEnsure = Ensure-EIAUserProfileEditorRole -RoleName $roleName
+    if ($roleEnsure.Status -eq 'created') {
+        Write-Host "  [SUCCESS] Created Entra custom role '$($roleEnsure.RoleName)' for job title/profile updates." -ForegroundColor Green
+        $directoryRoleChanges++
+    } else {
+        Write-Host "  [OK] Entra custom role '$($roleEnsure.RoleName)' already exists." -ForegroundColor Gray
+    }
+} catch {
+    $roleError = $_.Exception.Message
+    Write-Host "  [WARNING] Could not ensure Entra custom role for profile updates." -ForegroundColor Yellow
+    Write-Host "    $roleError" -ForegroundColor Yellow
+    if ($roleError -match 'Authorization_RequestDenied|Insufficient privileges') {
+        Write-Host "  [INFO] Creating directory custom roles requires Entra role: Privileged Role Administrator or Global Administrator." -ForegroundColor Cyan
+        Write-Host "  [INFO] Use an admin account (or activate role via PIM), run 'az logout' and 'az login', then rerun Step 4." -ForegroundColor Cyan
+        Write-Host "  [INFO] If the role already exists, you can continue and use 11.admin-user-access.ps1 to assign it to users." -ForegroundColor Cyan
+    }
+}
+
+$webAppClientId = Resolve-WebAppClientId -WebAppName $WebAppName -ResourceGroupName $ResourceGroupName -DefaultKeyVaultName $KeyVaultName
+
+if (-not $webAppClientId) {
+    Write-Host "  [WARNING] Could not resolve web app OIDC clientId for '$WebAppName'; skipping Graph delegated consent step." -ForegroundColor Yellow
+} else {
+    try {
+        $consentStatus = Ensure-GraphDelegatedConsent -ClientAppId $webAppClientId -Scopes @('User.Read', 'User.ReadWrite')
+        switch ($consentStatus) {
+            'created' {
+                Write-Host "  [SUCCESS] Created delegated Graph admin consent for User.Read and User.ReadWrite." -ForegroundColor Green
+                $graphConsentChanges++
+            }
+            'updated' {
+                Write-Host "  [SUCCESS] Updated delegated Graph admin consent to include User.Read and User.ReadWrite." -ForegroundColor Green
+                $graphConsentChanges++
+            }
+            'unchanged' {
+                Write-Host "  [OK] Delegated Graph admin consent already includes User.Read and User.ReadWrite." -ForegroundColor Gray
+            }
+            default {
+                Write-Host "  [INFO] Graph delegated consent step skipped." -ForegroundColor Gray
+            }
+        }
+    } catch {
+        Write-Host "  [WARNING] Could not ensure Graph delegated consent automatically." -ForegroundColor Yellow
+        Write-Host "    $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "  [INFO] Manual fallback: App registrations -> $WebAppName app -> API permissions -> Grant admin consent." -ForegroundColor Cyan
+    }
+}
+}
 
 # =============================================================================
 # SUMMARY
 # =============================================================================
 Write-Host ""
-$totalChanges = $networkChanges + $newAssignments
+$totalChanges = $networkChanges + $newAssignments + $graphConsentChanges + $directoryRoleChanges
 if ($totalChanges -gt 0) {
-    Write-Host "[SUCCESS] Dev environment configured. $networkChanges network change(s), $newAssignments new RBAC assignment(s)." -ForegroundColor Green
+    Write-Host "[SUCCESS] Dev environment configured. $networkChanges network change(s), $newAssignments new RBAC assignment(s), $graphConsentChanges Graph consent change(s), $directoryRoleChanges directory role change(s)." -ForegroundColor Green
     if ($newAssignments -gt 0) {
         Write-Host "[INFO] RBAC propagation may take up to 5 minutes." -ForegroundColor Cyan
     }

@@ -120,21 +120,6 @@ public class AzureEmailStore implements AutoCloseable {
             return List.of();
         }
 
-        Set<String> allowedOwners = new HashSet<>();
-        if (userIdentifiers != null) {
-            for (String identifier : userIdentifiers) {
-                String normalized = normalizeIdentity(identifier);
-                if (!normalized.isBlank()) {
-                    allowedOwners.add(normalized);
-                }
-            }
-        }
-
-        if (allowedOwners.isEmpty()) {
-            LOG.warn("listEmails() called without usable user identifiers; returning empty list");
-            return List.of();
-        }
-
         CosmosQueryRequestOptions options = new CosmosQueryRequestOptions();
         List<ObjectNode> items = new ArrayList<>();
         cosmosContainer.queryItems("SELECT * FROM c", options, ObjectNode.class)
@@ -143,10 +128,9 @@ public class AzureEmailStore implements AutoCloseable {
 
         List<ObjectNode> filtered = items.stream()
                 .filter(this::isEmailDocument)
-                .filter(item -> allowedOwners.contains(normalizeIdentity(text(item, "mailboxOwner"))))
                 .toList();
 
-        LOG.debug("Loaded {} docs from Cosmos; {} matched current user identifiers.", items.size(), filtered.size());
+        LOG.debug("Loaded {} docs from Cosmos; {} email docs are visible to the signed-in app user.", items.size(), filtered.size());
 
         return filtered.stream()
                 .sorted(Comparator.comparing(this::sortTimestamp).reversed())
