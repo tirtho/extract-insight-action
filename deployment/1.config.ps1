@@ -1,7 +1,8 @@
 # =============================================================================
 # Configuration for extract-insight-action Infrastructure Deployment (PowerShell)
 #
-# Reads variables from env.config and sets them as environment variables,
+# Reads variables from a selected config file (default: env.config) and sets
+# them as environment variables,
 # then prompts for the deployment suffix to derive AZURE_KEY_VAULT_URL.
 #
 # Dot-source this file before running deployment scripts:
@@ -9,9 +10,21 @@
 #   .\deploy-infrastructure.ps1 -Suffix 999
 # =============================================================================
 
-$configFile = Join-Path $PSScriptRoot "env.config"
+$defaultConfigFileName = "env.config"
+$configFileNameInput = Read-Host "Enter config file name [$defaultConfigFileName]"
+$configFileName = if ([string]::IsNullOrWhiteSpace($configFileNameInput)) {
+    $defaultConfigFileName
+} else {
+    $configFileNameInput.Trim()
+}
+
+$configFile = if ([System.IO.Path]::IsPathRooted($configFileName)) {
+    $configFileName
+} else {
+    Join-Path $PSScriptRoot $configFileName
+}
 if (-not (Test-Path $configFile)) {
-    Write-Host "[ERROR] env.config not found at $configFile" -ForegroundColor Red
+    Write-Host "[ERROR] Config file '$configFileName' not found at $configFile" -ForegroundColor Red
     return
 }
 
@@ -29,7 +42,7 @@ Get-Content $configFile | ForEach-Object {
     }
 }
 
-Write-Host "[INFO] Loaded $($loadedVars.Count) environment variable(s) from env.config:" -ForegroundColor Cyan
+Write-Host "[INFO] Loaded $($loadedVars.Count) environment variable(s) from ${configFileName}:" -ForegroundColor Cyan
 foreach ($n in $loadedVars) {
     Write-Host "  $n = $([System.Environment]::GetEnvironmentVariable($n, 'Process'))" -ForegroundColor Gray
 }

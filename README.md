@@ -1,3 +1,13 @@
+# The Application - what it does
+
+extract-insight-action is an email intelligence workflow that ingests mailbox messages, processes their attachments, and turns raw content into searchable operational insight. It uses Azure Functions and Service Bus to orchestrate pipeline stages from mailbox polling, to message normalization, to persistence in Cosmos DB.
+
+For attachments, the system uses Azure Content Understanding analyzers to extract structured data from documents, images, audio, video, and other file types, then stores both status and analysis output for downstream use. A Spring Boot web application provides a secured review experience where users can browse emails, inspect extracted results, open attachments, and use Foundry deployed AI Agents for triage, decision support, and downstream processing.
+
+The platform is designed for enterprise operations: identity is enforced through Entra, secrets are centralized in Key Vault, and deployment is automated through script-driven infrastructure, consent, and onboarding flows. In short, it connects mailbox intake to AI-powered analysis and presents the results in a user-facing portal that teams can use to review and act quickly.
+
+
+
 # extract-insight-action
 
 This guide is the full runbook to deploy everything into a brand new Azure subscription, in the correct order:
