@@ -2,7 +2,7 @@
 # =============================================================================
 # Configuration for extract-insight-action Infrastructure Deployment (bash)
 #
-# Reads variables from env.config and exports them, then prompts for the
+# Reads variables from a selected config file (default: env.config) and exports them, then prompts for the
 # deployment suffix to derive AZURE_KEY_VAULT_URL.
 #
 # Source this file before running deployment scripts:
@@ -11,10 +11,22 @@
 # =============================================================================
 
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-CONFIG_FILE="$SCRIPT_DIR/env.config"
+DEFAULT_CONFIG_FILE_NAME="env.config"
+read -r -p "Enter config file name [$DEFAULT_CONFIG_FILE_NAME]: " CONFIG_FILE_INPUT
+if [[ -z "${CONFIG_FILE_INPUT// }" ]]; then
+    CONFIG_FILE_NAME="$DEFAULT_CONFIG_FILE_NAME"
+else
+    CONFIG_FILE_NAME="$CONFIG_FILE_INPUT"
+fi
+
+if [[ "$CONFIG_FILE_NAME" = /* || "$CONFIG_FILE_NAME" =~ ^[A-Za-z]:[\\/].* ]]; then
+    CONFIG_FILE="$CONFIG_FILE_NAME"
+else
+    CONFIG_FILE="$SCRIPT_DIR/$CONFIG_FILE_NAME"
+fi
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "[ERROR] env.config not found at $CONFIG_FILE" >&2
+    echo "[ERROR] Config file '$CONFIG_FILE_NAME' not found at $CONFIG_FILE" >&2
     return 1 2>/dev/null || exit 1
 fi
 
@@ -33,7 +45,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     fi
 done < "$CONFIG_FILE"
 
-echo "[INFO] Loaded ${#LOADED_VARS[@]} environment variable(s) from env.config:"
+echo "[INFO] Loaded ${#LOADED_VARS[@]} environment variable(s) from $CONFIG_FILE_NAME:"
 for n in "${LOADED_VARS[@]}"; do
     echo "  $n = ${!n}"
 done

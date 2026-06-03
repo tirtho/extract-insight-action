@@ -15,8 +15,7 @@
     .\rotate-graph-api-secret.ps1 -Suffix 999 -ExpiryYears 1
 #>
 param(
-    [Parameter(Mandatory=$true, HelpMessage="Suffix used during infrastructure deployment (e.g. 999)")]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix,
 
     [Parameter(Mandatory=$false)]
@@ -26,13 +25,27 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
+$Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
+
+$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+
+if ([string]::IsNullOrWhiteSpace($Suffix)) {
+    $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
+    $Suffix = if ([string]::IsNullOrWhiteSpace($SuffixInput)) { "1" } else { $SuffixInput.Trim() }
+} else {
+    $Suffix = $Suffix.Trim()
+}
+
+Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+
 # =============================================================================
 # CONFIGURATION (must match deploy-infrastructure.ps1)
 # =============================================================================
-$ProjectName  = if ($env:PROJECT_NAME)   { $env:PROJECT_NAME }   else { "eia" }
-$Environment  = if ($env:ENVIRONMENT)    { $env:ENVIRONMENT }    else { "dev" }
-$KeyVaultName = if ($env:KEY_VAULT_NAME) { $env:KEY_VAULT_NAME } else { "kv-$ProjectName-$Environment-$Suffix" }
-$GraphAppName = if ($env:GRAPH_APP_NAME) { $env:GRAPH_APP_NAME } else { "$ProjectName-graph-api-$Environment" }
+$ProjectName  = "eia"
+$KeyVaultName = "kv-$ProjectName-$Environment-$Suffix"
+$GraphAppName = "$ProjectName-graph-api-$Environment"
 
 # =============================================================================
 # HELPER

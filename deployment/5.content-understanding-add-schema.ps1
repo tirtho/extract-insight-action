@@ -18,8 +18,7 @@
     .\5.content-understanding-add-schema.ps1 -Suffix 0 -SchemaFolder C:\my-schemas
 #>
 param(
-    [Parameter(Mandatory=$true, HelpMessage="Suffix used during infrastructure deployment (e.g. 0)")]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix,
 
     [Parameter(Mandatory=$false)]
@@ -28,11 +27,25 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
+$Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
+
+$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+
+if ([string]::IsNullOrWhiteSpace($Suffix)) {
+    $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
+    $Suffix = if ([string]::IsNullOrWhiteSpace($SuffixInput)) { "1" } else { $SuffixInput.Trim() }
+} else {
+    $Suffix = $Suffix.Trim()
+}
+
+Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+
 # =============================================================================
 # DEFAULTS
 # =============================================================================
-$ProjectName = if ($env:PROJECT_NAME) { $env:PROJECT_NAME } else { "eia" }
-$Environment = if ($env:ENVIRONMENT)  { $env:ENVIRONMENT }  else { "dev" }
+$ProjectName = "eia"
 $ApiVersion  = "2025-11-01"
 
 if (-not $SchemaFolder) {

@@ -3,12 +3,10 @@ package com.eia.ui.controller;
 import com.eia.ui.model.EmailDetailView;
 import com.eia.ui.service.AgentChatService;
 import com.eia.ui.service.AzureEmailStore;
-import com.eia.ui.service.GraphUserProfileService;
-import com.eia.ui.service.GraphUserProfileService.GraphProfileUpdateException;
+import com.eia.ui.service.UserProfileStoreService;
+import com.eia.ui.service.UserProfileStoreService.UserProfileStoreException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
-import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
-import org.springframework.security.oauth2.client.OAuth2AuthorizedClientService;
 import org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.security.oauth2.core.user.OAuth2User;
@@ -38,17 +36,14 @@ public class EmailController {
 
     private final AzureEmailStore azureEmailStore;
     private final AgentChatService agentChatService;
-    private final OAuth2AuthorizedClientService authorizedClientService;
-    private final GraphUserProfileService graphUserProfileService;
+    private final UserProfileStoreService userProfileStoreService;
 
     public EmailController(AzureEmailStore azureEmailStore,
                            AgentChatService agentChatService,
-                           OAuth2AuthorizedClientService authorizedClientService,
-                           GraphUserProfileService graphUserProfileService) {
+                           UserProfileStoreService userProfileStoreService) {
         this.azureEmailStore  = azureEmailStore;
         this.agentChatService = agentChatService;
-        this.authorizedClientService = authorizedClientService;
-        this.graphUserProfileService = graphUserProfileService;
+        this.userProfileStoreService = userProfileStoreService;
     }
 
     @GetMapping({"/", "/emails"})
@@ -104,9 +99,9 @@ public class EmailController {
             return "redirect:/emails";
         }
 
-        String accessToken = resolveAccessToken(authentication);
-        if (accessToken == null || accessToken.isBlank()) {
-            redirectAttributes.addFlashAttribute("profileError", "Could not obtain Graph access token. Please sign out and sign in again.");
+        String userEmail = resolveUserEmail(authentication);
+        if (userEmail == null || userEmail.isBlank()) {
+            redirectAttributes.addFlashAttribute("profileError", "Could not resolve your email address from the sign-in token.");
             return "redirect:/emails";
         }
 
@@ -117,40 +112,13 @@ public class EmailController {
         }
 
         try {
-            graphUserProfileService.updateJobTitle(accessToken, normalized);
+            userProfileStoreService.upsertJobTitle(userEmail, normalized);
             String msg = normalized.isBlank()
-                    ? "Job title cleared in Entra profile."
-                    : "Job title saved to Entra profile.";
+                    ? "Job title cleared from Key Vault profile store."
+                    : "Job title saved to Key Vault profile store.";
             redirectAttributes.addFlashAttribute("profileMessage", msg);
-        } catch (GraphProfileUpdateException ex) {
-            String graphBody = ex.getResponseBody() == null ? "" : ex.getResponseBody();
-            String normalizedBody = graphBody.toLowerCase();
-            String graphCode = ex.getGraphErrorCode();
-            String graphMessage = ex.getGraphErrorMessage();
-            String graphDetails = (graphCode != null && !graphCode.isBlank())
-                ? " (Graph: " + graphCode + ")"
-                : "";
-
-            if (ex.getStatusCode() == 401) {
-                redirectAttributes.addFlashAttribute(
-                        "profileError",
-                "Your Graph token is expired or invalid. Sign out and sign in again, then retry Save Job Title." + graphDetails);
-            } else if (ex.getStatusCode() == 403 || normalizedBody.contains("insufficient privileges") || normalizedBody.contains("accessdenied")) {
-                redirectAttributes.addFlashAttribute(
-                        "profileError",
-                "Graph denied profile update. Ensure User.ReadWrite is consented and your account has the Entra custom role EIAUserProfileEditor, then sign out/sign in to refresh token claims." + graphDetails);
-            } else if (ex.getStatusCode() == 400 && normalizedBody.contains("invalid") && normalizedBody.contains("jobtitle")) {
-                redirectAttributes.addFlashAttribute(
-                        "profileError",
-                "Graph rejected the provided job title value. Try a simpler title and retry." + graphDetails);
-            } else {
-            String tail = (graphMessage != null && !graphMessage.isBlank())
-                ? " " + graphMessage
-                : "";
-                redirectAttributes.addFlashAttribute(
-                        "profileError",
-                "Unable to save job title (Graph status " + ex.getStatusCode() + ")" + graphDetails + "." + tail);
-            }
+        } catch (UserProfileStoreException ex) {
+            redirectAttributes.addFlashAttribute("profileError", ex.getMessage());
         } catch (Exception ex) {
             redirectAttributes.addFlashAttribute("profileError", "Unable to save job title due to an unexpected error. Check application logs for details.");
         }
@@ -278,27 +246,55 @@ public class EmailController {
     }
 
     private String resolveUserJobTitle(Authentication authentication) {
-        String accessToken = resolveAccessToken(authentication);
-        if (accessToken == null || accessToken.isBlank()) {
+        String userEmail = resolveUserEmail(authentication);
+        if (userEmail == null || userEmail.isBlank()) {
             return "";
         }
-        return graphUserProfileService.getJobTitle(accessToken).orElse("");
+        return userProfileStoreService.getJobTitle(userEmail).orElse("");
     }
 
-    private String resolveAccessToken(Authentication authentication) {
-        if (!(authentication instanceof OAuth2AuthenticationToken oauthToken)) {
-            return null;
+    private String resolveUserEmail(Authentication authentication) {
+        if (authentication instanceof OAuth2AuthenticationToken oauthToken
+                && oauthToken.getPrincipal() instanceof OidcUser oidcUser) {
+            String preferredUsername = oidcUser.getPreferredUsername();
+            if (preferredUsername != null && !preferredUsername.isBlank()) {
+                return preferredUsername;
+            }
+
+            String email = oidcUser.getEmail();
+            if (email != null && !email.isBlank()) {
+                return email;
+            }
+
+            Object upn = oidcUser.getClaims().get("upn");
+            if (upn instanceof String value && !value.isBlank()) {
+                return value;
+            }
         }
 
-        OAuth2AuthorizedClient client = authorizedClientService.loadAuthorizedClient(
-                oauthToken.getAuthorizedClientRegistrationId(),
-                oauthToken.getName());
+        if (authentication instanceof OAuth2AuthenticationToken oauthToken
+                && oauthToken.getPrincipal() instanceof OAuth2User oauth2User) {
+            Object preferredUsername = oauth2User.getAttributes().get("preferred_username");
+            if (preferredUsername instanceof String value && !value.isBlank()) {
+                return value;
+            }
 
-        if (client == null || client.getAccessToken() == null) {
-            return null;
+            Object email = oauth2User.getAttributes().get("email");
+            if (email instanceof String value && !value.isBlank()) {
+                return value;
+            }
+
+            Object upn = oauth2User.getAttributes().get("upn");
+            if (upn instanceof String value && !value.isBlank()) {
+                return value;
+            }
         }
 
-        return client.getAccessToken().getTokenValue();
+        if (authentication != null && authentication.getName() != null && !authentication.getName().isBlank()) {
+            return authentication.getName();
+        }
+
+        return "";
     }
 
     /**

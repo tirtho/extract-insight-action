@@ -14,8 +14,7 @@
     .\9.deploy-code.ps1 -Suffix 999
 #>
 param(
-    [Parameter(Mandatory=$true, HelpMessage="Suffix used during infrastructure deployment (e.g. 999)")]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix,
 
     [Parameter(HelpMessage="Maximum time to allow each Maven package run before failing. Use 0 to disable the timeout.")]
@@ -37,18 +36,32 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
+$Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
+
+$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+
+if ([string]::IsNullOrWhiteSpace($Suffix)) {
+    $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
+    $Suffix = if ([string]::IsNullOrWhiteSpace($SuffixInput)) { "1" } else { $SuffixInput.Trim() }
+} else {
+    $Suffix = $Suffix.Trim()
+}
+
+Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+
 # =============================================================================
 # CONFIGURATION  (mirrors deploy-infrastructure.ps1 naming conventions)
 # =============================================================================
-$ProjectName       = if ($env:PROJECT_NAME)              { $env:PROJECT_NAME }              else { "eia" }
-$Environment       = if ($env:ENVIRONMENT)               { $env:ENVIRONMENT }               else { "dev" }
-$ResourceGroupName = if ($env:RESOURCE_GROUP_NAME)       { $env:RESOURCE_GROUP_NAME }       else { "rg-$ProjectName-$Environment-$Suffix" }
-$FuncMailboxName   = if ($env:FUNCTION_APP_MAILBOX_NAME) { $env:FUNCTION_APP_MAILBOX_NAME } else { "func-mailbox-$ProjectName-$Environment-$Suffix" }
-$FuncQueueDbName   = if ($env:FUNCTION_APP_QUEUE_DB_NAME){ $env:FUNCTION_APP_QUEUE_DB_NAME }else { "func-queuedb-$ProjectName-$Environment-$Suffix" }
-$FuncCuQueueDbName = if ($env:FUNCTION_APP_CU_QUEUE_DB_NAME){ $env:FUNCTION_APP_CU_QUEUE_DB_NAME }else { "func-cuqueuedb-$ProjectName-$Environment-$Suffix" }
+$ProjectName       = "eia"
+$ResourceGroupName = "rg-$ProjectName-$Environment-$Suffix"
+$FuncMailboxName   = "func-mailbox-$ProjectName-$Environment-$Suffix"
+$FuncQueueDbName   = "func-queuedb-$ProjectName-$Environment-$Suffix"
+$FuncCuQueueDbName = "func-cuqueuedb-$ProjectName-$Environment-$Suffix"
 $ProjClean         = $ProjectName -replace '-',''
-$StorageAccountName = if ($env:STORAGE_ACCOUNT_NAME)    { $env:STORAGE_ACCOUNT_NAME }      else { "st$ProjClean$Environment$Suffix" }
-$WebAppName        = if ($env:WEB_APP_NAME)             { $env:WEB_APP_NAME }               else { "app-$ProjectName-$Environment-$Suffix" }
+$StorageAccountName = "st$ProjClean$Environment$Suffix"
+$WebAppName        = "app-$ProjectName-$Environment-$Suffix"
 
 $ScriptRoot      = $PSScriptRoot
 $RepoRoot        = Split-Path $ScriptRoot -Parent

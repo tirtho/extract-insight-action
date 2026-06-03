@@ -10,89 +10,75 @@
     .\deploy-infrastructure.ps1 -Suffix 999
 #>
 param(
-    [Parameter(Mandatory=$true, HelpMessage="Suffix for globally-unique resource names (e.g. 999)")]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(HelpMessage="Suffix for globally-unique resource names (default: 1, example: 1)")]
     [string]$Suffix
 )
 
 $ErrorActionPreference = "Stop"
 
 # =============================================================================
-# LOAD env.config (folded in from 1.config.ps1)
-# Reads KEY=VALUE pairs from deployment/env.config and sets them as environment
-# variables for this process so az/mvn/func and child processes inherit them.
+# INPUTS (no config file dependency)
 # =============================================================================
-$configFile = Join-Path $PSScriptRoot "env.config"
-if (Test-Path $configFile) {
-    $loadedVars = @()
-    Get-Content $configFile | ForEach-Object {
-        $line = $_.Trim()
-        if ($line -and -not $line.StartsWith('#') -and $line -match '^([^=]+)=(.*)$') {
-            $name  = $Matches[1].Trim()
-            $value = $Matches[2].Trim().Trim('"')
-            Set-Item -Path "env:$name" -Value $value
-            [System.Environment]::SetEnvironmentVariable($name, $value, 'Process')
-            $loadedVars += $name
-        }
-    }
-    Write-Host "[INFO] Loaded $($loadedVars.Count) environment variable(s) from env.config" -ForegroundColor Cyan
+$ProjectName = "eia"
+
+$locationInput = Read-Host "Enter location [default: centralus, example: centralus]"
+$Location = if ([string]::IsNullOrWhiteSpace($locationInput)) {
+    "centralus"
 } else {
-    Write-Host "[WARNING] env.config not found at $configFile - prompting for required values" -ForegroundColor Yellow
-
-    # Prompt for the required configuration values, with example defaults.
-    # If the user just presses Enter, the example value is used.
-    $configPrompts = @(
-        @{ Name = 'PROJECT_NAME';        Example = 'eia';                                              Default = 'eia' },
-        @{ Name = 'ENVIRONMENT';         Example = 'dev';                                              Default = 'dev' },
-        @{ Name = 'LOCATION';            Example = 'centralus';                                        Default = 'centralus' },
-        @{ Name = 'USER_EMAIL_ADDRESS';  Example = 'user@contoso.onmicrosoft.com';                     Default = $null },
-        @{ Name = 'SUBSCRIPTION_ID';     Example = '00000000-0000-0000-0000-000000000000';             Default = $null }
-    )
-
-    $loadedVars = @()
-    $generatedLines = @()
-    foreach ($p in $configPrompts) {
-        $current = [System.Environment]::GetEnvironmentVariable($p.Name, 'Process')
-        if ($current) {
-            Write-Host "  $($p.Name) already set in environment, keeping: $current" -ForegroundColor Gray
-            $loadedVars += $p.Name
-            $generatedLines += "$($p.Name)=`"$current`""
-            continue
-        }
-        $promptHint = if ($p.Default) { "default: $($p.Default), example: $($p.Example)" } else { "example: $($p.Example)" }
-        do {
-            $entered = Read-Host "Enter $($p.Name) [$promptHint]"
-            if ([string]::IsNullOrWhiteSpace($entered)) { $entered = $p.Default }
-            if ([string]::IsNullOrWhiteSpace($entered)) {
-                Write-Host "  [ERROR] $($p.Name) is required" -ForegroundColor Red
-            }
-        } while ([string]::IsNullOrWhiteSpace($entered))
-        $entered = $entered.Trim()
-        Set-Item -Path "env:$($p.Name)" -Value $entered
-        [System.Environment]::SetEnvironmentVariable($p.Name, $entered, 'Process')
-        $loadedVars += $p.Name
-        $generatedLines += "$($p.Name)=`"$entered`""
-    }
-
-    # Persist what the user entered to env.config for next time.
-    try {
-        Set-Content -Path $configFile -Value ($generatedLines -join "`r`n") -Encoding ASCII -Force
-        Write-Host "[INFO] Saved entered values to $configFile" -ForegroundColor Cyan
-    } catch {
-        Write-Host "[WARNING] Could not write $configFile : $_" -ForegroundColor Yellow
-    }
-    Write-Host "[INFO] Loaded $($loadedVars.Count) environment variable(s) from interactive prompts" -ForegroundColor Cyan
+    $locationInput.Trim().ToLowerInvariant()
 }
+
+$environmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+$Environment = if ([string]::IsNullOrWhiteSpace($environmentInput)) {
+    "dev"
+} else {
+    $environmentInput.Trim().ToLowerInvariant()
+}
+
+if ([string]::IsNullOrWhiteSpace($Suffix)) {
+    $suffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
+    $Suffix = if ([string]::IsNullOrWhiteSpace($suffixInput)) { "1" } else { $suffixInput.Trim() }
+} else {
+    $Suffix = $Suffix.Trim()
+}
+
+$signedInIdentity = (az account show --query user.name -o tsv 2>$null)
+$tenantFqdn = if ($signedInIdentity -match '@(.+)$') {
+    $Matches[1].ToLowerInvariant()
+} elseif ($env:USERDNSDOMAIN) {
+    $env:USERDNSDOMAIN.Trim().ToLowerInvariant()
+} else {
+    "contoso.onmicrosoft.com"
+}
+
+$userNamePartInput = Read-Host "Enter user email name part [default: fsi-demo, example: fsi-demo]"
+$userNamePart = if ([string]::IsNullOrWhiteSpace($userNamePartInput)) {
+    "fsi-demo"
+} else {
+    ($userNamePartInput.Trim().ToLowerInvariant() -replace '[^a-z0-9._-]', '')
+}
+if ([string]::IsNullOrWhiteSpace($userNamePart)) {
+    $userNamePart = "fsi-demo"
+}
+$UserEmailAddress = "$userNamePart@$tenantFqdn"
+
+Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix" -ForegroundColor Cyan
+Write-Host "[INFO] User email    : $UserEmailAddress" -ForegroundColor Cyan
 
 # Derived: SUFFIX / KEY_VAULT_NAME / AZURE_KEY_VAULT_URL exported for downstream scripts.
 # Also write env.bat at the repo root so cmd-based tools can pick up AZURE_KEY_VAULT_URL.
-$_ProjectName = if ($env:PROJECT_NAME) { $env:PROJECT_NAME } else { "eia" }
-$_Environment = if ($env:ENVIRONMENT)  { $env:ENVIRONMENT }  else { "dev" }
-$_KvName      = "kv-$_ProjectName-$_Environment-$Suffix"
+[System.Environment]::SetEnvironmentVariable('PROJECT_NAME', $ProjectName, 'Process')
+[System.Environment]::SetEnvironmentVariable('ENVIRONMENT', $Environment, 'Process')
+[System.Environment]::SetEnvironmentVariable('LOCATION', $Location, 'Process')
+[System.Environment]::SetEnvironmentVariable('USER_EMAIL_ADDRESS', $UserEmailAddress, 'Process')
+[System.Environment]::SetEnvironmentVariable('SUFFIX', $Suffix, 'Process')
+$env:PROJECT_NAME          = $ProjectName
+$env:ENVIRONMENT           = $Environment
+$env:LOCATION              = $Location
+$env:USER_EMAIL_ADDRESS    = $UserEmailAddress
 $env:SUFFIX                = $Suffix
-$env:KEY_VAULT_NAME        = $_KvName
-$env:AZURE_KEY_VAULT_URL   = "https://$_KvName.vault.azure.net"
-[System.Environment]::SetEnvironmentVariable('SUFFIX',               $env:SUFFIX,               'Process')
+$env:KEY_VAULT_NAME        = "kv-$ProjectName-$Environment-$Suffix"
+$env:AZURE_KEY_VAULT_URL   = "https://$($env:KEY_VAULT_NAME).vault.azure.net"
 [System.Environment]::SetEnvironmentVariable('KEY_VAULT_NAME',       $env:KEY_VAULT_NAME,       'Process')
 [System.Environment]::SetEnvironmentVariable('AZURE_KEY_VAULT_URL',  $env:AZURE_KEY_VAULT_URL,  'Process')
 
@@ -105,52 +91,55 @@ try {
     Write-Host "[WARNING] Could not write $envBatPath : $_" -ForegroundColor Yellow
 }
 
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
-$ProjectName   = if ($env:PROJECT_NAME)   { $env:PROJECT_NAME }   else { "eia" }
-$Environment   = if ($env:ENVIRONMENT)    { $env:ENVIRONMENT }    else { "dev" }
-$Location      = if ($env:LOCATION)       { $env:LOCATION }       else { "centralus" }
-
 # Get subscription/tenant from Azure CLI
-$SubscriptionId = if ($env:SUBSCRIPTION_ID) { $env:SUBSCRIPTION_ID } else { (az account show --query id -o tsv) }
-$TenantId       = if ($env:TENANT_ID)       { $env:TENANT_ID }       else { (az account show --query tenantId -o tsv) }
+$SubscriptionId = (az account show --query id -o tsv)
+$TenantId       = (az account show --query tenantId -o tsv)
 
-# Resource names (Suffix is a required command-line argument)
-$ResourceGroupName    = if ($env:RESOURCE_GROUP_NAME)       { $env:RESOURCE_GROUP_NAME }       else { "rg-$ProjectName-$Environment-$Suffix" }
-$KeyVaultName         = if ($env:KEY_VAULT_NAME)            { $env:KEY_VAULT_NAME }            else { "kv-$ProjectName-$Environment-$Suffix" }
-$ServiceBusNamespace  = if ($env:SERVICE_BUS_NAMESPACE)     { $env:SERVICE_BUS_NAMESPACE }     else { "sb-$ProjectName-$Environment-$Suffix" }
-$ProjClean            = $ProjectName -replace '-',''
-$StorageAccountName   = if ($env:STORAGE_ACCOUNT_NAME)      { $env:STORAGE_ACCOUNT_NAME }      else { "st$ProjClean$Environment$Suffix" }
-$FuncMailboxName      = if ($env:FUNCTION_APP_MAILBOX_NAME) { $env:FUNCTION_APP_MAILBOX_NAME } else { "func-mailbox-$ProjectName-$Environment-$Suffix" }
-$FuncQueueDbName      = if ($env:FUNCTION_APP_QUEUE_DB_NAME){ $env:FUNCTION_APP_QUEUE_DB_NAME }else { "func-queuedb-$ProjectName-$Environment-$Suffix" }
-$FuncCuQueueDbName    = if ($env:FUNCTION_APP_CU_QUEUE_DB_NAME){ $env:FUNCTION_APP_CU_QUEUE_DB_NAME }else { "func-cuqueuedb-$ProjectName-$Environment-$Suffix" }
-$ServiceBusTopicName  = if ($env:SERVICE_BUS_TOPIC_NAME)    { $env:SERVICE_BUS_TOPIC_NAME }    else { "email-processing" }
-$ServiceBusSubName    = if ($env:SERVICE_BUS_SUBSCRIPTION_NAME) { $env:SERVICE_BUS_SUBSCRIPTION_NAME } else { "email-processor" }
-$GraphAppName         = if ($env:GRAPH_APP_NAME)            { $env:GRAPH_APP_NAME }            else { "$ProjectName-graph-api-$Environment" }
+# Resource names (derived from eia-environment-suffix)
+$ResourceGroupName    = "rg-$ProjectName-$Environment-$Suffix"
+$KeyVaultName         = "kv-$ProjectName-$Environment-$Suffix"
+$ServiceBusNamespace  = "sb-$ProjectName-$Environment-$Suffix"
+$ProjClean            = ($ProjectName.ToLowerInvariant()) -replace '[^a-z0-9]',''
+$EnvironmentCleanForStorage = ($Environment.ToLowerInvariant()) -replace '[^a-z0-9]',''
+$SuffixCleanForStorage      = ($Suffix.ToLowerInvariant()) -replace '[^a-z0-9]',''
+$DefaultStorageAccountName  = "st$ProjClean$EnvironmentCleanForStorage$SuffixCleanForStorage"
+$StorageAccountName   = $DefaultStorageAccountName
+
+if ($StorageAccountName.Length -lt 3 -or $StorageAccountName.Length -gt 24 -or $StorageAccountName -notmatch '^[a-z0-9]+$') {
+    Write-Host "[ERROR] Invalid storage account name '$StorageAccountName'." -ForegroundColor Red
+    Write-Host "        Storage account names must be 3-24 chars and contain only lowercase letters and digits." -ForegroundColor Red
+    Write-Host "        Suggested value: $DefaultStorageAccountName" -ForegroundColor Red
+    exit 1
+}
+$FuncMailboxName      = "func-mailbox-$ProjectName-$Environment-$Suffix"
+$FuncQueueDbName      = "func-queuedb-$ProjectName-$Environment-$Suffix"
+$FuncCuQueueDbName    = "func-cuqueuedb-$ProjectName-$Environment-$Suffix"
+$ServiceBusTopicName  = "email-processing"
+$ServiceBusSubName    = "email-processor"
+$GraphAppName         = "$ProjectName-graph-api-$Environment"
 $GraphClientId        = $env:GRAPH_CLIENT_ID
 $GraphClientSecret    = $env:GRAPH_CLIENT_SECRET
-$WebAppAuthAppName    = if ($env:WEBAPP_AUTH_APP_NAME)      { $env:WEBAPP_AUTH_APP_NAME }      else { "$ProjectName-webapp-auth-$Environment" }
+$WebAppAuthAppName    = "$ProjectName-webapp-auth-$Environment"
 $WebAppClientId       = $env:WEBAPP_CLIENT_ID
 $WebAppClientSecret   = $env:WEBAPP_CLIENT_SECRET
-$AppInsightsName      = if ($env:APP_INSIGHTS_NAME)         { $env:APP_INSIGHTS_NAME }         else { "ai-$ProjectName-$Environment" }
-$CosmosDbAccountName  = if ($env:COSMOS_DB_ACCOUNT_NAME)    { $env:COSMOS_DB_ACCOUNT_NAME }    else { "cosmos-$ProjectName-$Environment-$Suffix" }
-$StorageQueueName     = if ($env:STORAGE_QUEUE_NAME)        { $env:STORAGE_QUEUE_NAME }        else { "cu-analyze-ops-$ProjectName-$Environment-$Suffix" }
-$StorageQueuePollingSchedule = if ($env:STORAGE_QUEUE_POLLING_SCHEDULE) { $env:STORAGE_QUEUE_POLLING_SCHEDULE } else { "0 */1 * * * *" }
+$AppInsightsName      = "ai-$ProjectName-$Environment"
+$CosmosDbAccountName  = "cosmos-$ProjectName-$Environment-$Suffix"
+$StorageQueueName     = "cu-analyze-ops-$ProjectName-$Environment-$Suffix"
+$StorageQueuePollingSchedule = "0 */1 * * * *"
 
 # Mailbox application configuration (folded in from 4.kv-settings-for-applications.ps1).
 # UserEmailAddress is required for the application to function; the deployment
 # will halt early if it is not provided.
-$UserEmailAddress = if ($env:USER_EMAIL_ADDRESS) { $env:USER_EMAIL_ADDRESS } else { "" }
-$PollingMailboxName = if ($env:POLLING_MAILBOX_NAME) { $env:POLLING_MAILBOX_NAME } else { "Inbox" }
-$ReadMailboxForPastNSeconds = if ($env:READ_MAILBOX_FOR_PAST_N_SECONDS) { $env:READ_MAILBOX_FOR_PAST_N_SECONDS } else { "3600" }
+$UserEmailAddress = $env:USER_EMAIL_ADDRESS
+$PollingMailboxName = "Inbox"
+$ReadMailboxForPastNSeconds = "3600"
 $CosmosDbDatabaseName = "DocAIDatabase"
 $CosmosDbContainerName = "EmailExtracts"
-$AppServicePlanName   = if ($env:APP_SERVICE_PLAN_NAME)     { $env:APP_SERVICE_PLAN_NAME }     else { "plan-$ProjectName-$Environment" }
-$WebAppName           = if ($env:WEB_APP_NAME)              { $env:WEB_APP_NAME }              else { "app-$ProjectName-$Environment-$Suffix" }
-$ContentUnderstandingName = if ($env:CONTENT_UNDERSTANDING_NAME) { $env:CONTENT_UNDERSTANDING_NAME } else { "cu-$ProjectName-$Environment-$Suffix" }
-$AiFoundryName            = if ($env:AI_FOUNDRY_NAME)            { $env:AI_FOUNDRY_NAME }            else { "oai-$ProjectName-$Environment-$Suffix" }
-$AiFoundryProjectName     = if ($env:AI_FOUNDRY_PROJECT_NAME)    { $env:AI_FOUNDRY_PROJECT_NAME }    else { "proj-$ProjectName-$Environment-$Suffix" }
+$AppServicePlanName   = "plan-$ProjectName-$Environment"
+$WebAppName           = "app-$ProjectName-$Environment-$Suffix"
+$ContentUnderstandingName = "cu-$ProjectName-$Environment-$Suffix"
+$AiFoundryName            = "oai-$ProjectName-$Environment-$Suffix"
+$AiFoundryProjectName     = "proj-$ProjectName-$Environment-$Suffix"
 $AiFoundryProjectApiVersion = "2025-04-01-preview"
 $AiFoundryApiVersion      = "2024-12-01-preview"
 $AiFoundrySkuName         = "GlobalStandard"
@@ -1898,9 +1887,12 @@ if (-not $KeyVaultId) {
     $script:DeploymentErrors.Add("Key Vault RBAC: could not retrieve resource ID for $KeyVaultName")
 } else {
     Write-Host "[INFO] Key Vault Secrets User role for function apps and web app" -ForegroundColor Cyan
-    foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, $WebAppIdentity)) {
+    foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity)) {
         if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Key Vault Secrets User' -Scope $KeyVaultId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
     }
+
+    Write-Host "[INFO] Key Vault Secrets Officer role for web app profile updates" -ForegroundColor Cyan
+    if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Key Vault Secrets Officer' -Scope $KeyVaultId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 }
 
 # Service Bus access
@@ -2238,6 +2230,7 @@ Write-Host "[INFO] Configuring Web App settings..." -ForegroundColor Cyan
 $webAppSettingsPayload = @{
     properties = @{
         "AZURE_KEY_VAULT_URL"      = $KvUrl
+        "USER_PROFILE_SECRET_NAME"  = "UserProfiles"
         # OIDC sign-in for end users (Spring Security). Renamed away from AZURE_* so
         # DefaultAzureCredential.EnvironmentCredential does NOT pick them up — the
         # app's system-assigned managed identity is used for Azure data-plane access.

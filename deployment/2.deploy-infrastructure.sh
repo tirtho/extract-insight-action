@@ -24,9 +24,22 @@ SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
 # =============================================================================
-# Load env.config (mirrors 1.config.ps1 folded-in behaviour)
+# Load selected config file (mirrors 1.config.ps1 folded-in behaviour)
 # =============================================================================
-CONFIG_FILE="$SCRIPT_DIR/env.config"
+DEFAULT_CONFIG_FILE_NAME="env.config"
+read -r -p "Enter config file name [$DEFAULT_CONFIG_FILE_NAME]: " CONFIG_FILE_INPUT
+if [[ -z "${CONFIG_FILE_INPUT// }" ]]; then
+    CONFIG_FILE_NAME="$DEFAULT_CONFIG_FILE_NAME"
+else
+    CONFIG_FILE_NAME="$CONFIG_FILE_INPUT"
+fi
+
+if [[ "$CONFIG_FILE_NAME" = /* || "$CONFIG_FILE_NAME" =~ ^[A-Za-z]:[\\/].* ]]; then
+    CONFIG_FILE="$CONFIG_FILE_NAME"
+else
+    CONFIG_FILE="$SCRIPT_DIR/$CONFIG_FILE_NAME"
+fi
+
 if [[ -f "$CONFIG_FILE" ]]; then
     LOADED=0
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -40,9 +53,9 @@ if [[ -f "$CONFIG_FILE" ]]; then
             ((LOADED++)) || true
         fi
     done < "$CONFIG_FILE"
-    echo "[INFO] Loaded $LOADED environment variable(s) from env.config"
+    echo "[INFO] Loaded $LOADED environment variable(s) from $CONFIG_FILE_NAME"
 else
-    echo "[WARNING] env.config not found at $CONFIG_FILE - prompting for required values"
+    echo "[WARNING] Config file '$CONFIG_FILE_NAME' not found at $CONFIG_FILE - prompting for required values"
     declare -a GEN_LINES=()
     prompt_var() {
         local name="$1" default="$2" example="$3" required="$4"

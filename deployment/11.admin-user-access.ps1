@@ -14,6 +14,7 @@
 	- If user does not exist, prompts for password and creates user in tenant
 	- Adds users to access group (MFA enforced via Conditional Access policy)
 	- Adds user to group
+	- Stores each user's job title in a Key Vault JSON secret keyed by email address
 
 	This is intended to support web-portal access group setup without changing
 	mailbox polling behavior.
@@ -31,6 +32,25 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+$LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
+$Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
+
+$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+
+if (-not $GlobalAdmin) {
+	if ([string]::IsNullOrWhiteSpace($Suffix)) {
+		$SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
+		$Suffix = if ([string]::IsNullOrWhiteSpace($SuffixInput)) { "1" } else { $SuffixInput.Trim() }
+	} else {
+		$Suffix = $Suffix.Trim()
+	}
+}
+
+if (-not $GlobalAdmin) {
+	Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+}
 
 function Invoke-AzCliSilent {
 	param([string[]]$Arguments)
@@ -106,42 +126,157 @@ function Ensure-CanCreateUsers {
 	Write-Host "[OK] Role pre-check passed for user creation." -ForegroundColor Green
 }
 
-function Warn-IfCannotManageDirectoryRoles {
-	param([string]$Identity)
+function Resolve-KeyVaultUrl {
+	param([string]$KeyVaultName)
 
-	$roleNames = Get-CurrentDirectoryRoleNames
-	if ($null -eq $roleNames) {
-		Write-Host "[WARNING] Could not verify Entra directory roles for '$Identity'." -ForegroundColor Yellow
-		Write-Host "[INFO] Directory custom role assignment may fail without Privileged Role Administrator or Global Administrator." -ForegroundColor Cyan
-		return
+	$explicit = $env:AZURE_KEY_VAULT_URL
+	if ($explicit -and -not [string]::IsNullOrWhiteSpace($explicit)) {
+		return $explicit.TrimEnd('/')
 	}
 
-	$acceptedRoles = @('Global Administrator', 'Privileged Role Administrator')
-	$hasManagePrivilege = ($roleNames | Where-Object { $acceptedRoles -contains $_ }).Count -gt 0
-	if (-not $hasManagePrivilege) {
-		$currentRoles = if ($roleNames.Count -gt 0) { $roleNames -join ', ' } else { '(none)' }
-		Write-Host "[WARNING] Account '$Identity' may not manage directory custom roles." -ForegroundColor Yellow
-		Write-Host "[INFO] Current roles: $currentRoles" -ForegroundColor Cyan
-		Write-Host "[INFO] Required role for directory role assignment: Privileged Role Administrator or Global Administrator." -ForegroundColor Cyan
+	if ($KeyVaultName) {
+		return "https://$KeyVaultName.vault.azure.net"
 	}
+
+	return $null
 }
-function Load-EnvConfig {
-	$configFile = Join-Path $PSScriptRoot "env.config"
-	if (-not (Test-Path $configFile)) {
-		return
+
+function Get-UserProfileSecretName {
+	$configured = $env:USER_PROFILE_SECRET_NAME
+	if ($configured -and -not [string]::IsNullOrWhiteSpace($configured)) {
+		return $configured.Trim()
 	}
 
-	Get-Content $configFile | ForEach-Object {
-		$line = $_.Trim()
-		if ($line -and -not $line.StartsWith('#') -and $line -match '^([^=]+)=(.*)$') {
-			$name  = $Matches[1].Trim()
-			$value = $Matches[2].Trim().Trim('"')
-			Set-Item -Path "env:$name" -Value $value
-			[System.Environment]::SetEnvironmentVariable($name, $value, 'Process')
+	return 'UserProfiles'
+}
+
+function Normalize-ProfileEmail {
+	param([string]$Email)
+
+	if (-not $Email) {
+		return $null
+	}
+
+	$normalized = $Email.Trim()
+	if ([string]::IsNullOrWhiteSpace($normalized)) {
+		return $null
+	}
+
+	return $normalized.ToLowerInvariant()
+}
+
+function Read-UserProfileJobTitles {
+	param(
+		[string]$KeyVaultName,
+		[string]$SecretName
+	)
+
+	$profiles = @{}
+	$result = Invoke-AzCliSilent -Arguments @('keyvault','secret','show','--vault-name',$KeyVaultName,'--name',$SecretName,'--query','value','-o','tsv')
+	if ($result.ExitCode -ne 0 -or -not $result.Output -or [string]::IsNullOrWhiteSpace($result.Output)) {
+		return $profiles
+	}
+
+	try {
+		$root = $result.Output | ConvertFrom-Json
+	} catch {
+		Write-Host "[WARNING] Key Vault secret '$SecretName' does not contain valid JSON. It will be replaced when you save a title." -ForegroundColor Yellow
+		return $profiles
+	}
+
+	if (-not $root) {
+		return $profiles
+	}
+
+	foreach ($property in $root.PSObject.Properties) {
+		$emailKey = Normalize-ProfileEmail -Email $property.Name
+		if (-not $emailKey) {
+			continue
+		}
+
+		$titleValue = $null
+		if ($property.Value -is [string]) {
+			$titleValue = $property.Value.Trim()
+		} elseif ($property.Value -and $property.Value.PSObject.Properties['JobTitle']) {
+			$titleValue = [string]$property.Value.JobTitle
+			if ($titleValue) {
+				$titleValue = $titleValue.Trim()
+			}
+		}
+
+		if ($titleValue -and -not [string]::IsNullOrWhiteSpace($titleValue)) {
+			$profiles[$emailKey] = $titleValue
 		}
 	}
+
+	return $profiles
 }
 
+function Write-UserProfileJobTitles {
+	param(
+		[string]$KeyVaultName,
+		[string]$SecretName,
+		[hashtable]$Profiles
+	)
+
+	$payload = [ordered]@{}
+	foreach ($entry in ($Profiles.GetEnumerator() | Sort-Object Key)) {
+		$payload[$entry.Key] = [ordered]@{ JobTitle = $entry.Value }
+	}
+
+	$json = $payload | ConvertTo-Json -Compress -Depth 6
+	$result = Invoke-AzCliSilent -Arguments @('keyvault','secret','set','--vault-name',$KeyVaultName,'--name',$SecretName,'--value',$json,'--output','none')
+	if ($result.ExitCode -ne 0) {
+		throw "Failed to store user profile data in Key Vault '$KeyVaultName'."
+	}
+}
+
+function Get-UserProfileJobTitle {
+	param(
+		[string]$KeyVaultName,
+		[string]$SecretName,
+		[string]$Email
+	)
+
+	$emailKey = Normalize-ProfileEmail -Email $Email
+	if (-not $emailKey) {
+		return $null
+	}
+
+	$profiles = Read-UserProfileJobTitles -KeyVaultName $KeyVaultName -SecretName $SecretName
+	if ($profiles.ContainsKey($emailKey)) {
+		return $profiles[$emailKey]
+	}
+
+	return $null
+}
+
+function Set-UserProfileJobTitle {
+	param(
+		[string]$KeyVaultName,
+		[string]$SecretName,
+		[string]$Email,
+		[string]$JobTitle
+	)
+
+	$emailKey = Normalize-ProfileEmail -Email $Email
+	if (-not $emailKey) {
+		throw "An email address is required to store a user profile title."
+	}
+
+	$profiles = Read-UserProfileJobTitles -KeyVaultName $KeyVaultName -SecretName $SecretName
+	$normalizedTitle = if ($JobTitle) { $JobTitle.Trim() } else { '' }
+
+	if ([string]::IsNullOrWhiteSpace($normalizedTitle)) {
+		if ($profiles.ContainsKey($emailKey)) {
+			$profiles.Remove($emailKey) | Out-Null
+		}
+	} else {
+		$profiles[$emailKey] = $normalizedTitle
+	}
+
+	Write-UserProfileJobTitles -KeyVaultName $KeyVaultName -SecretName $SecretName -Profiles $profiles
+}
 function Get-FqdnFromIdentity {
 	param([string]$Identity)
 
@@ -307,93 +442,7 @@ function Add-UserToGroup {
 	return 'added'
 }
 
-function Get-CustomDirectoryRoleDefinitionId {
-	param([string]$RoleName)
 
-	$escapedRoleName = $RoleName.Replace("'", "''")
-	$filter = [uri]::EscapeDataString("displayName eq '$escapedRoleName'")
-	$list = Invoke-AzCliSilent -Arguments @(
-		'rest','--method','GET',
-		'--uri',"https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$filter=$filter",
-		'-o','json'
-	)
-
-	if ($list.ExitCode -ne 0 -or -not $list.Output -or $list.Output -eq 'null') {
-		return $null
-	}
-
-	try {
-		$parsed = $list.Output | ConvertFrom-Json
-		if ($parsed -and $parsed.value -and $parsed.value.Count -gt 0) {
-			return $parsed.value[0].id
-		}
-	} catch {
-		return $null
-	}
-
-	return $null
-}
-
-function Ensure-DirectoryRoleAssignment {
-	param(
-		[string]$RoleDefinitionId,
-		[string]$PrincipalId,
-		[string]$Email
-	)
-
-	$filter = [uri]::EscapeDataString("principalId eq '$PrincipalId' and roleDefinitionId eq '$RoleDefinitionId' and directoryScopeId eq '/'")
-	$existing = Invoke-AzCliSilent -Arguments @(
-		'rest','--method','GET',
-		'--uri',"https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?`$filter=$filter",
-		'-o','json'
-	)
-
-	if ($existing.ExitCode -eq 0 -and $existing.Output -and $existing.Output -ne 'null') {
-		try {
-			$parsed = $existing.Output | ConvertFrom-Json
-			if ($parsed.value -and $parsed.value.Count -gt 0) {
-				Write-Host "[OK] Directory role already assigned to '$Email'." -ForegroundColor Gray
-				return 'already-assigned'
-			}
-		} catch {
-		}
-	}
-
-	$body = @{
-		principalId = $PrincipalId
-		roleDefinitionId = $RoleDefinitionId
-		directoryScopeId = '/'
-	} | ConvertTo-Json -Compress
-
-	$tmpBodyPath = Join-Path $env:TEMP ("eia-role-assignment-" + [guid]::NewGuid().ToString('N') + ".json")
-	$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-	[System.IO.File]::WriteAllText($tmpBodyPath, $body, $utf8NoBom)
-
-	try {
-		$assign = Invoke-AzCliSilent -Arguments @(
-			'rest','--method','POST',
-			'--uri','https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments',
-			'--headers','Content-Type=application/json',
-			'--body',"@$tmpBodyPath",
-			'-o','json'
-		)
-	} finally {
-		Remove-Item $tmpBodyPath -ErrorAction SilentlyContinue
-	}
-
-	if ($assign.ExitCode -ne 0) {
-		Write-Host "[WARNING] Failed to assign directory role to '$Email'." -ForegroundColor Yellow
-		if ($assign.Error) { Write-Host "  $($assign.Error)" -ForegroundColor Yellow }
-		if ($assign.Error -match 'Authorization_RequestDenied|Insufficient privileges') {
-			Write-Host "  [INFO] Assigning directory roles requires Entra role: Privileged Role Administrator or Global Administrator." -ForegroundColor Cyan
-			Write-Host "  [INFO] Re-login with an admin account (or activate via PIM) and retry role assignment." -ForegroundColor Cyan
-		}
-		return 'failed'
-	}
-
-	Write-Host "[SUCCESS] Assigned directory role to '$Email'." -ForegroundColor Green
-	return 'assigned'
-}
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -417,12 +466,6 @@ if (-not $GlobalAdmin -and (-not $Suffix -or -not $Suffix.Trim())) {
 	exit 1
 }
 
-Load-EnvConfig
-
-if ($Suffix) {
-	$Suffix = $Suffix.Trim()
-}
-
 Ensure-AzLogin
 
 $tenantId = (Invoke-AzCliSilent -Arguments @('account','show','--query','tenantId','-o','tsv')).Output
@@ -440,7 +483,6 @@ if ($GlobalAdmin) {
 }
 
 Ensure-CanCreateUsers -Identity $identityForChecks
-Warn-IfCannotManageDirectoryRoles -Identity $identityForChecks
 
 Write-Host "[INFO] Tenant: $tenantId" -ForegroundColor Cyan
 if ($signedInUser) {
@@ -448,11 +490,16 @@ if ($signedInUser) {
 }
 Write-Host "[INFO] Deployment suffix: $Suffix" -ForegroundColor Cyan
 
-$ProjectName = if ($env:PROJECT_NAME) { $env:PROJECT_NAME } else { 'eia' }
-$Environment = if ($env:ENVIRONMENT) { $env:ENVIRONMENT } else { 'dev' }
-$webAppName = if ($env:WEB_APP_NAME) { $env:WEB_APP_NAME } else { "app-$ProjectName-$Environment-$Suffix" }
+$ProjectName = 'eia'
+$KeyVaultName = "kv-$ProjectName-$Environment-$Suffix"
+$KeyVaultUrl = Resolve-KeyVaultUrl -KeyVaultName $KeyVaultName
+$UserProfileSecretName = Get-UserProfileSecretName
+$KeyVaultUrl = $KeyVaultUrl.TrimEnd('/')
+$webAppName = "app-$ProjectName-$Environment-$Suffix"
 $loginUrl = "https://$webAppName.azurewebsites.net"
 Write-Host "[INFO] Web app login URL: $loginUrl" -ForegroundColor Cyan
+Write-Host "[INFO] Key Vault URL: $KeyVaultUrl" -ForegroundColor Cyan
+Write-Host "[INFO] User job titles will be stored in Key Vault '$KeyVaultName' secret '$UserProfileSecretName'." -ForegroundColor Cyan
 
 $operatorIdentity = if ($signedInUser) { $signedInUser } else { $accountUser }
 $operatorFqdn = Get-FqdnFromIdentity -Identity $operatorIdentity
@@ -483,19 +530,7 @@ $added = 0
 $alreadyMember = 0
 $created = 0
 $failed = 0
-$roleAssigned = 0
-$roleAlreadyAssigned = 0
-$roleFailed = 0
-
-$defaultProfileEditorRoleName = 'EIAUserProfileEditor'
-$profileEditorRoleInput = Read-Host "Enter Entra custom role name for user profile updates [default: $defaultProfileEditorRoleName]"
-$profileEditorRoleName = if ($profileEditorRoleInput -and $profileEditorRoleInput.Trim()) { $profileEditorRoleInput.Trim() } else { $defaultProfileEditorRoleName }
-$profileEditorRoleId = Get-CustomDirectoryRoleDefinitionId -RoleName $profileEditorRoleName
-if ($profileEditorRoleId) {
-	Write-Host "[INFO] Directory role '$profileEditorRoleName' will be assigned to onboarded users." -ForegroundColor Cyan
-} else {
-	Write-Host "[WARNING] Directory role '$profileEditorRoleName' was not found. Run .\4.operation-dev.ps1 and select step 4 first." -ForegroundColor Yellow
-}
+$profileUpdated = 0
 
 while ($true) {
 	$username = Read-Host "New user username"
@@ -552,6 +587,25 @@ while ($true) {
 		continue
 	}
 
+	$currentJobTitle = Get-UserProfileJobTitle -KeyVaultName $KeyVaultName -SecretName $UserProfileSecretName -Email $email
+	if ($currentJobTitle) {
+		$jobTitlePrompt = "Enter job title for '$email' [default: $currentJobTitle]"
+	} else {
+		$jobTitlePrompt = "Enter job title for '$email' [required]"
+	}
+	$jobTitleInput = Read-Host $jobTitlePrompt
+	if ([string]::IsNullOrWhiteSpace($jobTitleInput)) {
+		if ($currentJobTitle) {
+			$jobTitle = $currentJobTitle
+		} else {
+			Write-Host "[ERROR] Job title is required for '$email'." -ForegroundColor Red
+			$failed++
+			continue
+		}
+	} else {
+		$jobTitle = $jobTitleInput.Trim()
+	}
+
 	$result = Add-UserToGroup -GroupId $group.id -UserId $user.id -Email $email
 	switch ($result) {
 		'added' { $added++ }
@@ -559,13 +613,14 @@ while ($true) {
 		default { $failed++ }
 	}
 
-	if ($profileEditorRoleId) {
-		$roleResult = Ensure-DirectoryRoleAssignment -RoleDefinitionId $profileEditorRoleId -PrincipalId $user.id -Email $email
-		switch ($roleResult) {
-			'assigned' { $roleAssigned++ }
-			'already-assigned' { $roleAlreadyAssigned++ }
-			default { $roleFailed++ }
-		}
+	try {
+		Set-UserProfileJobTitle -KeyVaultName $KeyVaultName -SecretName $UserProfileSecretName -Email $email -JobTitle $jobTitle
+		$profileUpdated++
+		Write-Host "[SUCCESS] Stored job title for '$email' in Key Vault." -ForegroundColor Green
+	} catch {
+		Write-Host "[ERROR] Failed to store job title for '$email' in Key Vault." -ForegroundColor Red
+		Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
+		$failed++
 	}
 
 	$moreUsersInput = Read-Host "Create more users? [Y/n]"
@@ -591,9 +646,8 @@ Write-Host "Processed users   : $processed" -ForegroundColor White
 Write-Host "Added             : $added" -ForegroundColor Green
 Write-Host "Already members   : $alreadyMember" -ForegroundColor Gray
 Write-Host "Created           : $created" -ForegroundColor Yellow
-Write-Host "Role assigned     : $roleAssigned" -ForegroundColor Green
-Write-Host "Role already set  : $roleAlreadyAssigned" -ForegroundColor Gray
-Write-Host "Role failed       : $roleFailed" -ForegroundColor Yellow
+Write-Host "Profile titles set : $profileUpdated" -ForegroundColor Green
 Write-Host "Failed            : $failed" -ForegroundColor Red
 Write-Host ""
 Write-Host "[INFO] Next step: assign this group to the web app enterprise application and enforce MFA via Conditional Access." -ForegroundColor Cyan
+

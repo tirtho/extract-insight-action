@@ -102,14 +102,7 @@ Run this with an account that has tenant admin rights required by the script.
 
 When prompted for steps, choose All unless you intentionally want partial setup.
 
-Step 4 in this script handles both:
-
-- Web app delegated Graph consent for User.Read and User.ReadWrite
-- Entra custom role creation for profile updates
-
-When prompted for custom role name, press Enter to use default:
-
-- EIAUserProfileEditor
+Step 4 in this script now verifies the Key Vault-backed profile store and reminds you that job titles are persisted in a Key Vault JSON secret keyed by email address.
 
 ## 9. Register Content Understanding Schemas
 
@@ -148,9 +141,9 @@ This script:
 - Ensures portal access group exists
 - Creates users if needed
 - Adds users to group
-- Assigns the profile-update custom role (default EIAUserProfileEditor)
+- Prompts for each user's job title and stores it in Key Vault as JSON keyed by email
 
-If role assignment or creation fails with insufficient privileges, rerun with an account that has Privileged Role Administrator or Global Administrator.
+If Key Vault access fails, rerun with an account that has Key Vault Secrets Officer or Key Vault Administrator on the vault.
 
 ## 13. Validate End To End
 
@@ -159,7 +152,7 @@ Validate with a newly onboarded user:
 1. Sign in to web app URL shown by onboarding script
 2. Confirm mailbox content is visible
 3. Update Job Title from account menu
-4. Verify header updates to Agentic plus job title
+4. Verify header updates to Agentic plus job title pulled from Key Vault
 
 ## 14. Operational Utilities
 
@@ -193,17 +186,12 @@ Optional helper before step 2:
 
 ## 16. Common Issues
 
-Authorization_RequestDenied during custom role create/assign:
+Authorization_RequestDenied during profile setup:
 
-- Cause: operator missing Entra admin role for directory role management
-- Fix: use account with Privileged Role Administrator or Global Administrator, then az logout and az login
+- Cause: the web app cannot read or write the Key Vault secret that stores user profiles
+- Fix: grant the web app identity Key Vault Secrets Officer on the vault and rerun the deployment
 
-Need admin approval prompt at web login:
+Profile update missing in the header:
 
-- Cause: app consent not granted for required delegated scopes
-- Fix: rerun deployment/4.operation-dev.ps1 Step 4 with tenant admin account
-
-Profile update denied for user:
-
-- Ensure user has EIAUserProfileEditor assigned
-- Ensure user signs out and signs in again after role assignment
+- Ensure the user's email exists as a key in the Key Vault JSON secret
+- Ensure the JSON entry includes a JobTitle property

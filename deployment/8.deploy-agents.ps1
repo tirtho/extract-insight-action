@@ -15,8 +15,7 @@
     .\8.deploy-agents.ps1 -Suffix 999
 #>
 param(
-    [Parameter(Mandatory=$true, HelpMessage="Suffix used during infrastructure deployment (e.g. 999)")]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix,
 
     [Parameter(HelpMessage="Maximum time to allow each Maven package run before failing. Use 0 to disable the timeout.")]
@@ -26,13 +25,27 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
+$Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
+
+$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+
+if ([string]::IsNullOrWhiteSpace($Suffix)) {
+    $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
+    $Suffix = if ([string]::IsNullOrWhiteSpace($SuffixInput)) { "1" } else { $SuffixInput.Trim() }
+} else {
+    $Suffix = $Suffix.Trim()
+}
+
+Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-$ProjectName       = if ($env:PROJECT_NAME)        { $env:PROJECT_NAME }        else { "eia" }
-$Environment       = if ($env:ENVIRONMENT)          { $env:ENVIRONMENT }          else { "dev" }
-$ResourceGroupName = if ($env:RESOURCE_GROUP_NAME)  { $env:RESOURCE_GROUP_NAME }  else { "rg-$ProjectName-$Environment-$Suffix" }
-$KeyVaultName      = if ($env:KEY_VAULT_NAME)       { $env:KEY_VAULT_NAME }       else { "kv-$ProjectName-$Environment-$Suffix" }
+$ProjectName       = "eia"
+$ResourceGroupName = "rg-$ProjectName-$Environment-$Suffix"
+$KeyVaultName      = "kv-$ProjectName-$Environment-$Suffix"
 
 $ScriptRoot  = $PSScriptRoot
 $RepoRoot    = Split-Path $ScriptRoot -Parent
@@ -180,7 +193,9 @@ do {
     }
 } while (-not $allValid)
 
-if ($selections -contains '2') { $selections = @('1') }
+$selectedAll = $selections -contains '2'
+
+if ($selectedAll) { $selections = @('1') }
 else { $selections = $selections | Select-Object -Unique }
 
 $targets = [System.Collections.Generic.List[hashtable]]::new()
@@ -199,11 +214,32 @@ Write-Host ">>> Step 2: Agent instructions" -ForegroundColor White
 Write-Host "[INFO] Instructions become the system prompt registered with the agent in Azure AI Foundry." -ForegroundColor DarkCyan
 Write-Host ""
 
+# Keep defaults per agent label. Add a new entry here whenever a new agent is added.
+$defaultInstructionsByAgent = @{
+    "eia-email-reviewer" = "You are a helpful assistant, who can read user data, detect anomalies, missing data, recommend action items, classify content into a multi-class hierarchy, summarize content, and provide insights."
+}
+
 foreach ($target in $targets) {
-    do {
-        $instr = (Read-Host "Instructions for '$($target.Label)' (multi-word OK, no quoting needed)").Trim()
-        if (-not $instr) { Write-Host "[ERROR] Instructions cannot be empty." -ForegroundColor Red }
-    } while (-not $instr)
+    $defaultInstruction = $defaultInstructionsByAgent[$target.Label]
+    if (-not $defaultInstruction) {
+        throw "No default instructions configured for agent '$($target.Label)'. Add it to `$defaultInstructionsByAgent in this script."
+    }
+
+    if ($selectedAll) {
+        $target.Instructions = $defaultInstruction
+        Write-Host "[INFO] '$($target.Label)' selected via 'All' - using default instructions." -ForegroundColor DarkCyan
+        continue
+    }
+
+    Write-Host "Default instructions for '$($target.Label)':" -ForegroundColor DarkCyan
+    Write-Host "  $defaultInstruction" -ForegroundColor Gray
+
+    $instrInput = Read-Host "Press [Enter] to keep default, or type edited instructions"
+    $instr = $instrInput.Trim()
+    if (-not $instr) {
+        $instr = $defaultInstruction
+    }
+
     $target.Instructions = $instr
 }
 

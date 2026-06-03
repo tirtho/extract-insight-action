@@ -13,25 +13,38 @@
     .\10.delete-all.ps1 -Suffix 999
 #>
 param(
-    [Parameter(Mandatory=$true, HelpMessage="Suffix used during infrastructure deployment (e.g. 999)")]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix
 )
 
 $ErrorActionPreference = "Stop"
 
+$LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
+$Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
+
+$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+
+if ([string]::IsNullOrWhiteSpace($Suffix)) {
+    $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
+    $Suffix = if ([string]::IsNullOrWhiteSpace($SuffixInput)) { "1" } else { $SuffixInput.Trim() }
+} else {
+    $Suffix = $Suffix.Trim()
+}
+
+Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+
 # =============================================================================
 # CONFIGURATION (mirrors deploy-infrastructure.ps1 naming conventions)
 # =============================================================================
-$ProjectName              = if ($env:PROJECT_NAME)              { $env:PROJECT_NAME }              else { "eia" }
-$Environment              = if ($env:ENVIRONMENT)               { $env:ENVIRONMENT }               else { "dev" }
+$ProjectName              = "eia"
 $ProjClean                = $ProjectName -replace '-',''
-$ResourceGroupName        = if ($env:RESOURCE_GROUP_NAME)       { $env:RESOURCE_GROUP_NAME }       else { "rg-$ProjectName-$Environment-$Suffix" }
-$KeyVaultName             = if ($env:KEY_VAULT_NAME)            { $env:KEY_VAULT_NAME }            else { "kv-$ProjectName-$Environment-$Suffix" }
-$ContentUnderstandingName = if ($env:CONTENT_UNDERSTANDING_NAME){ $env:CONTENT_UNDERSTANDING_NAME } else { "cu-$ProjectName-$Environment-$Suffix" }
-$AiFoundryName            = if ($env:AI_FOUNDRY_NAME)           { $env:AI_FOUNDRY_NAME }            else { "oai-$ProjectName-$Environment-$Suffix" }
-$GraphAppName             = if ($env:GRAPH_APP_NAME)            { $env:GRAPH_APP_NAME }             else { "$ProjectName-graph-api-$Environment" }
-$WebAppAuthAppName        = if ($env:WEBAPP_AUTH_APP_NAME)      { $env:WEBAPP_AUTH_APP_NAME }       else { "$ProjectName-webapp-auth-$Environment" }
+$ResourceGroupName        = "rg-$ProjectName-$Environment-$Suffix"
+$KeyVaultName             = "kv-$ProjectName-$Environment-$Suffix"
+$ContentUnderstandingName = "cu-$ProjectName-$Environment-$Suffix"
+$AiFoundryName            = "oai-$ProjectName-$Environment-$Suffix"
+$GraphAppName             = "$ProjectName-graph-api-$Environment"
+$WebAppAuthAppName        = "$ProjectName-webapp-auth-$Environment"
 
 $ScriptRoot = $PSScriptRoot
 $RepoRoot   = Split-Path $ScriptRoot -Parent
@@ -93,7 +106,7 @@ if ($acctState -ne "Enabled") {
     exit 1
 }
 
-$SubscriptionId = if ($env:SUBSCRIPTION_ID) { $env:SUBSCRIPTION_ID } else { (Invoke-AzCliSilent -Arguments @('account','show','--query','id','-o','tsv')).Output }
+$SubscriptionId = (Invoke-AzCliSilent -Arguments @('account','show','--query','id','-o','tsv')).Output
 if ($SubscriptionId) {
     Invoke-AzCliSilent -Arguments @('account','set','--subscription',$SubscriptionId) | Out-Null
 }

@@ -17,8 +17,7 @@
     .\operation-dev.ps1 -Suffix 999 -SkipSteps 3,4
 #>
 param(
-    [Parameter(Mandatory=$true, HelpMessage="Suffix used during infrastructure deployment (e.g. 999)")]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix,
 
     [ValidateSet('1','2','3','4','Network','RBAC','KVRefresh','GraphConsent')]
@@ -26,6 +25,21 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+$LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
+$Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
+
+$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+
+if ([string]::IsNullOrWhiteSpace($Suffix)) {
+    $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
+    $Suffix = if ([string]::IsNullOrWhiteSpace($SuffixInput)) { "1" } else { $SuffixInput.Trim() }
+} else {
+    $Suffix = $Suffix.Trim()
+}
+
+Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -160,230 +174,23 @@ function Invoke-ConfigReferenceRefresh {
     return $false
 }
 
-function Ensure-GraphDelegatedConsent {
-    param(
-        [Parameter(Mandatory=$true)][string]$ClientAppId,
-        [string[]]$Scopes = @('User.Read', 'User.ReadWrite')
-    )
-
-    if (-not $ClientAppId) {
-        return 'skipped'
-    }
-
-    $clientSpId = (Invoke-AzCliSilent -Arguments @('ad','sp','show','--id',$ClientAppId,'--query','id','-o','tsv')).Output
-    if (-not $clientSpId) {
-        throw "Could not resolve service principal for appId '$ClientAppId'."
-    }
-
-    $graphSpId = (Invoke-AzCliSilent -Arguments @('ad','sp','show','--id','00000003-0000-0000-c000-000000000000','--query','id','-o','tsv')).Output
-    if (-not $graphSpId) {
-        throw "Could not resolve Microsoft Graph service principal in this tenant."
-    }
-
-    $filter = [uri]::EscapeDataString("clientId eq '$clientSpId' and resourceId eq '$graphSpId' and consentType eq 'AllPrincipals'")
-    $grantResp = Invoke-AzCliSilent -Arguments @(
-        'rest','--method','GET',
-        '--uri',"https://graph.microsoft.com/v1.0/oauth2PermissionGrants?`$filter=$filter",
-        '-o','json'
-    )
-
-    if ($grantResp.ExitCode -ne 0 -or -not $grantResp.Output) {
-        throw "Failed to query existing delegated Graph consent grants. $($grantResp.Error)"
-    }
-
-    $grantObj = $grantResp.Output | ConvertFrom-Json
-    $existingGrant = if ($grantObj.value -and $grantObj.value.Count -gt 0) { $grantObj.value[0] } else { $null }
-
-    $existingScopes = @()
-    if ($existingGrant -and $existingGrant.scope) {
-        $existingScopes = @($existingGrant.scope -split ' ' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    }
-
-    $desiredScopes = @($Scopes | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique)
-    $mergedScopes = @($existingScopes + $desiredScopes | Sort-Object -Unique)
-
-    if (($existingScopes | Sort-Object -Unique) -join ' ' -eq $mergedScopes -join ' ') {
-        return 'unchanged'
-    }
-
-    $scopeString = $mergedScopes -join ' '
-
-    if ($existingGrant) {
-        $body = @{ scope = $scopeString } | ConvertTo-Json -Compress
-        $patch = Invoke-AzCliSilent -Arguments @(
-            'rest','--method','PATCH',
-            '--uri',"https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($existingGrant.id)",
-            '--headers','Content-Type=application/json',
-            '--body',$body,
-            '-o','json'
-        )
-        if ($patch.ExitCode -ne 0) {
-            throw "Failed to update delegated Graph consent grant. $($patch.Error)"
-        }
-        return 'updated'
-    }
-
-    $createBody = @{
-        clientId = $clientSpId
-        consentType = 'AllPrincipals'
-        principalId = $null
-        resourceId = $graphSpId
-        scope = $scopeString
-    } | ConvertTo-Json -Compress
-
-    $create = Invoke-AzCliSilent -Arguments @(
-        'rest','--method','POST',
-        '--uri','https://graph.microsoft.com/v1.0/oauth2PermissionGrants',
-        '--headers','Content-Type=application/json',
-        '--body',$createBody,
-        '-o','json'
-    )
-    if ($create.ExitCode -ne 0) {
-        throw "Failed to create delegated Graph consent grant. $($create.Error)"
-    }
-
-    return 'created'
-}
-
-function Ensure-EIAUserProfileEditorRole {
-    param(
-        [string]$RoleName = 'EIAUserProfileEditor'
-    )
-
-    $escapedRoleName = $RoleName.Replace("'", "''")
-    $filter = [uri]::EscapeDataString("displayName eq '$escapedRoleName'")
-    $list = Invoke-AzCliSilent -Arguments @(
-        'rest','--method','GET',
-        '--uri',"https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$filter=$filter",
-        '-o','json'
-    )
-
-    if ($list.ExitCode -ne 0 -or -not $list.Output) {
-        throw "Failed to query directory role definitions. $($list.Error)"
-    }
-
-    $parsed = $list.Output | ConvertFrom-Json
-    if ($parsed.value -and $parsed.value.Count -gt 0) {
-        return @{ Status = 'unchanged'; RoleId = $parsed.value[0].id; RoleName = $parsed.value[0].displayName }
-    }
-
-    $body = @{
-        displayName = $RoleName
-        description = 'Allows updating user job title/profile job info via Microsoft Graph.'
-        isEnabled = $true
-        rolePermissions = @(
-            @{
-                allowedResourceActions = @('microsoft.directory/users/jobInfo/update')
-            }
-        )
-    } | ConvertTo-Json -Depth 6 -Compress
-
-    $tmpBodyPath = Join-Path $env:TEMP ("eia-role-definition-" + [guid]::NewGuid().ToString('N') + ".json")
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($tmpBodyPath, $body, $utf8NoBom)
-
-    try {
-        $create = Invoke-AzCliSilent -Arguments @(
-            'rest','--method','POST',
-            '--uri','https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions',
-            '--headers','Content-Type=application/json',
-            '--body',"@$tmpBodyPath",
-            '-o','json'
-        )
-    } finally {
-        Remove-Item $tmpBodyPath -ErrorAction SilentlyContinue
-    }
-
-    if ($create.ExitCode -ne 0 -or -not $create.Output) {
-        throw "Failed to create directory custom role '$RoleName'. $($create.Error)"
-    }
-
-    $created = $create.Output | ConvertFrom-Json
-    return @{ Status = 'created'; RoleId = $created.id; RoleName = $created.displayName }
-}
-
-function Resolve-WebAppClientId {
-    param(
-        [Parameter(Mandatory=$true)][string]$WebAppName,
-        [Parameter(Mandatory=$true)][string]$ResourceGroupName,
-        [Parameter(Mandatory=$true)][string]$DefaultKeyVaultName
-    )
-
-    # App Service authsettingsV2 path (when built-in auth is enabled)
-    $clientId = (Invoke-AzCliSilent -Arguments @(
-        'webapp','auth','show',
-        '--name',$WebAppName,
-        '--resource-group',$ResourceGroupName,
-        '--query','identityProviders.azureActiveDirectory.registration.clientId',
-        '-o','tsv'
-    )).Output
-    if ($clientId) { return $clientId }
-
-    # App Service authsettings (v1 schema)
-    $clientId = (Invoke-AzCliSilent -Arguments @(
-        'webapp','auth','show',
-        '--name',$WebAppName,
-        '--resource-group',$ResourceGroupName,
-        '--query','clientId',
-        '-o','tsv'
-    )).Output
-    if ($clientId) { return $clientId }
-
-    # Spring app setting convention used by this repo
-    $rawSettingValue = (Invoke-AzCliSilent -Arguments @(
-        'webapp','config','appsettings','list',
-        '--name',$WebAppName,
-        '--resource-group',$ResourceGroupName,
-        '--query',"[?name=='WEBAPP_CLIENT_ID'].value | [0]",
-        '-o','tsv'
-    )).Output
-
-    if (-not $rawSettingValue) { return $null }
-
-    # If setting is a Key Vault reference, resolve the secret value.
-    if ($rawSettingValue -match '^@Microsoft\.KeyVault\(') {
-        $vaultName = $DefaultKeyVaultName
-        $secretName = $null
-
-        if ($rawSettingValue -match 'VaultName=([^;\)]+)') {
-            $vaultName = $matches[1]
-        }
-        if ($rawSettingValue -match 'SecretName=([^;\)]+)') {
-            $secretName = $matches[1]
-        }
-
-        if (-not $vaultName -or -not $secretName) {
-            return $null
-        }
-
-        return (Invoke-AzCliSilent -Arguments @(
-            'keyvault','secret','show',
-            '--vault-name',$vaultName,
-            '--name',$secretName,
-            '--query','value',
-            '-o','tsv'
-        )).Output
-    }
-
-    return $rawSettingValue
-}
 
 # =============================================================================
 # CONFIGURATION (must match deploy-infrastructure.ps1)
 # =============================================================================
 $ProjectName        = if ($env:PROJECT_NAME)        { $env:PROJECT_NAME }        else { "eia" }
-$Environment        = if ($env:ENVIRONMENT)         { $env:ENVIRONMENT }         else { "dev" }
+$Environment        = $Environment
 $ProjClean          = $ProjectName -replace '-',''
-$ResourceGroupName  = if ($env:RESOURCE_GROUP_NAME) { $env:RESOURCE_GROUP_NAME } else { "rg-$ProjectName-$Environment-$Suffix" }
-$StorageAccountName = if ($env:STORAGE_ACCOUNT_NAME){ $env:STORAGE_ACCOUNT_NAME }else { "st$ProjClean$Environment$Suffix" }
-$CosmosDbAccountName = if ($env:COSMOS_DB_ACCOUNT_NAME) { $env:COSMOS_DB_ACCOUNT_NAME } else { "cosmos-$ProjectName-$Environment-$Suffix" }
-$ContentUnderstandingName = if ($env:CONTENT_UNDERSTANDING_NAME) { $env:CONTENT_UNDERSTANDING_NAME } else { "cu-$ProjectName-$Environment-$Suffix" }
-$AiFoundryName       = if ($env:AI_FOUNDRY_NAME)     { $env:AI_FOUNDRY_NAME }     else { "oai-$ProjectName-$Environment-$Suffix" }
-$KeyVaultName        = if ($env:KEY_VAULT_NAME)      { $env:KEY_VAULT_NAME }      else { "kv-$ProjectName-$Environment-$Suffix" }
-$ServiceBusNamespace = if ($env:SERVICE_BUS_NAMESPACE) { $env:SERVICE_BUS_NAMESPACE } else { "sb-$ProjectName-$Environment-$Suffix" }
-$FuncMailboxName      = if ($env:FUNCTION_APP_MAILBOX_NAME) { $env:FUNCTION_APP_MAILBOX_NAME } else { "func-mailbox-$ProjectName-$Environment-$Suffix" }
-$FuncCuQueueDbName    = if ($env:FUNCTION_APP_CU_QUEUE_DB_NAME) { $env:FUNCTION_APP_CU_QUEUE_DB_NAME } else { "func-cuqueuedb-$ProjectName-$Environment-$Suffix" }
-$WebAppName           = if ($env:WEB_APP_NAME) { $env:WEB_APP_NAME } else { "app-$ProjectName-$Environment-$Suffix" }
+$ResourceGroupName  = "rg-$ProjectName-$Environment-$Suffix"
+$StorageAccountName = "st$ProjClean$Environment$Suffix"
+$CosmosDbAccountName = "cosmos-$ProjectName-$Environment-$Suffix"
+$ContentUnderstandingName = "cu-$ProjectName-$Environment-$Suffix"
+$AiFoundryName       = "oai-$ProjectName-$Environment-$Suffix"
+$KeyVaultName        = "kv-$ProjectName-$Environment-$Suffix"
+$ServiceBusNamespace = "sb-$ProjectName-$Environment-$Suffix"
+$FuncMailboxName      = "func-mailbox-$ProjectName-$Environment-$Suffix"
+$FuncCuQueueDbName    = "func-cuqueuedb-$ProjectName-$Environment-$Suffix"
+$WebAppName           = "app-$ProjectName-$Environment-$Suffix"
 
 $skipStep1 = $false
 $skipStep2 = $false
@@ -639,7 +446,7 @@ $CosmosDbAccountId = (Invoke-AzCliSilent -Arguments @('cosmosdb','show','--name'
 $KeyVaultId = (Invoke-AzCliSilent -Arguments @('keyvault','show','--name',$KeyVaultName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 $ContentUnderstandingId = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 $AiFoundryId          = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
-$AiFoundryProjectName = if ($env:AI_FOUNDRY_PROJECT_NAME) { $env:AI_FOUNDRY_PROJECT_NAME } else { "proj-$ProjectName-$Environment-$Suffix" }
+$AiFoundryProjectName = "proj-$ProjectName-$Environment-$Suffix"
 $AiFoundryProjectId   = "$AiFoundryId/projects/$AiFoundryProjectName"
 $ServiceBusId = (Invoke-AzCliSilent -Arguments @('servicebus','namespace','show','--name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 
@@ -809,70 +616,18 @@ Write-Host ">>> Step 4: Ensure Graph Delegated Admin Consent (Web App)" -Foregro
 Write-Host "  [SKIPPED] Step 4 skipped by -SkipSteps" -ForegroundColor Yellow
 } else {
 Write-Host ""
-Write-Host ">>> Step 4: Ensure Graph Delegated Admin Consent (Web App)" -ForegroundColor White
-
-Warn-IfCannotManageDirectoryRoles
-
-try {
-    $defaultRoleName = 'EIAUserProfileEditor'
-    $roleNameInput = Read-Host "Enter Entra custom role name for profile updates [default: $defaultRoleName]"
-    $roleName = if ($roleNameInput -and $roleNameInput.Trim()) { $roleNameInput.Trim() } else { $defaultRoleName }
-    $roleEnsure = Ensure-EIAUserProfileEditorRole -RoleName $roleName
-    if ($roleEnsure.Status -eq 'created') {
-        Write-Host "  [SUCCESS] Created Entra custom role '$($roleEnsure.RoleName)' for job title/profile updates." -ForegroundColor Green
-        $directoryRoleChanges++
-    } else {
-        Write-Host "  [OK] Entra custom role '$($roleEnsure.RoleName)' already exists." -ForegroundColor Gray
-    }
-} catch {
-    $roleError = $_.Exception.Message
-    Write-Host "  [WARNING] Could not ensure Entra custom role for profile updates." -ForegroundColor Yellow
-    Write-Host "    $roleError" -ForegroundColor Yellow
-    if ($roleError -match 'Authorization_RequestDenied|Insufficient privileges') {
-        Write-Host "  [INFO] Creating directory custom roles requires Entra role: Privileged Role Administrator or Global Administrator." -ForegroundColor Cyan
-        Write-Host "  [INFO] Use an admin account (or activate role via PIM), run 'az logout' and 'az login', then rerun Step 4." -ForegroundColor Cyan
-        Write-Host "  [INFO] If the role already exists, you can continue and use 11.admin-user-access.ps1 to assign it to users." -ForegroundColor Cyan
-    }
-}
-
-$webAppClientId = Resolve-WebAppClientId -WebAppName $WebAppName -ResourceGroupName $ResourceGroupName -DefaultKeyVaultName $KeyVaultName
-
-if (-not $webAppClientId) {
-    Write-Host "  [WARNING] Could not resolve web app OIDC clientId for '$WebAppName'; skipping Graph delegated consent step." -ForegroundColor Yellow
-} else {
-    try {
-        $consentStatus = Ensure-GraphDelegatedConsent -ClientAppId $webAppClientId -Scopes @('User.Read', 'User.ReadWrite')
-        switch ($consentStatus) {
-            'created' {
-                Write-Host "  [SUCCESS] Created delegated Graph admin consent for User.Read and User.ReadWrite." -ForegroundColor Green
-                $graphConsentChanges++
-            }
-            'updated' {
-                Write-Host "  [SUCCESS] Updated delegated Graph admin consent to include User.Read and User.ReadWrite." -ForegroundColor Green
-                $graphConsentChanges++
-            }
-            'unchanged' {
-                Write-Host "  [OK] Delegated Graph admin consent already includes User.Read and User.ReadWrite." -ForegroundColor Gray
-            }
-            default {
-                Write-Host "  [INFO] Graph delegated consent step skipped." -ForegroundColor Gray
-            }
-        }
-    } catch {
-        Write-Host "  [WARNING] Could not ensure Graph delegated consent automatically." -ForegroundColor Yellow
-        Write-Host "    $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "  [INFO] Manual fallback: App registrations -> $WebAppName app -> API permissions -> Grant admin consent." -ForegroundColor Cyan
-    }
-}
+Write-Host ">>> Step 4: User Profile Storage (Key Vault)" -ForegroundColor White
+Write-Host "  [OK] User job titles are stored in Key Vault secret 'UserProfiles' as JSON keyed by email address." -ForegroundColor Green
+Write-Host "  [OK] No Entra custom role or Graph delegated consent is required for profile updates." -ForegroundColor Green
 }
 
 # =============================================================================
 # SUMMARY
 # =============================================================================
 Write-Host ""
-$totalChanges = $networkChanges + $newAssignments + $graphConsentChanges + $directoryRoleChanges
+$totalChanges = $networkChanges + $newAssignments
 if ($totalChanges -gt 0) {
-    Write-Host "[SUCCESS] Dev environment configured. $networkChanges network change(s), $newAssignments new RBAC assignment(s), $graphConsentChanges Graph consent change(s), $directoryRoleChanges directory role change(s)." -ForegroundColor Green
+    Write-Host "[SUCCESS] Dev environment configured. $networkChanges network change(s), $newAssignments new RBAC assignment(s)." -ForegroundColor Green
     if ($newAssignments -gt 0) {
         Write-Host "[INFO] RBAC propagation may take up to 5 minutes." -ForegroundColor Cyan
     }

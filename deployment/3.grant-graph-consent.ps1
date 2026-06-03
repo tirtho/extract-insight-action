@@ -12,12 +12,26 @@
     .\grant-graph-consent.ps1 -Suffix 999
 #>
 param(
-    [Parameter(Mandatory=$true, HelpMessage="Suffix used during infrastructure deployment (e.g. 999)")]
-    [ValidateNotNullOrEmpty()]
+    [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix
 )
 
 $ErrorActionPreference = "Stop"
+
+$LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
+$Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
+
+$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+
+if ([string]::IsNullOrWhiteSpace($Suffix)) {
+    $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
+    $Suffix = if ([string]::IsNullOrWhiteSpace($SuffixInput)) { "1" } else { $SuffixInput.Trim() }
+} else {
+    $Suffix = $Suffix.Trim()
+}
+
+Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
 
 # Helper: run az CLI via .NET Process to reliably capture stdout + stderr
 # (Bypasses PowerShell's error-stream handling which can swallow native stderr)
@@ -54,9 +68,8 @@ function Invoke-Az {
 # =============================================================================
 # CONFIGURATION (must match deploy-infrastructure.ps1)
 # =============================================================================
-$ProjectName = if ($env:PROJECT_NAME) { $env:PROJECT_NAME } else { "eia" }
-$Environment = if ($env:ENVIRONMENT)  { $env:ENVIRONMENT }  else { "dev" }
-$GraphAppName = if ($env:GRAPH_APP_NAME) { $env:GRAPH_APP_NAME } else { "$ProjectName-graph-api-$Environment" }
+$ProjectName = "eia"
+$GraphAppName = "$ProjectName-graph-api-$Environment"
 
 # =============================================================================
 # PRE-FLIGHT: Confirm tenant admin role
@@ -94,6 +107,48 @@ if ($accountResult.ExitCode -ne 0 -or -not $accountResult.Output) {
 }
 $account = $accountResult.Output | ConvertFrom-Json
 Write-Host "Logged in as: $($account.user) (Subscription: $($account.name))" -ForegroundColor Gray
+
+# =============================================================================
+# Check Exchange Online service principal (required for mailbox polling)
+# =============================================================================
+Write-Host ""
+Write-Host "============================================" -ForegroundColor Cyan
+Write-Host "  Exchange Online Service Principal Check" -ForegroundColor Cyan
+Write-Host "============================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Checking Exchange Online service principal (required for mailbox polling)..." -ForegroundColor Gray
+
+$exoAppId  = '00000002-0000-0ff1-ce00-000000000000'
+$exoResult = Invoke-Az -Arguments @('ad','sp','show','--id',$exoAppId,'--query','{id:id, accountEnabled:accountEnabled, displayName:displayName}','-o','json')
+
+if ($exoResult.ExitCode -ne 0 -or -not $exoResult.Output) {
+    Write-Host "[WARNING] Could not query Exchange Online service principal. Skipping this check." -ForegroundColor Yellow
+    if ($exoResult.Stderr) { Write-Host "  $($exoResult.Stderr)" -ForegroundColor Yellow }
+} else {
+    $exoSp = $exoResult.Output | ConvertFrom-Json
+    if ($exoSp.accountEnabled -eq $false) {
+        Write-Host "[WARNING] Exchange Online service principal ('$($exoSp.displayName)') is DISABLED." -ForegroundColor Yellow
+        Write-Host "  This will block mailbox polling (AADSTS500014 errors in PollMailbox)." -ForegroundColor Yellow
+        Write-Host ""
+        $reenableAnswer = Read-Host "Do you want to re-enable it now? (y/N)"
+        if ($reenableAnswer -in @('y','Y','yes','Yes','YES')) {
+            Write-Host "Re-enabling Exchange Online service principal..." -ForegroundColor Gray
+            $enableResult = Invoke-Az -Arguments @('ad','sp','update','--id',$exoAppId,'--set','accountEnabled=true')
+            if ($enableResult.ExitCode -eq 0) {
+                Write-Host "[OK] Exchange Online service principal re-enabled successfully." -ForegroundColor Green
+            } else {
+                Write-Host "[ERROR] Failed to re-enable Exchange Online service principal." -ForegroundColor Red
+                if ($enableResult.Stderr) { Write-Host "  $($enableResult.Stderr)" -ForegroundColor Red }
+                Write-Host "[HINT] This requires Global Administrator or Application Administrator role." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "[SKIPPED] Exchange Online service principal was NOT re-enabled." -ForegroundColor Yellow
+            Write-Host "  Run manually: az ad sp update --id $exoAppId --set accountEnabled=true" -ForegroundColor Cyan
+        }
+    } else {
+        Write-Host "[OK] Exchange Online service principal is enabled." -ForegroundColor Green
+    }
+}
 
 # =============================================================================
 # Look up the app registration
