@@ -7,12 +7,18 @@
     Cognitive Services), deletes the Graph API app registration and its
     service principal, and cleans up the local env.bat file.
     This is a destructive, irreversible operation.
+.PARAMETER Environment
+    Optional. Environment name (default: dev).
 .PARAMETER Suffix
-    Required. The same suffix used when running deploy-infrastructure.ps1.
+    Optional. The same suffix used when running deploy-infrastructure.ps1.
 .USAGE
     .\10.delete-all.ps1 -Suffix 999
+    .\10.delete-all.ps1 -Environment dev -Suffix 999
 #>
 param(
+    [Parameter(HelpMessage="Environment (default: dev, example: dev)")]
+    [string]$Environment,
+
     [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix
 )
@@ -22,8 +28,12 @@ $ErrorActionPreference = "Stop"
 $LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
 $Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
 
-$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
-$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+if ([string]::IsNullOrWhiteSpace($Environment)) {
+    $EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+    $Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+} else {
+    $Environment = $Environment.Trim().ToLowerInvariant()
+}
 
 if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
@@ -32,12 +42,13 @@ if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $Suffix = $Suffix.Trim()
 }
 
-Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+$ProjectName = "eia"
+
+Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
 
 # =============================================================================
 # CONFIGURATION (mirrors deploy-infrastructure.ps1 naming conventions)
 # =============================================================================
-$ProjectName              = "eia"
 $ProjClean                = $ProjectName -replace '-',''
 $ResourceGroupName        = "rg-$ProjectName-$Environment-$Suffix"
 $KeyVaultName             = "kv-$ProjectName-$Environment-$Suffix"

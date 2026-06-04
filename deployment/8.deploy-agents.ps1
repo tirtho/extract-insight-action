@@ -7,14 +7,20 @@
     instructions, builds each JAR with Maven (also updating project-lib/java
     via the copy-to-project-lib profile), then runs the provisioning main()
     to register the agent in Azure AI Foundry.
+.PARAMETER Environment
+    Optional. Environment name (default: dev).
 .PARAMETER Suffix
-    Required. The same suffix used when running deploy-infrastructure.ps1.
+    Optional. The same suffix used when running deploy-infrastructure.ps1.
 .PARAMETER MavenTimeoutMinutes
     Maximum time to allow each Maven build before failing (default: 15).
 .USAGE
     .\8.deploy-agents.ps1 -Suffix 999
+    .\8.deploy-agents.ps1 -Environment dev -Suffix 999
 #>
 param(
+    [Parameter(HelpMessage="Environment (default: dev, example: dev)")]
+    [string]$Environment,
+
     [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix,
 
@@ -28,8 +34,12 @@ $ErrorActionPreference = "Stop"
 $LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
 $Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
 
-$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
-$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+if ([string]::IsNullOrWhiteSpace($Environment)) {
+    $EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+    $Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+} else {
+    $Environment = $Environment.Trim().ToLowerInvariant()
+}
 
 if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
@@ -38,12 +48,13 @@ if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $Suffix = $Suffix.Trim()
 }
 
-Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+$ProjectName = "eia"
+
+Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-$ProjectName       = "eia"
 $ResourceGroupName = "rg-$ProjectName-$Environment-$Suffix"
 $KeyVaultName      = "kv-$ProjectName-$Environment-$Suffix"
 

@@ -6,17 +6,23 @@
     Enables public network access on Cosmos DB and Storage, and grants the
     logged-in user read/write/admin RBAC roles on both resources.
     Run this after deploy-infrastructure.ps1 has completed successfully.
+.PARAMETER Environment
+    Optional. Environment name (default: dev).
 .PARAMETER Suffix
-    Required. The same suffix used when running deploy-infrastructure.ps1.
+    Optional. The same suffix used when running deploy-infrastructure.ps1.
 .PARAMETER SkipSteps
     Optional. Skip selected setup steps using numbers or aliases.
     If not provided, the script prompts you to choose which steps to run.
       1/Network, 2/RBAC, 3/KVRefresh, 4/GraphConsent
 .USAGE
     .\operation-dev.ps1 -Suffix 999
+    .\operation-dev.ps1 -Environment dev -Suffix 999
     .\operation-dev.ps1 -Suffix 999 -SkipSteps 3,4
 #>
 param(
+    [Parameter(HelpMessage="Environment (default: dev, example: dev)")]
+    [string]$Environment,
+
     [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix,
 
@@ -29,8 +35,12 @@ $ErrorActionPreference = "Stop"
 $LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
 $Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
 
-$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
-$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+if ([string]::IsNullOrWhiteSpace($Environment)) {
+    $EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+    $Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+} else {
+    $Environment = $Environment.Trim().ToLowerInvariant()
+}
 
 if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
@@ -39,7 +49,9 @@ if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $Suffix = $Suffix.Trim()
 }
 
-Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+$ProjectNameForLog = if ($env:PROJECT_NAME) { $env:PROJECT_NAME } else { "eia" }
+
+Write-Host "[INFO] Deployment key: $ProjectNameForLog-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -80,7 +92,7 @@ function Get-CurrentDirectoryRoleNames {
     return @()
 }
 
-function Warn-IfCannotManageDirectoryRoles {
+function Write-DirectoryRoleWarning {
     $roleNames = Get-CurrentDirectoryRoleNames
     if ($null -eq $roleNames) {
         Write-Host "  [WARNING] Could not verify Entra directory roles for the signed-in operator." -ForegroundColor Yellow
@@ -98,7 +110,7 @@ function Warn-IfCannotManageDirectoryRoles {
     }
 }
 
-function Ensure-RoleAssignment {
+function Add-RoleAssignmentIfMissing {
     param([string]$Assignee, [string]$Role, [string]$Scope)
     $existing = Invoke-AzCliSilent -Arguments @('role','assignment','list','--assignee',$Assignee,'--role',$Role,'--scope',$Scope,'--query','[0].id','-o','tsv')
     if ($existing.ExitCode -eq 0 -and $existing.Output) {
@@ -108,7 +120,7 @@ function Ensure-RoleAssignment {
     return $false  # newly created
 }
 
-function Ensure-CosmosRoleAssignment {
+function Add-CosmosRoleAssignmentIfMissing {
     param([string]$AccountName, [string]$ResourceGroup, [string]$RoleDefinitionId, [string]$PrincipalId, [string]$Scope)
     $existing = Invoke-AzCliSilent -Arguments @('cosmosdb','sql','role','assignment','list',
         '--account-name',$AccountName,'--resource-group',$ResourceGroup,
@@ -179,7 +191,6 @@ function Invoke-ConfigReferenceRefresh {
 # CONFIGURATION (must match deploy-infrastructure.ps1)
 # =============================================================================
 $ProjectName        = if ($env:PROJECT_NAME)        { $env:PROJECT_NAME }        else { "eia" }
-$Environment        = $Environment
 $ProjClean          = $ProjectName -replace '-',''
 $ResourceGroupName  = "rg-$ProjectName-$Environment-$Suffix"
 $StorageAccountName = "st$ProjClean$Environment$Suffix"
@@ -237,8 +248,6 @@ if ($SkipSteps.Count -gt 0) {
 
 $networkChanges = 0
 $newAssignments = 0
-$graphConsentChanges = 0
-$directoryRoleChanges = 0
 $MyPublicIp = '(skipped)'
 
 # =============================================================================
@@ -321,13 +330,13 @@ try {
 Write-Host "[OK] Your public IP: $MyPublicIp" -ForegroundColor Green
 
 # Helper: normalize a comma-separated IP list for comparison (sort + dedupe + trim)
-function Normalize-IpList([string]$IpCsv) {
+function ConvertTo-CanonicalIpList([string]$IpCsv) {
     if (-not $IpCsv) { return '' }
     ($IpCsv -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique) -join ','
 }
 
 # Helper: normalize bypass string for comparison (sort components)
-function Normalize-Bypass([string]$Bypass) {
+function ConvertTo-CanonicalBypass([string]$Bypass) {
     if (-not $Bypass) { return '' }
     ($Bypass -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object) -join ','
 }
@@ -340,8 +349,8 @@ $cosmosState = Invoke-AzCliSilent -Arguments @('cosmosdb','show','--name',$Cosmo
     '--resource-group',$ResourceGroupName,
     '--query','{publicNetworkAccess:publicNetworkAccess, ipRules:ipRules[].ipAddressOrRange}','-o','json')
 $cosmosJson  = $cosmosState.Output | ConvertFrom-Json
-$currentCosmosIps = if ($cosmosJson.ipRules) { Normalize-IpList (($cosmosJson.ipRules) -join ',') } else { '' }
-$desiredCosmosIps = Normalize-IpList $DesiredCosmosIpFilter
+$currentCosmosIps = if ($cosmosJson.ipRules) { ConvertTo-CanonicalIpList (($cosmosJson.ipRules) -join ',') } else { '' }
+$desiredCosmosIps = ConvertTo-CanonicalIpList $DesiredCosmosIpFilter
 $cosmosNeedsUpdate = -not ($cosmosJson.publicNetworkAccess -eq 'Enabled' -and $currentCosmosIps -eq $desiredCosmosIps)
 
 Write-Host "[INFO] Checking Storage Account network rules: $StorageAccountName" -ForegroundColor Cyan
@@ -358,8 +367,8 @@ $kvState = Invoke-AzCliSilent -Arguments @('keyvault','show','--name',$KeyVaultN
     '--query','{publicNetworkAccess:properties.publicNetworkAccess, defaultAction:properties.networkAcls.defaultAction, bypass:properties.networkAcls.bypass}',
     '-o','json')
 $kvJson = $kvState.Output | ConvertFrom-Json
-$currentKvBypass = Normalize-Bypass $kvJson.bypass
-$desiredKvBypass = Normalize-Bypass 'AzureServices'
+$currentKvBypass = ConvertTo-CanonicalBypass $kvJson.bypass
+$desiredKvBypass = ConvertTo-CanonicalBypass 'AzureServices'
 # Allow-by-default: Flex Consumption function apps have dynamic outbound IPs that
 # cannot be predicted, and the AzureServices bypass does NOT cover App Service /
 # Functions Key Vault references or SDK calls.  Until VNet integration + private

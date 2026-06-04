@@ -22,9 +22,13 @@
 .USAGE
 	.\11.admin-user-access.ps1 -GlobalAdmin
 	.\11.admin-user-access.ps1 -Suffix 1
+	.\11.admin-user-access.ps1 -Environment dev -Suffix 1
 #>
 
 param(
+	[Parameter(HelpMessage="Environment (default: dev, example: dev)")]
+	[string]$Environment,
+
 	[Parameter(HelpMessage="Suffix used during infrastructure deployment (e.g. 1)")]
 	[string]$Suffix,
 
@@ -36,8 +40,20 @@ $ErrorActionPreference = "Stop"
 $LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
 $Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
 
-$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
-$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+$ProjectName = 'eia'
+
+if (-not $GlobalAdmin) {
+	if ([string]::IsNullOrWhiteSpace($Environment)) {
+		$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+		$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+	} else {
+		$Environment = $Environment.Trim().ToLowerInvariant()
+	}
+} elseif ([string]::IsNullOrWhiteSpace($Environment)) {
+	$Environment = 'dev'
+} else {
+	$Environment = $Environment.Trim().ToLowerInvariant()
+}
 
 if (-not $GlobalAdmin) {
 	if ([string]::IsNullOrWhiteSpace($Suffix)) {
@@ -49,7 +65,7 @@ if (-not $GlobalAdmin) {
 }
 
 if (-not $GlobalAdmin) {
-	Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+	Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
 }
 
 function Invoke-AzCliSilent {
@@ -64,7 +80,7 @@ function Invoke-AzCliSilent {
 	return @{ ExitCode = $code; Output = $stdout.Trim(); Error = $stderr.Trim() }
 }
 
-function Ensure-AzLogin {
+function Confirm-AzLogin {
 	$acctState = Invoke-AzCliSilent -Arguments @('account','show','--query','state','-o','tsv')
 	if ($acctState.ExitCode -ne 0 -or $acctState.Output -ne 'Enabled') {
 		Write-Host "[ERROR] Not logged in to Azure CLI. Run 'az login' first." -ForegroundColor Red
@@ -96,7 +112,7 @@ function Get-CurrentDirectoryRoleNames {
 	return @()
 }
 
-function Ensure-CanCreateUsers {
+function Confirm-CanCreateUsers {
 	param([string]$Identity)
 
 	$roleNames = Get-CurrentDirectoryRoleNames
@@ -141,6 +157,21 @@ function Resolve-KeyVaultUrl {
 	return $null
 }
 
+function ConvertTo-PlainText {
+	param([SecureString]$SecureValue)
+
+	if ($null -eq $SecureValue) {
+		return $null
+	}
+
+	$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
+	try {
+		return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+	} finally {
+		[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+	}
+}
+
 function Get-UserProfileSecretName {
 	$configured = $env:USER_PROFILE_SECRET_NAME
 	if ($configured -and -not [string]::IsNullOrWhiteSpace($configured)) {
@@ -150,7 +181,7 @@ function Get-UserProfileSecretName {
 	return 'UserProfiles'
 }
 
-function Normalize-ProfileEmail {
+function ConvertTo-ProfileEmail {
 	param([string]$Email)
 
 	if (-not $Email) {
@@ -189,7 +220,7 @@ function Read-UserProfileJobTitles {
 	}
 
 	foreach ($property in $root.PSObject.Properties) {
-		$emailKey = Normalize-ProfileEmail -Email $property.Name
+		$emailKey = ConvertTo-ProfileEmail -Email $property.Name
 		if (-not $emailKey) {
 			continue
 		}
@@ -238,7 +269,7 @@ function Get-UserProfileJobTitle {
 		[string]$Email
 	)
 
-	$emailKey = Normalize-ProfileEmail -Email $Email
+	$emailKey = ConvertTo-ProfileEmail -Email $Email
 	if (-not $emailKey) {
 		return $null
 	}
@@ -259,7 +290,7 @@ function Set-UserProfileJobTitle {
 		[string]$JobTitle
 	)
 
-	$emailKey = Normalize-ProfileEmail -Email $Email
+	$emailKey = ConvertTo-ProfileEmail -Email $Email
 	if (-not $emailKey) {
 		throw "An email address is required to store a user profile title."
 	}
@@ -292,7 +323,7 @@ function Get-FqdnFromIdentity {
 	return $null
 }
 
-function To-MailNickname {
+function ConvertTo-MailNickname {
 	param([string]$GroupName)
 	$nick = ($GroupName.ToLower() -replace '[^a-z0-9-]', '-')
 	$nick = ($nick -replace '-{2,}', '-')
@@ -313,7 +344,7 @@ function Get-OrCreateGroup {
 		}
 	}
 
-	$mailNickname = To-MailNickname -GroupName $GroupName
+	$mailNickname = ConvertTo-MailNickname -GroupName $GroupName
 	Write-Host "[INFO] Creating group '$GroupName'..." -ForegroundColor Cyan
 	$created = Invoke-AzCliSilent -Arguments @(
 		'ad','group','create',
@@ -343,19 +374,25 @@ function Resolve-UserByUpn {
 	return $null
 }
 
-function Create-User {
+function New-EntraUser {
 	param(
 		[string]$Username,
 		[string]$Email,
-		[string]$Password
+		[SecureString]$Password
 	)
+
+	$passwordPlain = ConvertTo-PlainText -SecureValue $Password
+	if ([string]::IsNullOrWhiteSpace($passwordPlain)) {
+		Write-Host "[ERROR] Password is required to create '$Email'." -ForegroundColor Red
+		return $null
+	}
 
 	$created = Invoke-AzCliSilent -Arguments @(
 		'ad','user','create',
 		'--display-name',$Username,
 		'--user-principal-name',$Email,
 		'--mail-nickname',$Username,
-		'--password',$Password,
+		'--password',$passwordPlain,
 		'--force-change-password-next-sign-in','true',
 		'--query','{id:id,mail:mail,userPrincipalName:userPrincipalName,userType:userType}',
 		'-o','json'
@@ -368,6 +405,7 @@ function Create-User {
 	}
 
 	Write-Host "[SUCCESS] Created user '$Email'." -ForegroundColor Green
+	$passwordPlain = $null
 	return ($created.Output | ConvertFrom-Json)
 }
 
@@ -399,16 +437,18 @@ function New-TemporaryPassword {
 function Show-NewUserInstructions {
 	param(
 		[string]$Email,
-		[string]$TemporaryPassword,
+		[SecureString]$TemporaryPassword,
 		[string]$LoginUrl
 	)
+
+	$temporaryPasswordPlain = ConvertTo-PlainText -SecureValue $TemporaryPassword
 
 	Write-Host "" 
 	Write-Host "------------------------------------------------------------" -ForegroundColor Cyan
 	Write-Host "  New User Instructions" -ForegroundColor Cyan
 	Write-Host "------------------------------------------------------------" -ForegroundColor Cyan
 	Write-Host "1. Username: $Email" -ForegroundColor White
-	Write-Host "2. Temporary password: $TemporaryPassword" -ForegroundColor White
+	Write-Host "2. Temporary password: $temporaryPasswordPlain" -ForegroundColor White
 	Write-Host "3. Login URL: $LoginUrl" -ForegroundColor White
 	Write-Host "4. At first login, change the temporary password when prompted." -ForegroundColor White
 	Write-Host "5. After password change, follow the Microsoft prompts to set up Microsoft Authenticator." -ForegroundColor White
@@ -416,6 +456,7 @@ function Show-NewUserInstructions {
 	Write-Host "7. After setup completes, continue into the web app." -ForegroundColor White
 	Write-Host "------------------------------------------------------------" -ForegroundColor Cyan
 	Write-Host ""
+	$temporaryPasswordPlain = $null
 }
 
 function Add-UserToGroup {
@@ -466,7 +507,7 @@ if (-not $GlobalAdmin -and (-not $Suffix -or -not $Suffix.Trim())) {
 	exit 1
 }
 
-Ensure-AzLogin
+Confirm-AzLogin
 
 $tenantId = (Invoke-AzCliSilent -Arguments @('account','show','--query','tenantId','-o','tsv')).Output
 $signedInUser = (Invoke-AzCliSilent -Arguments @('ad','signed-in-user','show','--query','userPrincipalName','-o','tsv')).Output
@@ -482,7 +523,7 @@ if ($GlobalAdmin) {
 	exit 0
 }
 
-Ensure-CanCreateUsers -Identity $identityForChecks
+Confirm-CanCreateUsers -Identity $identityForChecks
 
 Write-Host "[INFO] Tenant: $tenantId" -ForegroundColor Cyan
 if ($signedInUser) {
@@ -490,7 +531,6 @@ if ($signedInUser) {
 }
 Write-Host "[INFO] Deployment suffix: $Suffix" -ForegroundColor Cyan
 
-$ProjectName = 'eia'
 $KeyVaultName = "kv-$ProjectName-$Environment-$Suffix"
 $KeyVaultUrl = Resolve-KeyVaultUrl -KeyVaultName $KeyVaultName
 $UserProfileSecretName = Get-UserProfileSecretName
@@ -555,21 +595,24 @@ while ($true) {
 		$useAuto = (-not $autoInput -or -not $autoInput.Trim() -or @('y','yes') -contains $autoInput.Trim().ToLowerInvariant())
 
 		if ($useAuto) {
-			$password = New-TemporaryPassword
-			Write-Host "[INFO] Temporary password for '$email': $password" -ForegroundColor Yellow
+			$passwordPlain = New-TemporaryPassword
+			Write-Host "[INFO] Temporary password for '$email': $passwordPlain" -ForegroundColor Yellow
 		} else {
-			$password = Read-Host "Enter temporary password for '$email' (visible)"
-			if (-not $password -or -not $password.Trim()) {
+			$passwordPlain = Read-Host "Enter temporary password for '$email' (visible)"
+			if (-not $passwordPlain -or -not $passwordPlain.Trim()) {
 				Write-Host "[ERROR] Password is required to create '$email'." -ForegroundColor Red
 				$failed++
 				continue
 			}
-			$password = $password.Trim()
+			$passwordPlain = $passwordPlain.Trim()
 		}
 
-		$user = Create-User -Username $username -Email $email -Password $password
-		$temporaryPasswordToShare = $password
-		$password = $null
+		$passwordSecure = ConvertTo-SecureString -String $passwordPlain -AsPlainText -Force
+
+		$user = New-EntraUser -Username $username -Email $email -Password $passwordSecure
+		$temporaryPasswordToShare = $passwordSecure
+		$passwordSecure = $null
+		$passwordPlain = $null
 
 		if (-not $user -or -not $user.id) {
 			$failed++

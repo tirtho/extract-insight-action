@@ -8,12 +8,18 @@
     deploy-infrastructure.ps1, confirms with the user, then builds the JARs
     with Maven and deploys function apps via the SCM OneDeploy API and the
     Spring Boot web app via Azure App Service JAR deployment.
+.PARAMETER Environment
+    Optional. Environment name (default: dev).
 .PARAMETER Suffix
-    Required. The same suffix used when running deploy-infrastructure.ps1.
+    Optional. The same suffix used when running deploy-infrastructure.ps1.
 .USAGE
     .\9.deploy-code.ps1 -Suffix 999
+    .\9.deploy-code.ps1 -Environment dev -Suffix 999
 #>
 param(
+    [Parameter(HelpMessage="Environment (default: dev, example: dev)")]
+    [string]$Environment,
+
     [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix,
 
@@ -39,8 +45,12 @@ $ErrorActionPreference = "Stop"
 $LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
 $Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
 
-$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
-$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+if ([string]::IsNullOrWhiteSpace($Environment)) {
+    $EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+    $Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+} else {
+    $Environment = $Environment.Trim().ToLowerInvariant()
+}
 
 if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
@@ -49,12 +59,13 @@ if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $Suffix = $Suffix.Trim()
 }
 
-Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+$ProjectName = "eia"
+
+Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
 
 # =============================================================================
 # CONFIGURATION  (mirrors deploy-infrastructure.ps1 naming conventions)
 # =============================================================================
-$ProjectName       = "eia"
 $ResourceGroupName = "rg-$ProjectName-$Environment-$Suffix"
 $FuncMailboxName   = "func-mailbox-$ProjectName-$Environment-$Suffix"
 $FuncQueueDbName   = "func-queuedb-$ProjectName-$Environment-$Suffix"

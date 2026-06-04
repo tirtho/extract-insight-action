@@ -6,12 +6,18 @@
     This script grants admin consent for the Graph API application permissions
     configured by deploy-infrastructure.ps1. Requires Global Administrator or
     Privileged Role Administrator role in the Azure AD tenant.
+.PARAMETER Environment
+    Optional. Environment name (default: dev).
 .PARAMETER Suffix
-    Required. The same suffix used when running deploy-infrastructure.ps1.
+    Optional. The same suffix used when running deploy-infrastructure.ps1.
 .USAGE
     .\grant-graph-consent.ps1 -Suffix 999
+    .\grant-graph-consent.ps1 -Environment dev -Suffix 999
 #>
 param(
+    [Parameter(HelpMessage="Environment (default: dev, example: dev)")]
+    [string]$Environment,
+
     [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix
 )
@@ -21,8 +27,12 @@ $ErrorActionPreference = "Stop"
 $LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
 $Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
 
-$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
-$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+if ([string]::IsNullOrWhiteSpace($Environment)) {
+    $EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+    $Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+} else {
+    $Environment = $Environment.Trim().ToLowerInvariant()
+}
 
 if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
@@ -31,7 +41,9 @@ if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $Suffix = $Suffix.Trim()
 }
 
-Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+$ProjectName = "eia"
+
+Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
 
 # Helper: run az CLI via .NET Process to reliably capture stdout + stderr
 # (Bypasses PowerShell's error-stream handling which can swallow native stderr)
@@ -68,7 +80,6 @@ function Invoke-Az {
 # =============================================================================
 # CONFIGURATION (must match deploy-infrastructure.ps1)
 # =============================================================================
-$ProjectName = "eia"
 $GraphAppName = "$ProjectName-graph-api-$Environment"
 
 # =============================================================================

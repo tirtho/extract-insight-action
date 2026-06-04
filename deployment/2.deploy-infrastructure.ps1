@@ -4,12 +4,18 @@
     Azure Infrastructure Deployment Script for extract-insight-action
 .DESCRIPTION
     Creates all necessary Azure resources. Idempotent - can be run multiple times safely.
+.PARAMETER Environment
+    Optional. Environment name (default: dev).
 .PARAMETER Suffix
-    Required. A short suffix (e.g. 999) appended to globally-unique resource names.
+    Optional. A short suffix (default: 1) appended to globally-unique resource names.
 .USAGE
     .\deploy-infrastructure.ps1 -Suffix 999
+    .\deploy-infrastructure.ps1 -Environment dev -Suffix 999
 #>
 param(
+    [Parameter(HelpMessage="Environment (default: dev, example: dev)")]
+    [string]$Environment,
+
     [Parameter(HelpMessage="Suffix for globally-unique resource names (default: 1, example: 1)")]
     [string]$Suffix
 )
@@ -28,11 +34,15 @@ $Location = if ([string]::IsNullOrWhiteSpace($locationInput)) {
     $locationInput.Trim().ToLowerInvariant()
 }
 
-$environmentInput = Read-Host "Enter environment [default: dev, example: dev]"
-$Environment = if ([string]::IsNullOrWhiteSpace($environmentInput)) {
-    "dev"
+if ([string]::IsNullOrWhiteSpace($Environment)) {
+    $environmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+    $Environment = if ([string]::IsNullOrWhiteSpace($environmentInput)) {
+        "dev"
+    } else {
+        $environmentInput.Trim().ToLowerInvariant()
+    }
 } else {
-    $environmentInput.Trim().ToLowerInvariant()
+    $Environment = $Environment.Trim().ToLowerInvariant()
 }
 
 if ([string]::IsNullOrWhiteSpace($Suffix)) {

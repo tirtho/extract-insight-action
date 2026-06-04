@@ -8,16 +8,22 @@
     Understanding REST API, polls until provisioning completes, and prints a
     summary table with analyzer IDs and their status.
     If analyzers already exist, prompts to delete them all before creating.
+.PARAMETER Environment
+    Optional. Environment name (default: dev).
 .PARAMETER Suffix
-    Required. The same suffix used during infrastructure deployment.
+    Optional. The same suffix used during infrastructure deployment.
 .PARAMETER SchemaFolder
     Optional. Path to the folder containing .json schema files.
     Defaults to <script-dir>\cu-schemas.
 .USAGE
     .\5.content-understanding-add-schema.ps1 -Suffix 0
+    .\5.content-understanding-add-schema.ps1 -Environment dev -Suffix 0
     .\5.content-understanding-add-schema.ps1 -Suffix 0 -SchemaFolder C:\my-schemas
 #>
 param(
+    [Parameter(HelpMessage="Environment (default: dev, example: dev)")]
+    [string]$Environment,
+
     [Parameter(HelpMessage="Suffix used during infrastructure deployment (default: 1, example: 1)")]
     [string]$Suffix,
 
@@ -30,8 +36,12 @@ $ErrorActionPreference = "Stop"
 $LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
 $Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
 
-$EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
-$Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+if ([string]::IsNullOrWhiteSpace($Environment)) {
+    $EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
+    $Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+} else {
+    $Environment = $Environment.Trim().ToLowerInvariant()
+}
 
 if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
@@ -40,12 +50,13 @@ if ([string]::IsNullOrWhiteSpace($Suffix)) {
     $Suffix = $Suffix.Trim()
 }
 
-Write-Host "[INFO] Deployment key: eia-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+$ProjectName = "eia"
+
+Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
 
 # =============================================================================
 # DEFAULTS
 # =============================================================================
-$ProjectName = "eia"
 $ApiVersion  = "2025-11-01"
 
 if (-not $SchemaFolder) {
