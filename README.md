@@ -30,7 +30,10 @@ Recommended permissions for first-time environment setup:
 - Entra Application Administrator (or higher)
 - Entra Privileged Role Administrator or Global Administrator for admin consent and role operations
 
-If your tenant uses PIM, activate roles before deployment.
+If your tenant uses PIM, activate roles before deployment. You can find your role and activate Global Administrator role for 4 hours, here: 
+https://portal.azure.com/?feature.msaljs=true#view/Microsoft_Azure_PIMCommon/ActivationMenuBlade/~/aadmigratedroles/provider/aadroles
+
+![Global Administrator role activation screen](docs/images/globaladmin.png)
 
 ## 2. Open The Repo And Sign In
 
