@@ -21,6 +21,10 @@ This runbook covers setup, deployment, code push, code deployment, and app run/v
 Install and verify:
 
 - Azure CLI
+- PowerShell (supported versions):
+	- Windows PowerShell 5.1 (Desktop edition)
+	- PowerShell 7.x (Core edition)
+	- Scripts in this repository are tested to work in both environments.
 - Java 21 JDK (JAVA_HOME must point to Java 21)
 - Maven (mvn on PATH)
 
