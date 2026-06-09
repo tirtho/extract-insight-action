@@ -7,11 +7,15 @@ import com.eia.ui.service.AzureEmailStore;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.http.MediaType;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @RestController
 @RequestMapping("/api/agent")
@@ -49,6 +53,29 @@ public class AgentChatController {
         }
     }
 
+    @PostMapping("/reset")
+    public ResponseEntity<Map<String, Object>> reset(@RequestBody ResetRequest req) {
+        if (!agentChatService.isAvailable()) {
+            String reason = agentChatService.getUnavailableReason();
+            String msg = reason != null ? reason : "AI agent is not configured on this server.";
+            return ResponseEntity.status(503).body(Map.of("error", msg));
+        }
+        if (req.emailId() == null || req.emailId().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "emailId is required."));
+        }
+        try {
+            boolean cleared = agentChatService.clearConversation(req.emailId());
+            String message = cleared
+                    ? "Conversation history cleared for this email."
+                    : "No prior conversation history was found for this email.";
+            return ResponseEntity.ok(Map.of("cleared", cleared, "message", message));
+        } catch (Throwable e) {
+            LOG.error("Agent reset failed for emailId={}: {}", req.emailId(), e.getMessage(), e);
+            return ResponseEntity.status(500)
+                    .body(Map.of("error", "Agent error: " + e.getMessage()));
+        }
+    }
+
     private String buildPrompt(ChatRequest req) {
         if (!req.isFirstMessage()) {
             return req.prompt();
@@ -81,4 +108,63 @@ public class AgentChatController {
     }
 
     record ChatRequest(String emailId, String prompt, boolean isFirstMessage, String reasoningEffort) {}
+    record ResetRequest(String emailId) {}
+
+    /**
+     * Server-Sent Events endpoint. The browser receives:
+     *   event: delta  — each text token from the model
+     *   event: done   — end of stream
+     *   event: error  — plain-text error message
+     */
+    @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter chatStream(@RequestBody ChatRequest req) {
+        if (!agentChatService.isAvailable()) {
+            SseEmitter err = new SseEmitter(0L);
+            try {
+                String reason = agentChatService.getUnavailableReason();
+                err.send(SseEmitter.event().name("error")
+                        .data(reason != null ? reason : "AI agent is not configured."));
+            } catch (Exception ignore) {}
+            err.complete();
+            return err;
+        }
+        if (req.emailId() == null || req.emailId().isBlank()
+                || req.prompt() == null || req.prompt().isBlank()) {
+            SseEmitter err = new SseEmitter(0L);
+            try { err.send(SseEmitter.event().name("error").data("emailId and prompt are required.")); }
+            catch (Exception ignore) {}
+            err.complete();
+            return err;
+        }
+        // 280 s — slightly under the 300 s server async timeout
+        SseEmitter emitter = new SseEmitter(280_000L);
+        ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "agent-stream");
+            t.setDaemon(true);
+            return t;
+        });
+        executor.submit(() -> {
+            try {
+                String fullPrompt = buildPrompt(req);
+                agentChatService.streamChat(req.emailId(), fullPrompt, req.reasoningEffort(),
+                        chunk -> {
+                            try {
+                                emitter.send(SseEmitter.event().name("delta").data(chunk));
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }
+                        });
+                emitter.send(SseEmitter.event().name("done").data(""));
+                emitter.complete();
+            } catch (Throwable e) {
+                LOG.error("Agent stream failed for emailId={}: {}", req.emailId(), e.getMessage(), e);
+                try { emitter.send(SseEmitter.event().name("error").data(e.getMessage())); }
+                catch (Exception ignore) {}
+                emitter.completeWithError(e);
+            } finally {
+                executor.shutdown();
+            }
+        });
+        return emitter;
+    }
 }

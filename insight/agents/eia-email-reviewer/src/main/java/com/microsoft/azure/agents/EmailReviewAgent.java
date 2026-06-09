@@ -38,6 +38,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
+import java.util.function.Consumer;
 
 /**
  * Creates (or updates) the EmailReview prompt agent in the Azure AI Foundry project,
@@ -220,6 +221,9 @@ public class EmailReviewAgent implements AutoCloseable {
         if (!isNewConversation) {
             builder = builder.previousResponseId(conversationId);
         }
+        // NOTE: reasoning effort is owned by the agent definition. The Responses API rejects a
+        // per-request `reasoning` value when an agent is specified ("Not allowed when agent is
+        // specified"), so the effort override is intentionally not applied here.
         Response response = responsesClient.createAzureResponse(
                 new AzureCreateResponseOptions().setAgentReference(agentRef), builder);
 
@@ -309,6 +313,67 @@ public class EmailReviewAgent implements AutoCloseable {
 
     // =========================================================================
     // Session resolution (Table Storage-backed)
+    /**
+     * Streaming variant of {@link #chatForKey(String, String, String)}.
+     *
+     * <p>Calls the AI Foundry streaming endpoint and invokes {@code onDelta} once per text
+     * token as it arrives.  When the stream ends the session is persisted exactly as
+     * {@link #chatForKey} does, so the next call transparently continues the conversation.
+     *
+     * @param domainKey A stable caller-assigned identifier for the conversation thread.
+     * @param prompt    The user message to send.
+     * @param effortStr Reasoning effort override ({@code low}, {@code medium}, {@code high},
+     *                  {@code xhigh}); {@code null} / blank falls back to the instance default.
+     * @param onDelta   Called with each text-delta string as it arrives from the model.
+     * @return The final full response text (concatenation of all deltas).
+     */
+    public String streamForKey(String domainKey, String prompt, String effortStr,
+                                Consumer<String> onDelta) {
+        if (domainKey == null || domainKey.isBlank()) {
+            throw new IllegalArgumentException("domainKey must not be null or blank");
+        }
+
+        String rowKey         = encodeRowKey(domainKey);
+        String lastResponseId = resolveConversation(domainKey, rowKey);
+
+        boolean isNew = (lastResponseId == null || lastResponseId.isBlank());
+        LOG.info("Streaming: {} conversation for domain key '{}'.",
+                isNew ? "starting new" : "resuming", domainKey);
+
+        AgentReference agentRef = new AgentReference(AGENT_NAME);
+        ResponseCreateParams.Builder builder = ResponseCreateParams.builder().input(prompt);
+        if (!isNew) {
+            builder = builder.previousResponseId(lastResponseId);
+        }
+        // NOTE: reasoning effort is owned by the agent definition. The Responses API rejects a
+        // per-request `reasoning` value when an agent is specified ("Not allowed when agent is
+        // specified"), so the effort override is intentionally not applied here.
+
+        StringBuilder full          = new StringBuilder();
+        String[]      finalIdHolder = { null };
+
+        com.azure.core.util.IterableStream<com.openai.models.responses.ResponseStreamEvent> stream =
+                responsesClient.createStreamingAzureResponse(
+                        new AzureCreateResponseOptions().setAgentReference(agentRef), builder);
+
+        for (com.openai.models.responses.ResponseStreamEvent event : stream) {
+            event.outputTextDelta().ifPresent(delta -> {
+                String chunk = delta.delta();
+                if (chunk != null && !chunk.isEmpty()) {
+                    full.append(chunk);
+                    onDelta.accept(chunk);
+                }
+            });
+            event.completed().ifPresent(c -> finalIdHolder[0] = c.response().id());
+        }
+
+        if (finalIdHolder[0] != null) {
+            persistSession(domainKey, rowKey, finalIdHolder[0]);
+            LOG.info("Streaming: persisted conversation '{}' for domain key '{}'.",
+                    finalIdHolder[0], domainKey);
+        }
+        return full.toString();
+    }
     // =========================================================================
 
     /**
@@ -356,6 +421,37 @@ public class EmailReviewAgent implements AutoCloseable {
         }
         agentSessionsTable.upsertEntity(entity);
         LOG.debug("Persisted session row for domain key '{}' in table '{}'.", domainKey, TABLE_NAME);
+    }
+
+    /**
+     * Deletes the persisted conversation mapping and server-side conversation for the given
+     * caller-managed domain key.
+     *
+     * @param domainKey The stable domain key previously used with {@link #chatForKey}.
+     * @return {@code true} when a persisted session existed and was cleared, otherwise {@code false}.
+     */
+    public boolean clearConversationForKey(String domainKey) {
+        if (domainKey == null || domainKey.isBlank()) {
+            throw new IllegalArgumentException("domainKey must not be null or blank");
+        }
+
+        String rowKey = encodeRowKey(domainKey);
+        try {
+            TableEntity entity = agentSessionsTable.getEntity(AGENT_NAME, rowKey);
+            String conversationId = (String) entity.getProperty("conversationId");
+            if (conversationId != null && !conversationId.isBlank()) {
+                deleteConversationSafely(conversationId);
+            }
+            agentSessionsTable.deleteEntity(AGENT_NAME, rowKey);
+            LOG.info("Cleared persisted conversation for domain key '{}'.", domainKey);
+            return true;
+        } catch (TableServiceException e) {
+            if (e.getResponse() != null && e.getResponse().getStatusCode() == 404) {
+                LOG.debug("No persisted conversation found for domain key '{}'.", domainKey);
+                return false;
+            }
+            throw e;
+        }
     }
 
     /** Deletes a server-side conversation, logging but not re-throwing on failure. */

@@ -49,17 +49,25 @@ public class AgentChatService {
     }
 
     public String chat(String emailId, String prompt, String reasoningEffort) {
-        if (agent == null) {
-            // Retry if outside the cooldown window
-            if (lastFailedAt == null || Instant.now().isAfter(lastFailedAt.plus(RETRY_COOLDOWN))) {
-                LOG.info("Agent unavailable — retrying initialisation...");
-                tryInit();
-            }
-            if (agent == null) {
-                throw new IllegalStateException("AI agent is not configured: " + unavailableReason);
-            }
-        }
-        return agent.chatForKey(emailId, prompt, reasoningEffort).text();
+        return requireAgent().chatForKey(emailId, prompt, reasoningEffort).text();
+    }
+
+    /**
+     * Streaming variant: invokes the AI Foundry streaming endpoint so the caller receives
+     * text-delta chunks as they arrive rather than waiting for the full reply.
+     *
+     * @param emailId         Email ID used as the conversation domain key.
+     * @param prompt          The fully-built prompt (email context already prepended if first msg).
+     * @param reasoningEffort Optional effort level override; {@code null} falls back to agent default.
+     * @param onDelta         Called with each text chunk as it streams from the model.
+     */
+    public void streamChat(String emailId, String prompt, String reasoningEffort,
+                           java.util.function.Consumer<String> onDelta) {
+        requireAgent().streamForKey(emailId, prompt, reasoningEffort, onDelta);
+    }
+
+    public boolean clearConversation(String emailId) {
+        return requireAgent().clearConversationForKey(emailId);
     }
 
     // -------------------------------------------------------------------------
@@ -78,6 +86,20 @@ public class AgentChatService {
             lastFailedAt = Instant.now();
             LOG.error("AI agent chat disabled (will retry after {}s) — {}", RETRY_COOLDOWN.getSeconds(), unavailableReason, e);
         }
+    }
+
+    private EmailReviewAgent requireAgent() {
+        if (agent == null) {
+            // Retry if outside the cooldown window
+            if (lastFailedAt == null || Instant.now().isAfter(lastFailedAt.plus(RETRY_COOLDOWN))) {
+                LOG.info("Agent unavailable — retrying initialisation...");
+                tryInit();
+            }
+            if (agent == null) {
+                throw new IllegalStateException("AI agent is not configured: " + unavailableReason);
+            }
+        }
+        return agent;
     }
 
     /**

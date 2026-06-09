@@ -175,17 +175,12 @@
                         <h2>AI Email Insight</h2>
                         <p class="body-dialog-title" th:text="${selectedEmail.subject()}"></p>
                     </div>
-                    <div class="chat-effort-bar" id="chatEffortBar">
-                        <span class="chat-effort-label">Thinking:</span>
-                        <button class="chat-effort-btn" type="button" data-effort="low">Low</button>
-                        <button class="chat-effort-btn chat-effort-active" type="button" data-effort="medium">Med</button>
-                        <button class="chat-effort-btn" type="button" data-effort="high">High</button>
-                        <button class="chat-effort-btn" type="button" data-effort="xhigh">Max</button>
-                    </div>
                     <button class="body-dialog-close" type="button" aria-label="Close AI chat">Close</button>
                 </div>
                 <div class="agent-chat-messages" id="agentChatMessages"></div>
                 <div class="agent-chat-input-row">
+                    <button type="button" id="agentChatReset" class="agent-chat-reset"
+                        onclick="clearAgentConversation()">Clear history</button>
                     <textarea id="agentChatInput" class="agent-chat-input" rows="2"
                               placeholder="Ask about this email… (Ctrl+Enter to send)"></textarea>
                     <button type="button" id="agentChatSend" class="agent-chat-send"
@@ -913,7 +908,11 @@
     var _agentEmailId  = null;
     var _agentFirstMsg = true;
     var _agentSending  = false;
-    var _agentReasoningEffort = 'medium';
+    var _agentResetting = false;
+    // Emails cleared at least once during this page load (server history known to be empty).
+    var _agentClearedEmails = new Set();
+    // Emails with new history created since their last clear (need re-clearing on next open).
+    var _agentDirtyEmails   = new Set();
 
     document.addEventListener('DOMContentLoaded', function () {
         var agentInput = document.getElementById('agentChatInput');
@@ -922,81 +921,307 @@
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { sendAgentMessage(); }
             });
         }
-        document.querySelectorAll('.chat-effort-btn').forEach(function (btn) {
-            btn.addEventListener('click', function () {
-                _agentReasoningEffort = btn.dataset.effort;
-                document.querySelectorAll('.chat-effort-btn').forEach(function (b) {
-                    b.classList.toggle('chat-effort-active', b === btn);
-                });
-            });
-        });
     });
 
     function openAgentChat(emailId) {
         _agentEmailId  = emailId;
         _agentFirstMsg = true;
         _agentSending  = false;
-        _agentReasoningEffort = 'medium';
-        document.querySelectorAll('.chat-effort-btn').forEach(function (b) {
-            b.classList.toggle('chat-effort-active', b.dataset.effort === 'medium');
-        });
+        _agentResetting = false;
         var messages = document.getElementById('agentChatMessages');
         if (messages) messages.innerHTML = '';
         var input = document.getElementById('agentChatInput');
         if (input) input.value = '';
         var sendBtn = document.getElementById('agentChatSend');
         if (sendBtn) sendBtn.disabled = false;
+        var resetBtn = document.getElementById('agentChatReset');
+        if (resetBtn) resetBtn.disabled = false;
         var dialog = document.getElementById('agentChatDialog');
         if (dialog) dialog.showModal();
         setTimeout(function () { if (input) input.focus(); }, 60);
+        // Start fresh, but skip the call when there's no history to clear:
+        // reset only on the first open per page load, or after the user has chatted since.
+        if (!_agentClearedEmails.has(emailId) || _agentDirtyEmails.has(emailId)) {
+            resetConversationSilently(emailId);
+        }
     }
 
-    async function sendAgentMessage() {
-        if (_agentSending) return;
-        var input   = document.getElementById('agentChatInput');
-        var sendBtn = document.getElementById('agentChatSend');
-        var prompt  = input.value.trim();
-        if (!prompt) return;
-
-        _agentSending = true;
-        if (sendBtn) sendBtn.disabled = true;
-        appendChatMsg('user', prompt, false);
-        input.value = '';
-
-        var loadingId = appendChatMsg('agent', 'Thinking…', true);
+    /**
+     * Clears the server-side agent conversation for an email without prompting or showing
+     * status messages. Used to guarantee a fresh start each time the AI Insight popup opens.
+     */
+    function resetConversationSilently(emailId) {
+        if (!emailId) return;
         try {
-            var csrfMeta       = document.querySelector('meta[name="_csrf"]');
+            var csrfMeta = document.querySelector('meta[name="_csrf"]');
             var csrfHeaderMeta = document.querySelector('meta[name="_csrf_header"]');
             var headers = { 'Content-Type': 'application/json' };
             if (csrfMeta && csrfHeaderMeta) {
                 headers[csrfHeaderMeta.getAttribute('content')] = csrfMeta.getAttribute('content');
             }
-            var resp = await fetch('/api/agent/chat', {
+            fetch('/api/agent/reset', {
                 method: 'POST',
                 headers: headers,
+                body: JSON.stringify({ emailId: emailId })
+            }).then(function () {
+                _agentFirstMsg = true;
+                _agentClearedEmails.add(emailId);
+                _agentDirtyEmails.delete(emailId);
+            }).catch(function () { /* non-fatal: a fresh chat will still start a new thread */ });
+        } catch (e) { /* ignore — fresh thread starts on first message anyway */ }
+    }
+
+    // 4-minute client-side timeout (matches server spring.mvc.async.request-timeout)
+    var AGENT_FETCH_TIMEOUT_MS = 4 * 60 * 1000;
+
+    async function sendAgentMessage() {
+        if (_agentSending || _agentResetting) return;
+        var input    = document.getElementById('agentChatInput');
+        var sendBtn  = document.getElementById('agentChatSend');
+        var resetBtn = document.getElementById('agentChatReset');
+        var prompt   = input.value.trim();
+        if (!prompt) return;
+
+        _agentSending = true;
+        if (sendBtn)  sendBtn.disabled  = true;
+        if (resetBtn) resetBtn.disabled = true;
+        appendChatMsg('user', prompt, false);
+        input.value = '';
+
+        var streamBubbleId = null;   // id of the live streaming bubble
+        var thinkingId     = appendThinkingBubble();   // shown until the first token arrives
+
+        var csrfMeta       = document.querySelector('meta[name="_csrf"]');
+        var csrfHeaderMeta = document.querySelector('meta[name="_csrf_header"]');
+        var headers = { 'Content-Type': 'application/json' };
+        if (csrfMeta && csrfHeaderMeta) {
+            headers[csrfHeaderMeta.getAttribute('content')] = csrfMeta.getAttribute('content');
+        }
+
+        var controller = new AbortController();
+        var timeoutId  = setTimeout(function () { controller.abort(); }, AGENT_FETCH_TIMEOUT_MS);
+        try {
+            var resp = await fetch('/api/agent/chat/stream', {
+                method: 'POST',
+                headers: headers,
+                signal: controller.signal,
                 body: JSON.stringify({
                     emailId: _agentEmailId,
                     prompt: prompt,
-                    isFirstMessage: _agentFirstMsg,
-                    reasoningEffort: _agentReasoningEffort
+                    isFirstMessage: _agentFirstMsg
                 })
             });
-            var data = await resp.json();
-            var loadingEl = document.getElementById(loadingId);
-            if (loadingEl) loadingEl.remove();
-            if (resp.ok) {
-                appendChatMsg('agent', data.content || '', false);
-                _agentFirstMsg = false;
-            } else {
-                appendChatMsg('error', data.error || 'An error occurred.', false);
+            clearTimeout(timeoutId);
+
+            if (!resp.ok) {
+                removeThinkingBubble(thinkingId); thinkingId = null;
+                var raw = await resp.text();
+                var errData = {};
+                try { errData = raw ? JSON.parse(raw) : {}; } catch (_) {}
+                appendChatMsg('error', errData.error || ('Server error ' + resp.status + '.'), false);
+                return;
             }
+
+            var reader      = resp.body.getReader();
+            var decoder     = new TextDecoder();
+            var sseBuffer   = '';
+            var accumulated = '';
+
+            function flushSse(eventName, dataLine) {
+                if (eventName === 'delta') {
+                    if (thinkingId !== null) { removeThinkingBubble(thinkingId); thinkingId = null; }
+                    if (streamBubbleId === null) streamBubbleId = appendStreamingBubble();
+                    accumulated += dataLine;
+                    updateStreamingBubble(streamBubbleId, accumulated);
+                } else if (eventName === 'done') {
+                    if (thinkingId !== null) { removeThinkingBubble(thinkingId); thinkingId = null; }
+                    if (streamBubbleId !== null) {
+                        finaliseStreamingBubble(streamBubbleId, accumulated);
+                        streamBubbleId = null;
+                    }
+                    _agentFirstMsg = false;
+                    // History now exists server-side; ensure the next popup open re-clears it.
+                    if (_agentEmailId) _agentDirtyEmails.add(_agentEmailId);
+                } else if (eventName === 'error') {
+                    if (thinkingId !== null) { removeThinkingBubble(thinkingId); thinkingId = null; }
+                    if (streamBubbleId !== null) {
+                        document.getElementById(streamBubbleId)?.remove();
+                        streamBubbleId = null;
+                    }
+                    appendChatMsg('error', dataLine || 'Agent error.', false);
+                }
+            }
+
+            function parseBlock(block) {
+                var lines = block.split('\n');
+                var eName = '';
+                var dataLines = [];
+                for (var i = 0; i < lines.length; i++) {
+                    var l = lines[i];
+                    if (l.startsWith('event:')) {
+                        eName = l.slice(6).trim();
+                    } else if (l.startsWith('data:')) {
+                        // Per the SSE spec a single event may carry several data: lines
+                        // (Spring emits one per embedded newline). Keep them ALL and
+                        // re-join with '\n'. Spring writes "data:" with NO trailing space,
+                        // so take the value verbatim — trimming would drop the leading
+                        // spaces that OpenAI tokens legitimately carry (e.g. " the").
+                        dataLines.push(l.slice(5));
+                    }
+                }
+                if (eName) flushSse(eName, dataLines.join('\n'));
+            }
+
+            var streamDone = false;
+            while (!streamDone) {
+                var result = await reader.read();
+                streamDone = result.done;
+                if (result.value) {
+                    sseBuffer += decoder.decode(result.value, { stream: !streamDone });
+                    var parts = sseBuffer.split(/\n\n/);
+                    sseBuffer = parts.pop();
+                    for (var i = 0; i < parts.length; i++) parseBlock(parts[i]);
+                }
+            }
+            if (sseBuffer.trim()) parseBlock(sseBuffer);
+
         } catch (e) {
-            var loadingEl = document.getElementById(loadingId);
-            if (loadingEl) loadingEl.remove();
-            appendChatMsg('error', 'Network error: ' + e.message, false);
+            clearTimeout(timeoutId);
+            if (thinkingId !== null) { removeThinkingBubble(thinkingId); thinkingId = null; }
+            if (streamBubbleId !== null) {
+                document.getElementById(streamBubbleId)?.remove();
+                streamBubbleId = null;
+            }
+            var msg = (e.name === 'AbortError')
+                ? 'The AI model took too long to respond. Try a lower reasoning level (Low or Med) or ask a shorter question.'
+                : 'Network error: ' + e.message;
+            appendChatMsg('error', msg, false);
         } finally {
             _agentSending = false;
+            if (sendBtn)  sendBtn.disabled  = false;
+            if (resetBtn) resetBtn.disabled = false;
+            if (input) input.focus();
+        }
+    }
+
+    /** Shows an animated “Thinking…” placeholder bubble while the model works; returns its id. */
+    function appendThinkingBubble() {
+        var container = document.getElementById('agentChatMessages');
+        if (!container) return null;
+        var id = 'chatthink-' + Date.now();
+        var row = document.createElement('div');
+        row.id = id;
+        row.className = 'chat-message chat-message-agent';
+        var bubble = document.createElement('div');
+        bubble.className = 'chat-bubble chat-thinking';
+        bubble.innerHTML = '<span class="chat-thinking-text">Thinking</span>'
+            + '<span class="chat-thinking-dots"><span></span><span></span><span></span></span>';
+        row.appendChild(bubble);
+        container.appendChild(row);
+        container.scrollTop = container.scrollHeight;
+        return id;
+    }
+
+    /** Removes the “Thinking…” placeholder bubble if present. */
+    function removeThinkingBubble(id) {
+        if (!id) return;
+        var row = document.getElementById(id);
+        if (row) row.remove();
+    }
+
+    /** Creates an empty agent bubble with a blinking cursor; returns its id. */
+    function appendStreamingBubble() {
+        var container = document.getElementById('agentChatMessages');
+        var id = 'chatmsg-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+        var row = document.createElement('div');
+        row.id = id;
+        row.className = 'chat-message chat-message-agent chat-message-streaming';
+        var bubble = document.createElement('div');
+        bubble.className = 'chat-bubble';
+        bubble.innerHTML = '<span class="stream-cursor"></span>';
+        row.appendChild(bubble);
+        container.appendChild(row);
+        container.scrollTop = container.scrollHeight;
+        return id;
+    }
+
+    /** Appends each incoming delta to the live bubble as plain text (avoids markdown flicker). */
+    function updateStreamingBubble(id, text) {
+        var row = document.getElementById(id);
+        if (!row) return;
+        var bubble = row.querySelector('.chat-bubble');
+        if (!bubble) return;
+        bubble.textContent = text;
+        var cursor = document.createElement('span');
+        cursor.className = 'stream-cursor';
+        bubble.appendChild(cursor);
+        var container = document.getElementById('agentChatMessages');
+        if (container) container.scrollTop = container.scrollHeight;
+    }
+
+    /** Finalises the streaming bubble: renders markdown, removes cursor class. */
+    function finaliseStreamingBubble(id, text) {
+        var row = document.getElementById(id);
+        if (!row) return;
+        row.classList.remove('chat-message-streaming');
+        var bubble = row.querySelector('.chat-bubble');
+        if (!bubble) return;
+        if (text && typeof marked !== 'undefined') {
+            var rawHtml = marked.parse(text);
+            bubble.innerHTML = typeof DOMPurify !== 'undefined'
+                ? DOMPurify.sanitize(rawHtml) : rawHtml;
+        } else {
+            bubble.textContent = text || '';
+        }
+        var container = document.getElementById('agentChatMessages');
+        if (container) container.scrollTop = container.scrollHeight;
+    }
+
+    async function clearAgentConversation() {
+        if (_agentResetting || _agentSending || !_agentEmailId) return;
+        if (!window.confirm('Clear saved AI conversation history for this email?')) return;
+
+        var input = document.getElementById('agentChatInput');
+        var sendBtn = document.getElementById('agentChatSend');
+        var resetBtn = document.getElementById('agentChatReset');
+        var messages = document.getElementById('agentChatMessages');
+
+        _agentResetting = true;
+        if (sendBtn) sendBtn.disabled = true;
+        if (resetBtn) resetBtn.disabled = true;
+
+        try {
+            var csrfMeta = document.querySelector('meta[name="_csrf"]');
+            var csrfHeaderMeta = document.querySelector('meta[name="_csrf_header"]');
+            var headers = { 'Content-Type': 'application/json' };
+            if (csrfMeta && csrfHeaderMeta) {
+                headers[csrfHeaderMeta.getAttribute('content')] = csrfMeta.getAttribute('content');
+            }
+
+            var resp = await fetch('/api/agent/reset', {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify({ emailId: _agentEmailId })
+            });
+            var rawText = await resp.text();
+            var data = {};
+            try { data = rawText ? JSON.parse(rawText) : {}; }
+            catch (_) { data = { error: 'Unexpected server response — please try again.' }; }
+            if (resp.ok) {
+                _agentFirstMsg = true;
+                if (_agentEmailId) { _agentClearedEmails.add(_agentEmailId); _agentDirtyEmails.delete(_agentEmailId); }
+                if (messages) messages.innerHTML = '';
+                if (input) input.value = '';
+                appendChatMsg('agent', data.message || 'Conversation history cleared.', false);
+            } else {
+                appendChatMsg('error', data.error || 'Could not clear conversation history.', false);
+            }
+        } catch (e) {
+            appendChatMsg('error', 'Network error: ' + e.message, false);
+        } finally {
+            _agentResetting = false;
             if (sendBtn) sendBtn.disabled = false;
+            if (resetBtn) resetBtn.disabled = false;
             if (input) input.focus();
         }
     }
