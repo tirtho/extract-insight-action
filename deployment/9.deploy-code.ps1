@@ -78,6 +78,8 @@ $ScriptRoot      = $PSScriptRoot
 $RepoRoot        = Split-Path $ScriptRoot -Parent
 $FunctionsRoot   = Join-Path $RepoRoot "extract\functions"
 $UiRoot          = Join-Path $RepoRoot "insight\ui"
+$JavaCoreRoot      = Join-Path $RepoRoot "java-core"
+$EmailReviewerRoot = Join-Path $RepoRoot "insight\agents\eia-email-reviewer"
 
 # =============================================================================
 # PREREQUISITES
@@ -192,18 +194,23 @@ function Invoke-MavenPackage {
         [Parameter(Mandatory=$true)][string]$FunctionLabel,
         [Parameter(Mandatory=$true)][string]$MavenPath,
         [Parameter(Mandatory=$true)][int]$TimeoutMinutes,
-        [Parameter()][switch]$SkipClean
+        [Parameter()][switch]$SkipClean,
+        [Parameter()][string[]]$MavenArgs
     )
 
     $stdoutLog = Join-Path $env:TEMP ("$FunctionLabel-maven-stdout.log")
     $stderrLog = Join-Path $env:TEMP ("$FunctionLabel-maven-stderr.log")
     Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
 
-    $mavenArgs = @('-DskipTests', '--no-transfer-progress')
-    if ($SkipClean) {
-        $mavenArgs = @('package') + $mavenArgs
+    if ($MavenArgs) {
+        $mavenArgs = $MavenArgs
     } else {
-        $mavenArgs = @('clean', 'package') + $mavenArgs
+        $mavenArgs = @('-DskipTests', '--no-transfer-progress')
+        if ($SkipClean) {
+            $mavenArgs = @('package') + $mavenArgs
+        } else {
+            $mavenArgs = @('clean', 'package') + $mavenArgs
+        }
     }
 
     $process = Start-Process `
@@ -248,6 +255,34 @@ function Invoke-MavenPackage {
     } finally {
         Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Ensure-LibraryJars {
+    param(
+        [Parameter(Mandatory=$true)][string]$JavaCoreRoot,
+        [Parameter(Mandatory=$true)][string]$EmailReviewerRoot,
+        [Parameter(Mandatory=$true)][string]$MavenPath,
+        [Parameter(Mandatory=$true)][int]$TimeoutMinutes
+    )
+
+    foreach ($dir in @($JavaCoreRoot, $EmailReviewerRoot)) {
+        if (-not (Test-Path (Join-Path $dir "pom.xml"))) {
+            throw "Required library project not found (pom.xml missing): $dir"
+        }
+    }
+
+    Write-Host "[INFO] Building prerequisite library JARs (java-core, eia-email-reviewer)..." -ForegroundColor Cyan
+
+    # java-core: install to the local Maven repo (eia-email-reviewer depends on it) and copy
+    # the thin JAR to project-lib/java via the 'library' profile.
+    Invoke-MavenPackage -SourceDir $JavaCoreRoot -FunctionLabel "java-core" -MavenPath $MavenPath -TimeoutMinutes $TimeoutMinutes `
+        -MavenArgs @('clean', 'install', '-Dlibrary', '-DskipTests', '--no-transfer-progress')
+
+    # eia-email-reviewer: copy its thin JAR to project-lib/java via the 'library' profile.
+    Invoke-MavenPackage -SourceDir $EmailReviewerRoot -FunctionLabel "eia-email-reviewer" -MavenPath $MavenPath -TimeoutMinutes $TimeoutMinutes `
+        -MavenArgs @('clean', 'package', '-Dlibrary', '-DskipTests', '--no-transfer-progress')
+
+    Write-Host "[SUCCESS] Prerequisite library JARs are ready in project-lib/java" -ForegroundColor Green
 }
 
 function Invoke-AzWebAppDeploy {
@@ -565,6 +600,13 @@ foreach ($target in $targets) {
             Write-Host "[INFO] Maven timeout for this build: $MavenTimeoutMinutes minute(s)." -ForegroundColor DarkCyan
         } else {
             Write-Host "[INFO] Maven timeout disabled for this build." -ForegroundColor DarkCyan
+        }
+
+        # The web app references thin library JARs (java-core, eia-email-reviewer) from
+        # project-lib/java via system-scoped dependencies. Build those prerequisites first
+        # so the JARs exist before insight-ui is packaged.
+        if ($TargetKind -eq 'webapp') {
+            Ensure-LibraryJars -JavaCoreRoot $JavaCoreRoot -EmailReviewerRoot $EmailReviewerRoot -MavenPath $mvn.Source -TimeoutMinutes $MavenTimeoutMinutes
         }
 
         # Remove the previous build output first so Maven does not have to delete a locked target tree.
