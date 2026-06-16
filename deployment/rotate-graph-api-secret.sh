@@ -20,7 +20,7 @@ set -euo pipefail
 # =============================================================================
 if [ -z "${1:-}" ]; then
     echo "Usage: $0 <suffix> [expiry_years]"
-    echo "  <suffix>        Required. The same suffix used when running deploy-infrastructure.sh."
+    echo "  <suffix>        Required. The same suffix used when running 1.deploy-infrastructure.sh."
     echo "  [expiry_years]  Optional. Number of years until the new secret expires (1-5). Default: 2."
     echo ""
     echo "Example: $0 999"
@@ -37,7 +37,7 @@ if ! [[ "$EXPIRY_YEARS" =~ ^[1-5]$ ]]; then
 fi
 
 # =============================================================================
-# CONFIGURATION (must match deploy-infrastructure.sh)
+# CONFIGURATION (must match 1.deploy-infrastructure.sh)
 # =============================================================================
 PROJECT_NAME="${PROJECT_NAME:-eia}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
@@ -76,7 +76,7 @@ echo ""
 echo "Looking up app registration: $GRAPH_APP_NAME ..."
 GRAPH_CLIENT_ID=$(az ad app list --display-name "$GRAPH_APP_NAME" --query "[0].appId" -o tsv 2>/dev/null || echo "")
 if [ -z "$GRAPH_CLIENT_ID" ]; then
-    echo -e "\033[0;31m[ERROR] App registration '$GRAPH_APP_NAME' not found. Run deploy-infrastructure.sh first.\033[0m"
+    echo -e "\033[0;31m[ERROR] App registration '$GRAPH_APP_NAME' not found. Run 1.deploy-infrastructure.sh first.\033[0m"
     exit 1
 fi
 echo -e "\033[0;32mFound app registration: $GRAPH_CLIENT_ID\033[0m"

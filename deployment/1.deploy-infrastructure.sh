@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Azure Infrastructure Deployment Script for extract-insight-action (bash)
-# Mirrors 2.deploy-infrastructure.ps1 — idempotent; can be re-run safely.
+# Mirrors 1.deploy-infrastructure.ps1 — idempotent; can be re-run safely.
 #
 # Requires: bash 4+, az CLI, jq, curl, Java 21 (JAVA_HOME).
 #
 # Usage:
-#   ./2.deploy-infrastructure.sh <suffix>
+#   ./1.deploy-infrastructure.sh <suffix>
 # =============================================================================
 set -uo pipefail
 
@@ -24,7 +24,7 @@ SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
 # =============================================================================
-# Load selected config file (mirrors 1.config.ps1 folded-in behaviour)
+# Load selected config file (optional; prompts for values if absent)
 # =============================================================================
 DEFAULT_CONFIG_FILE_NAME="env.config"
 read -r -p "Enter config file name [$DEFAULT_CONFIG_FILE_NAME]: " CONFIG_FILE_INPUT
@@ -802,7 +802,7 @@ fi
 [[ -z "$GraphClientSecret" ]] && \
     echo "[WARNING] GraphClientSecret is empty - the 'GraphClientSecret' KV secret will be skipped."
 
-echo "[INFO] Run ./3.grant-graph-consent.sh $SUFFIX to grant admin consent (requires tenant admin role)"
+echo "[INFO] Run ./2.grant-graph-consent.sh $SUFFIX to grant admin consent (requires tenant admin role)"
 
 # Web app Entra ID auth registration
 webAppRedirectUri="https://${WebAppName}.azurewebsites.net/login/oauth2/code/azure"
@@ -1901,11 +1901,13 @@ echo "[SUCCESS] =========================================="
 echo ""
 echo "[INFO] Next Steps:"
 echo "  1. Grant Graph API admin consent (requires tenant admin role):"
-echo "       ./3.grant-graph-consent.sh $SUFFIX"
-echo "  2. (Optional) Configure operational tweaks in the deployed environment:"
-echo "       ./4.operation-dev.sh $SUFFIX"
+echo "       ./2.grant-graph-consent.sh $SUFFIX"
+echo "  2. Build and provision the Azure AI Foundry agents:"
+echo "       ./3.deploy-agents.sh $SUFFIX"
 echo "  3. Register Content Understanding analyzer schemas:"
-echo "       ./5.content-understanding-add-schema.sh $SUFFIX"
+echo "       ./4.content-understanding-add-schema.sh $SUFFIX"
 echo "  4. Build and deploy application code (functions + web app):"
-echo "       ./9.deploy-code.sh $SUFFIX"
-echo "  5. Test the deployment with sample data"
+echo "       ./5.deploy-code.sh $SUFFIX"
+echo "  5. (Optional) Configure operational tweaks in the deployed environment:"
+echo "       ./6.operation-dev.sh $SUFFIX"
+echo "  6. Test the deployment with sample data"

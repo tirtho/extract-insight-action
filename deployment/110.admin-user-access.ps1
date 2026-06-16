@@ -20,9 +20,9 @@
 	mailbox polling behavior.
 
 .USAGE
-	.\11.admin-user-access.ps1 -GlobalAdmin
-	.\11.admin-user-access.ps1 -Suffix 1
-	.\11.admin-user-access.ps1 -Environment dev -Suffix 1
+	.\110.admin-user-access.ps1 -GlobalAdmin
+	.\110.admin-user-access.ps1 -Suffix 1
+	.\110.admin-user-access.ps1 -Environment dev -Suffix 1
 #>
 
 param(
@@ -494,16 +494,16 @@ Write-Host ""
 if ($GlobalAdmin -and $Suffix) {
 	Write-Host "[ERROR] Use either -GlobalAdmin OR -Suffix <n>, not both." -ForegroundColor Red
 	Write-Host "[INFO] Examples:" -ForegroundColor Cyan
-	Write-Host "  .\11.admin-user-access.ps1 -GlobalAdmin" -ForegroundColor White
-	Write-Host "  .\11.admin-user-access.ps1 -Suffix 1" -ForegroundColor White
+	Write-Host "  .\110.admin-user-access.ps1 -GlobalAdmin" -ForegroundColor White
+	Write-Host "  .\110.admin-user-access.ps1 -Suffix 1" -ForegroundColor White
 	exit 1
 }
 
 if (-not $GlobalAdmin -and (-not $Suffix -or -not $Suffix.Trim())) {
 	Write-Host "[ERROR] Missing required argument." -ForegroundColor Red
 	Write-Host "[INFO] Use one of:" -ForegroundColor Cyan
-	Write-Host "  .\11.admin-user-access.ps1 -GlobalAdmin" -ForegroundColor White
-	Write-Host "  .\11.admin-user-access.ps1 -Suffix 1" -ForegroundColor White
+	Write-Host "  .\110.admin-user-access.ps1 -GlobalAdmin" -ForegroundColor White
+	Write-Host "  .\110.admin-user-access.ps1 -Suffix 1" -ForegroundColor White
 	exit 1
 }
 
@@ -519,7 +519,7 @@ if ($GlobalAdmin) {
 	Write-Host "[INFO] After activation, wait about 3-5 minutes for propagation, then run:" -ForegroundColor Cyan
 	Write-Host "  az logout" -ForegroundColor White
 	Write-Host "  az login --tenant $tenantId" -ForegroundColor White
-	Write-Host "  .\11.admin-user-access.ps1 -Suffix 1" -ForegroundColor White
+	Write-Host "  .\110.admin-user-access.ps1 -Suffix 1" -ForegroundColor White
 	exit 0
 }
 

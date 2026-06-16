@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Registers Content Understanding analyzer schemas. Mirrors
-# 5.content-understanding-add-schema.ps1.
+# 4.content-understanding-add-schema.ps1.
 #
 # Requires: bash 4+, az CLI, curl, jq.
 #
 # Usage:
-#   ./5.content-understanding-add-schema.sh <suffix> [schema-folder]
+#   ./4.content-understanding-add-schema.sh <suffix> [schema-folder]
 # =============================================================================
 set -uo pipefail
 

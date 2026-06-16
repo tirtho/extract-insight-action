@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Dev environment setup: enables public network access on data plane resources,
-# grants the logged-in user RBAC, ensures CU MI exists. Mirrors 4.operation-dev.ps1.
+# grants the logged-in user RBAC, ensures CU MI exists. Mirrors 6.operation-dev.ps1.
 #
-# Usage: ./4.operation-dev.sh <suffix>
+# Usage: ./6.operation-dev.sh <suffix>
 # =============================================================================
 set -uo pipefail
 
@@ -15,7 +15,7 @@ fi
 SUFFIX="$1"
 
 # -----------------------------------------------------------------------------
-# Configuration (must match 2.deploy-infrastructure.sh)
+# Configuration (must match 1.deploy-infrastructure.sh)
 # -----------------------------------------------------------------------------
 PROJECT_NAME="${PROJECT_NAME:-eia}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
@@ -54,9 +54,9 @@ echo "[OK] Logged in as: $CurrentUserName ($CurrentUserId)"
 storageExists=$(az storage account show --name "$StorageAccountName" --resource-group "$ResourceGroupName" --query name -o tsv 2>/dev/null || true)
 cosmosExists=$(az cosmosdb show --name "$CosmosDbAccountName" --resource-group "$ResourceGroupName" --query name -o tsv 2>/dev/null || true)
 kvExists=$(az keyvault show --name "$KeyVaultName" --resource-group "$ResourceGroupName" --query name -o tsv 2>/dev/null || true)
-if [[ -z "$storageExists" ]]; then echo "[ERROR] Storage account '$StorageAccountName' not found. Run 2.deploy-infrastructure.sh first." >&2; exit 1; fi
-if [[ -z "$cosmosExists" ]];  then echo "[ERROR] Cosmos DB '$CosmosDbAccountName' not found. Run 2.deploy-infrastructure.sh first." >&2; exit 1; fi
-if [[ -z "$kvExists" ]];      then echo "[ERROR] Key Vault '$KeyVaultName' not found. Run 2.deploy-infrastructure.sh first." >&2; exit 1; fi
+if [[ -z "$storageExists" ]]; then echo "[ERROR] Storage account '$StorageAccountName' not found. Run 1.deploy-infrastructure.sh first." >&2; exit 1; fi
+if [[ -z "$cosmosExists" ]];  then echo "[ERROR] Cosmos DB '$CosmosDbAccountName' not found. Run 1.deploy-infrastructure.sh first." >&2; exit 1; fi
+if [[ -z "$kvExists" ]];      then echo "[ERROR] Key Vault '$KeyVaultName' not found. Run 1.deploy-infrastructure.sh first." >&2; exit 1; fi
 echo "[OK] Resources verified"
 
 # -----------------------------------------------------------------------------

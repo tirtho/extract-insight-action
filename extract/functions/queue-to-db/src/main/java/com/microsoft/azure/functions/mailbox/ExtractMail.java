@@ -359,6 +359,7 @@ public class ExtractMail {
                 String analyzeResponse = cu.analyze(analyzerId, payload);
                 String operationId = AzContentUnderstanding.getOperationIdFromJson(analyzeResponse);
 
+
                 result.setAnalyzeOperationId(operationId);
                 result.setAnalyzeRequestDateTime(LocalDateTime.now().toString());
                 result.setStatus("accepted");

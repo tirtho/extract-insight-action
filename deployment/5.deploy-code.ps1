@@ -13,8 +13,8 @@
 .PARAMETER Suffix
     Optional. The same suffix used when running deploy-infrastructure.ps1.
 .USAGE
-    .\9.deploy-code.ps1 -Suffix 999
-    .\9.deploy-code.ps1 -Environment dev -Suffix 999
+    .\5.deploy-code.ps1 -Suffix 999
+    .\5.deploy-code.ps1 -Environment dev -Suffix 999
 #>
 param(
     [Parameter(HelpMessage="Environment (default: dev, example: dev)")]

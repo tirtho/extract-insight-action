@@ -7,6 +7,9 @@
     instructions, builds each JAR with Maven (also updating project-lib/java
     via the copy-to-project-lib profile), then runs the provisioning main()
     to register the agent in Azure AI Foundry.
+
+    Self-sufficient: grants the signed-in user the AI Foundry data-plane roles
+    the agents API requires (so it does not depend on 6.operation-dev.ps1).
 .PARAMETER Environment
     Optional. Environment name (default: dev).
 .PARAMETER Suffix
@@ -14,8 +17,8 @@
 .PARAMETER MavenTimeoutMinutes
     Maximum time to allow each Maven build before failing (default: 15).
 .USAGE
-    .\8.deploy-agents.ps1 -Suffix 999
-    .\8.deploy-agents.ps1 -Environment dev -Suffix 999
+    .\3.deploy-agents.ps1 -Suffix 999
+    .\3.deploy-agents.ps1 -Environment dev -Suffix 999
 #>
 param(
     [Parameter(HelpMessage="Environment (default: dev, example: dev)")]
@@ -57,6 +60,8 @@ Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix (location: 
 # =============================================================================
 $ResourceGroupName = "rg-$ProjectName-$Environment-$Suffix"
 $KeyVaultName      = "kv-$ProjectName-$Environment-$Suffix"
+$AiFoundryName        = "oai-$ProjectName-$Environment-$Suffix"
+$AiFoundryProjectName = "proj-$ProjectName-$Environment-$Suffix"
 
 $ScriptRoot  = $PSScriptRoot
 $RepoRoot    = Split-Path $ScriptRoot -Parent
@@ -295,6 +300,78 @@ if (-not $kvUrl) {
 }
 $kvUrl = $kvUrl.TrimEnd('/')
 Write-Host "[OK] Key Vault URL: $kvUrl" -ForegroundColor Green
+
+# =============================================================================
+# STEP 4b: Ensure current-user AI Foundry RBAC (self-sufficient provisioning)
+# =============================================================================
+# The provisioner runs as the signed-in user (DefaultAzureCredential) and
+# registers the agent via the AI Foundry agents API. These are the data-plane
+# roles that API needs, so this script does NOT depend on 6.operation-dev.ps1.
+Write-Host ""
+Write-Host ">>> Step 4b: Ensuring AI Foundry RBAC for current user" -ForegroundColor White
+
+$CurrentUserId = az ad signed-in-user show --query id -o tsv 2>$null
+if (-not $CurrentUserId) {
+    Write-Host "[ERROR] Could not determine the signed-in user. Run 'az login' first." -ForegroundColor Red
+    exit 1
+}
+$SubscriptionId = az account show --query id -o tsv 2>$null
+$AiFoundryId = az cognitiveservices account show --name $AiFoundryName --resource-group $ResourceGroupName --query id -o tsv 2>$null
+
+# Idempotent role assignment for the signed-in user. Accepts a role name or a
+# role-definition ID (custom roles must be referenced by ID at sub-resource scope).
+function Add-CurrentUserRole {
+    param([string]$RoleNameOrId, [string]$Scope, [string]$Label)
+    $existing = az role assignment list --assignee $CurrentUserId --role $RoleNameOrId --scope $Scope --query '[0].id' -o tsv 2>$null
+    if ($existing) {
+        Write-Host "  [OK] $Label - already assigned" -ForegroundColor Gray
+        return
+    }
+    az role assignment create --assignee $CurrentUserId --role $RoleNameOrId --scope $Scope --output none 2>$null
+    Write-Host "  [SUCCESS] $Label - assigned" -ForegroundColor Green
+}
+
+if (-not $AiFoundryId) {
+    Write-Host "[WARNING] AI Foundry account '$AiFoundryName' not found; skipping RBAC grants. Agent provisioning may fail." -ForegroundColor Yellow
+} else {
+    $AiFoundryProjectId = "$AiFoundryId/projects/$AiFoundryProjectName"
+
+    # Built-in data-plane roles (account scope) + Agents API access (account + project)
+    Add-CurrentUserRole -RoleNameOrId 'Cognitive Services User'        -Scope $AiFoundryId        -Label 'Cognitive Services User (account)'
+    Add-CurrentUserRole -RoleNameOrId 'Cognitive Services OpenAI User' -Scope $AiFoundryId        -Label 'Cognitive Services OpenAI User (account)'
+    Add-CurrentUserRole -RoleNameOrId 'Azure AI Developer'             -Scope $AiFoundryId        -Label 'Azure AI Developer (account)'
+    Add-CurrentUserRole -RoleNameOrId 'Azure AI Developer'             -Scope $AiFoundryProjectId -Label 'Azure AI Developer (project)'
+
+    # Custom role: Azure AI Developer covers OpenAI/* but not the AIServices/*
+    # data actions used by the agents endpoint. Create it if absent.
+    $EiaAgentWriterRole = 'EIA AI Foundry Agent Writer'
+    $existingCustomRole = az role definition list --name $EiaAgentWriterRole --query '[0].name' -o tsv 2>$null
+    if (-not $existingCustomRole) {
+        Write-Host "  [INFO] Creating custom role '$EiaAgentWriterRole'" -ForegroundColor Cyan
+        $roleJson = [ordered]@{
+            Name             = $EiaAgentWriterRole
+            Description      = 'Grants AIServices/* data-plane access needed for AI Foundry agents API (AIServices/* absent from Azure AI Developer role definition)'
+            Actions          = @()
+            DataActions      = @('Microsoft.CognitiveServices/accounts/AIServices/*')
+            AssignableScopes = @("/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName")
+        } | ConvertTo-Json -Depth 5
+        $tmpFile = Join-Path $env:TEMP "eia-custom-role-$([guid]::NewGuid().ToString('N')).json"
+        Set-Content -Path $tmpFile -Value $roleJson -Encoding UTF8
+        az role definition create --role-definition "@$tmpFile" --output none 2>$null
+        Remove-Item $tmpFile -ErrorAction SilentlyContinue
+    }
+    # Resolve by ID — az cannot resolve custom role names at deep sub-resource scopes.
+    $EiaAgentWriterRoleId = az role definition list --name $EiaAgentWriterRole --query '[0].id' -o tsv 2>$null
+    if ($EiaAgentWriterRoleId) {
+        $EiaAgentWriterRoleId = $EiaAgentWriterRoleId.Trim()
+        Add-CurrentUserRole -RoleNameOrId $EiaAgentWriterRoleId -Scope $AiFoundryId        -Label "$EiaAgentWriterRole (account)"
+        Add-CurrentUserRole -RoleNameOrId $EiaAgentWriterRoleId -Scope $AiFoundryProjectId -Label "$EiaAgentWriterRole (project)"
+    } else {
+        Write-Host "  [WARNING] Could not resolve custom role '$EiaAgentWriterRole'; agent registration may fail." -ForegroundColor Yellow
+    }
+
+    Write-Host "  [INFO] RBAC propagation may take up to 5 minutes if roles were just created." -ForegroundColor Cyan
+}
 
 # =============================================================================
 # STEP 5: Build and provision each agent

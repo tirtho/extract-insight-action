@@ -32,8 +32,9 @@ Prerequisites
   set AZURE_KEY_VAULT_URL=https://your-vault.vault.azure.net
   mvn clean verify -Dgroups=integration
 
-  Option C: Run ..\deployment\1.config.ps1 (or .cmd or .sh) first,
-  which sets AZURE_KEY_VAULT_URL from env.config, then run:
+  Option C: Run ..\deployment\1.deploy-infrastructure.ps1 (or .sh) first,
+  which writes env.bat with AZURE_KEY_VAULT_URL at the repo root; source it
+  (env.bat on Windows) then run:
   mvn clean verify -Dgroups=integration
 
   Integration tests are run by the Failsafe plugin and require:

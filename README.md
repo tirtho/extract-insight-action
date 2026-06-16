@@ -59,7 +59,7 @@ Example deployment key: eia-dev-1
 Run:
 
 ```powershell
-.\deployment\2.deploy-infrastructure.ps1 -Environment dev -Suffix 1
+.\deployment\1.deploy-infrastructure.ps1 -Environment dev -Suffix 1
 ```
 
 If you omit `-Environment` or `-Suffix`, the script prompts for them. The deployment scripts still prompt for location unless you accept the default shown in the prompt. It then creates core resources and writes env.bat at the repo root with AZURE_KEY_VAULT_URL.
@@ -69,10 +69,9 @@ If you omit `-Environment` or `-Suffix`, the script prompts for them. The deploy
 Run in order:
 
 ```powershell
-.\deployment\3.grant-graph-consent.ps1 -Environment dev -Suffix 1
-.\deployment\4.operation-dev.ps1 -Environment dev -Suffix 1
-.\deployment\5.content-understanding-add-schema.ps1 -Environment dev -Suffix 1
-.\deployment\8.deploy-agents.ps1 -Environment dev -Suffix 1
+.\deployment\2.grant-graph-consent.ps1 -Environment dev -Suffix 1
+.\deployment\3.deploy-agents.ps1 -Environment dev -Suffix 1
+.\deployment\4.content-understanding-add-schema.ps1 -Environment dev -Suffix 1
 ```
 
 ## 6. Build And Deploy Application Code
@@ -80,17 +79,34 @@ Run in order:
 Run:
 
 ```powershell
-.\deployment\9.deploy-code.ps1 -Environment dev -Suffix 1
+.\deployment\5.deploy-code.ps1 -Environment dev -Suffix 1
 ```
 
 Select workloads when prompted (All for first deployment, or only the component you changed).
+
+Then choose the environment posture (run last, after everything is deployed):
+
+```powershell
+# Dev: open access + grant the signed-in user data-plane RBAC for local testing
+.\deployment\6.operation-dev.ps1 -Environment dev -Suffix 1
+
+# Prod: harden the network (private endpoints, disable public access)
+.\deployment\6.operation-prod.ps1 -Environment prod -Suffix 1
+```
+
+`6.operation-prod` prompts **"Allow local testing access?"**: answer **yes** to
+temporarily allow your current public IP through the firewalls and grant your
+signed-in user the data-plane RBAC (Storage, Key Vault, Cosmos DB, Cognitive
+Services) needed to test against the hardened resources; answer **no** to remove
+that access and keep everything fully private. To undo all hardening, re-run it
+with `-Rollback` (see Utilities below).
 
 ## 7. Onboard Users
 
 Run:
 
 ```powershell
-.\deployment\11.admin-user-access.ps1 -Environment dev -Suffix 1
+.\deployment\110.admin-user-access.ps1 -Environment dev -Suffix 1
 ```
 
 This configures access groups and user profile metadata for the web app.
@@ -109,7 +125,7 @@ git push
 Then redeploy changed workloads:
 
 ```powershell
-.\deployment\9.deploy-code.ps1 -Environment dev -Suffix 1
+.\deployment\5.deploy-code.ps1 -Environment dev -Suffix 1
 ```
 
 ## 9. Run The App Locally
@@ -117,30 +133,30 @@ Then redeploy changed workloads:
 For local validation, use:
 
 ```powershell
-.\deployment\100.local-test-deploy.ps1
+.\deployment\1000.local-deploy.ps1
 ```
 
 Optional debug mode for a single selected function app:
 
 ```powershell
-.\deployment\100.local-test-deploy.ps1 -Debug
+.\deployment\1000.local-deploy.ps1 -Debug
 ```
 
 If needed, explicitly pass Key Vault URL:
 
 ```powershell
-.\deployment\100.local-test-deploy.ps1 -KeyVaultUrl https://<your-vault>.vault.azure.net
+.\deployment\1000.local-deploy.ps1 -KeyVaultUrl https://<your-vault>.vault.azure.net
 ```
 
 ## 10. Recommended First-Time Script Order
 
-1. deployment/2.deploy-infrastructure.ps1
-2. deployment/3.grant-graph-consent.ps1
-3. deployment/4.operation-dev.ps1
-4. deployment/5.content-understanding-add-schema.ps1
-5. deployment/8.deploy-agents.ps1
-6. deployment/9.deploy-code.ps1
-7. deployment/11.admin-user-access.ps1
+1. deployment/1.deploy-infrastructure.ps1
+2. deployment/2.grant-graph-consent.ps1
+3. deployment/3.deploy-agents.ps1
+4. deployment/4.content-understanding-add-schema.ps1
+5. deployment/5.deploy-code.ps1
+6. deployment/6.operation-dev.ps1 (or 6.operation-prod.ps1 to harden for prod — run last)
+7. deployment/110.admin-user-access.ps1
 
 ## 11. Utilities
 
@@ -150,10 +166,17 @@ Rotate Graph secret:
 .\deployment\rotate-graph-api-secret.ps1 -Environment dev -Suffix 1
 ```
 
+Undo prod hardening (delete VNet/private endpoints/DNS, re-enable public access,
+remove VNet integration; RBAC left untouched):
+
+```powershell
+.\deployment\6.operation-prod.ps1 -Environment prod -Suffix 1 -Rollback
+```
+
 Delete all deployed resources (destructive):
 
 ```powershell
-.\deployment\10.delete-all.ps1 -Environment dev -Suffix 1
+.\deployment\100.admin-delete-all.ps1 -Environment dev -Suffix 1
 ```
 
 ## Notes

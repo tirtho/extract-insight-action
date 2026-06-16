@@ -454,9 +454,6 @@ $StorageAccountId = (Invoke-AzCliSilent -Arguments @('storage','account','show',
 $CosmosDbAccountId = (Invoke-AzCliSilent -Arguments @('cosmosdb','show','--name',$CosmosDbAccountName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 $KeyVaultId = (Invoke-AzCliSilent -Arguments @('keyvault','show','--name',$KeyVaultName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 $ContentUnderstandingId = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
-$AiFoundryId          = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
-$AiFoundryProjectName = "proj-$ProjectName-$Environment-$Suffix"
-$AiFoundryProjectId   = "$AiFoundryId/projects/$AiFoundryProjectName"
 $ServiceBusId = (Invoke-AzCliSilent -Arguments @('servicebus','namespace','show','--name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 
 # Resolve Content Understanding managed identity (may need to enable it first)
@@ -499,32 +496,9 @@ foreach ($role in @('Cognitive Services User','Cognitive Services Contributor'))
     $allAssignments.Add(@{ Assignee=$CurrentUserId; Role=$role; Scope=$ContentUnderstandingId; Label="$role (Content Understanding)"; Type='arm' })
 }
 
-# AI Foundry / Azure OpenAI roles for current user (data-plane access: chat completions, embeddings, agents, etc.)
-foreach ($role in @('Cognitive Services User','Cognitive Services Contributor','Cognitive Services OpenAI User','Cognitive Services OpenAI Contributor','Azure AI Developer')) {
-    $allAssignments.Add(@{ Assignee=$CurrentUserId; Role=$role; Scope=$AiFoundryId;        Label="$role (AI Foundry account)"; Type='arm' })
-}
-# Also grant Azure AI Developer at the project scope (Foundry project-level RBAC requires this)
-$allAssignments.Add(@{ Assignee=$CurrentUserId; Role='Azure AI Developer'; Scope=$AiFoundryProjectId; Label='Azure AI Developer (AI Foundry project)'; Type='arm' })
-
-# EIA AI Foundry Agent Writer (custom): covers AIServices/* data actions missing from Azure AI Developer
-$EiaAgentWriterRole = 'EIA AI Foundry Agent Writer'
-$existingCustomRole = az role definition list --name $EiaAgentWriterRole --query '[0].name' -o tsv 2>$null
-if (-not $existingCustomRole) {
-    Write-Host "  [INFO] Creating custom role '$EiaAgentWriterRole'" -ForegroundColor Cyan
-    $roleJson = [ordered]@{
-        Name             = $EiaAgentWriterRole
-        Description      = 'Grants AIServices/* data-plane access needed for AI Foundry agents API (AIServices/* absent from Azure AI Developer role definition)'
-        Actions          = @()
-        DataActions      = @('Microsoft.CognitiveServices/accounts/AIServices/*')
-        AssignableScopes = @("/subscriptions/$((az account show --query id -o tsv))/resourceGroups/$ResourceGroupName")
-    } | ConvertTo-Json -Depth 5
-    $tmpFile = Join-Path $env:TEMP "eia-custom-role-$([guid]::NewGuid().ToString('N')).json"
-    Set-Content -Path $tmpFile -Value $roleJson -Encoding UTF8
-    az role definition create --role-definition "@$tmpFile" --output none 2>$null
-    Remove-Item $tmpFile -ErrorAction SilentlyContinue
-}
-$allAssignments.Add(@{ Assignee=$CurrentUserId; Role=$EiaAgentWriterRole; Scope=$AiFoundryId;        Label="$EiaAgentWriterRole (AI Foundry account)"; Type='arm' })
-$allAssignments.Add(@{ Assignee=$CurrentUserId; Role=$EiaAgentWriterRole; Scope=$AiFoundryProjectId; Label="$EiaAgentWriterRole (AI Foundry project)"; Type='arm' })
+# AI Foundry / Azure OpenAI current-user RBAC (account + project, incl. the custom
+# 'EIA AI Foundry Agent Writer' role) is granted by 3.deploy-agents.ps1, which must
+# run before this script. Not duplicated here to keep a single source of truth.
 
 # Content Understanding -> Storage Blob Data Reader
 if ($CuIdentity) {
