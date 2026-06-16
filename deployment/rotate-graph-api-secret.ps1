@@ -9,7 +9,7 @@
 .PARAMETER Environment
     Optional. Environment name (default: dev).
 .PARAMETER Suffix
-    Optional. The same suffix used when running deploy-infrastructure.ps1.
+    Optional. The same suffix used when running 1.deploy-infrastructure.ps1.
 .PARAMETER ExpiryYears
     Optional. Number of years until the new secret expires. Default: 2.
 .USAGE
@@ -53,7 +53,7 @@ $ProjectName = "eia"
 Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
 
 # =============================================================================
-# CONFIGURATION (must match deploy-infrastructure.ps1)
+# CONFIGURATION (must match 1.deploy-infrastructure.ps1)
 # =============================================================================
 $KeyVaultName = "kv-$ProjectName-$Environment-$Suffix"
 $GraphAppName = "$ProjectName-graph-api-$Environment"
@@ -121,7 +121,7 @@ Write-Host ""
 Write-Host "Looking up app registration: $GraphAppName ..." -ForegroundColor Gray
 $appResult = Invoke-Az -Arguments @('ad','app','list','--display-name',$GraphAppName,'--query','[0].appId','-o','tsv')
 if ($appResult.ExitCode -ne 0 -or -not $appResult.Output) {
-    Write-Host "[ERROR] App registration '$GraphAppName' not found. Run deploy-infrastructure.ps1 first." -ForegroundColor Red
+    Write-Host "[ERROR] App registration '$GraphAppName' not found. Run 1.deploy-infrastructure.ps1 first." -ForegroundColor Red
     exit 1
 }
 $GraphClientId = $appResult.Output

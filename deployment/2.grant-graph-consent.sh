@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Grants admin consent for Graph API permissions on the app registration.
-# Mirrors deployment/3.grant-graph-consent.ps1
+# Mirrors deployment/2.grant-graph-consent.ps1
 #
 # Usage:
-#   ./3.grant-graph-consent.sh <suffix>
+#   ./2.grant-graph-consent.sh <suffix>
 # =============================================================================
 set -euo pipefail
 
@@ -69,7 +69,7 @@ if [[ -z "$GRAPH_CLIENT_ID" || "$GRAPH_CLIENT_ID" == "null" ]]; then
     fi
     echo "[HINT] Other 'graph-api' apps visible to you in this tenant:" >&2
     az ad app list --filter "contains(displayName,'graph-api')" --query '[].{name:displayName, appId:appId}' -o table || true
-    echo "[HINT] If your app uses a different name, set GRAPH_APP_NAME and re-run, or run 2.deploy-infrastructure.sh first." >&2
+    echo "[HINT] If your app uses a different name, set GRAPH_APP_NAME and re-run, or run 1.deploy-infrastructure.sh first." >&2
     exit 1
 fi
 rm -f /tmp/graph-consent-err

@@ -16,9 +16,9 @@
     Optional. Key Vault URL to pass to local workloads. If omitted, the script
     uses AZURE_KEY_VAULT_URL, then env.bat.
 .USAGE
-    .\100.local-test-deploy.ps1
-    .\100.local-test-deploy.ps1 -Debug
-    .\100.local-test-deploy.ps1 -KeyVaultUrl https://my-vault.vault.azure.net
+    .\1000.local-deploy.ps1
+    .\1000.local-deploy.ps1 -Debug
+    .\1000.local-deploy.ps1 -KeyVaultUrl https://my-vault.vault.azure.net
 #>
 param(
     [switch]$Debug,

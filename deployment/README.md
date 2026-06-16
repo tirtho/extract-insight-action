@@ -1,168 +1,169 @@
 # Infrastructure Deployment
 
-This folder contains scripts and configuration for deploying the Azure infrastructure required for the extract-insight-action project.
+This folder contains the numbered scripts that deploy and operate the Azure
+infrastructure for the extract-insight-action (EIA) project. Each step has a
+PowerShell (`.ps1`) script and a matching Bash (`.sh`) script with identical
+functionality. Run the steps in prefix-number order.
+
+> For the full end-to-end runbook (including local validation and user
+> onboarding), see the root [README.md](../README.md). This document focuses on
+> the deployment folder itself.
 
 ## Overview
 
-The deployment script creates and configures the following Azure resources:
+The deployment scripts create and configure the following Azure resources:
 
 - **Resource Group** - Container for all project resources
 - **Key Vault** - Secure storage for secrets and configuration
-- **Storage Account** - Required for Azure Functions runtime
-- **Service Bus** - Message queuing service with topic and subscription
+- **Storage Account** - Required for the Azure Functions runtime
+- **Service Bus** - Message queuing between the functions
 - **Application Insights** - Application monitoring and logging
-- **App Service Plan** - Hosting plan for Function Apps
-- **Function Apps** - Two Java-based function apps:
-  - `mailbox-to-queue` - Processes emails from mailbox and sends to Service Bus
-  - `queue-to-db` - Processes messages from Service Bus and stores in database
+- **App Service Plan** - Hosting plan for the Function Apps and Web App
+- **Function Apps** - Three Java-based function apps:
+  - `mailbox-to-queue` - Polls the M365 mailbox and enqueues messages
+  - `queue-to-db` - Processes queued messages and persists to Cosmos DB
+  - `cu-queue-to-db` - Runs Content Understanding analysis and persists results
+- **Web App** - Spring Boot UI for secure user review and actions
+- **Cosmos DB** - Persistence for extracted insight
+- **AI Foundry** - Hosts the triage / decision-support agents
+- **Content Understanding** - Document, image, audio and video analyzers
 - **Microsoft Graph API Registration** - For accessing mailbox data
-- **Managed Identities** - Secure authentication between services
-- **RBAC Permissions** - Proper access controls for all resources
+- **Managed Identities** - Secure service-to-service authentication
+- **RBAC Permissions** - Least-privilege access controls for all resources
 
 ## Prerequisites
 
 1. **Azure CLI** installed and authenticated
    ```bash
-   # Install Azure CLI (if not already installed)
-   # Windows: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli-windows
-   # macOS: brew install azure-cli
-   # Linux: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli-linux
-   
    # Login to Azure
    az login
-   
+
    # Set your subscription (if you have multiple)
    az account set --subscription "your-subscription-id"
    ```
 
 2. **Shell environment**:
-   - **Linux / macOS**: Bash
-   - **Windows**: Command Prompt (cmd.exe) — native `.cmd` scripts are provided
-   - **Alternative**: Azure Cloud Shell (bash)
+   - **Windows**: Windows PowerShell 5.1 or PowerShell 7.x (run the `.ps1` scripts)
+   - **Linux / macOS**: Bash, with `jq` and `curl` available (run the `.sh` scripts)
+   - **Alternative**: Azure Cloud Shell (Bash or PowerShell)
 
-3. **Appropriate Azure permissions**:
-   - Contributor role on the subscription or resource group
-   - Application Administrator role in Azure AD (for creating app registrations)
+3. **Build tooling** (required by `3.deploy-agents` and `5.deploy-code`):
+   - Java 21 JDK (`JAVA_HOME` must point to Java 21)
+   - Maven (`mvn` on `PATH`)
+
+4. **Appropriate Azure permissions**:
+   - Contributor (or Owner) on the subscription or resource group
+   - Entra Application Administrator (for creating app registrations)
+   - Entra Privileged Role Administrator / Global Administrator for admin consent
 
 ## Usage
 
-Both Linux/macOS (bash) and Windows (cmd) scripts are provided with identical functionality.
+Every step ships as both a PowerShell and a Bash script. Each script accepts
+`-Environment`/`--environment` and `-Suffix`/positional suffix; if omitted, the
+script prompts for them (and for location). Keep the environment, suffix and
+location consistent across all steps for the same deployment.
 
----
+Example deployment key: `eia-dev-1`
 
-### Linux / macOS (Bash)
+### Script order
 
-#### 1. Configure Environment Variables
+| Step | PowerShell | Bash | Purpose |
+|------|-----------|------|---------|
+| 1 | `1.deploy-infrastructure.ps1` | `1.deploy-infrastructure.sh` | Create all core Azure resources; write `env.bat` |
+| 2 | `2.grant-graph-consent.ps1` | `2.grant-graph-consent.sh` | Grant admin consent for the Graph API app registration |
+| 3 | `3.deploy-agents.ps1` | `3.deploy-agents.sh` | Build and provision the AI Foundry agents |
+| 4 | `4.content-understanding-add-schema.ps1` | `4.content-understanding-add-schema.sh` | Register the Content Understanding analyzer schemas |
+| 5 | `5.deploy-code.ps1` | `5.deploy-code.sh` | Build and deploy the function and web app code |
+| 6 | `6.operation-dev.ps1` / `6.operation-prod.ps1` | `6.operation-dev.sh` / `6.operation-prod.sh` | Apply the environment posture (run **last**) |
 
-**Option A: Export variables in your shell**
+Step 6 is an either/or posture choice, run after everything else is deployed:
+
+- **`6.operation-dev`** - opens public access and grants the signed-in user
+  data-plane RBAC for local testing.
+- **`6.operation-prod`** - hardens the network (VNet, private endpoints,
+  disables public access). It then prompts **"Allow local testing access?"**:
+  answer **yes** to punch a temporary firewall hole for your current public IP
+  and grant your signed-in user the data-plane RBAC (Storage, Key Vault, Cosmos
+  DB built-in data roles, Cognitive Services) needed to test against the
+  hardened resources; answer **no** to remove that access and keep everything
+  fully private.
+
+To **undo** the prod hardening, re-run `6.operation-prod` with the rollback
+switch. It deletes the VNet / private endpoints / private DNS zones, re-enables
+public network access, and removes the VNet integration, restoring the
+pre-hardening state. RBAC role assignments are left untouched.
+
+```powershell
+.\deployment\6.operation-prod.ps1 -Environment prod -Suffix 1 -Rollback
+```
+
 ```bash
-export PROJECT_NAME="eia"
-export ENVIRONMENT="dev"
-export LOCATION="eastus"
-export SUBSCRIPTION_ID="your-subscription-id"
+./deployment/6.operation-prod.sh 1 --environment prod --rollback
 ```
 
-**Option B: Use the configuration file**
+### Example (PowerShell)
+
+```powershell
+.\deployment\1.deploy-infrastructure.ps1 -Environment dev -Suffix 1
+.\deployment\2.grant-graph-consent.ps1 -Environment dev -Suffix 1
+.\deployment\3.deploy-agents.ps1 -Environment dev -Suffix 1
+.\deployment\4.content-understanding-add-schema.ps1 -Environment dev -Suffix 1
+.\deployment\5.deploy-code.ps1 -Environment dev -Suffix 1
+.\deployment\6.operation-dev.ps1 -Environment dev -Suffix 1
+```
+
+### Example (Bash)
+
 ```bash
-# Edit the configuration file with your values
-nano deployment/config.env
-
-# Source the configuration
-source deployment/config.env
+./deployment/1.deploy-infrastructure.sh 1 --environment dev
+./deployment/2.grant-graph-consent.sh 1 --environment dev
+./deployment/3.deploy-agents.sh 1 --environment dev
+./deployment/4.content-understanding-add-schema.sh 1 --environment dev
+./deployment/5.deploy-code.sh 1 --environment dev
+./deployment/6.operation-dev.sh 1 --environment dev
 ```
 
-#### 2. Run the Deployment Script
+### Utility scripts
 
-```bash
-chmod +x deployment/deploy-infrastructure.sh
-./deployment/deploy-infrastructure.sh
-```
+These sit outside the numbered sequence:
 
----
-
-### Windows (Command Prompt)
-
-#### 1. Configure Environment Variables
-
-**Option A: Set variables in your cmd session**
-```cmd
-set "PROJECT_NAME=eia"
-set "ENVIRONMENT=dev"
-set "LOCATION=centalus"
-set "SUBSCRIPTION_ID=your-subscription-id"
-```
-
-**Option B: Use the configuration file**
-```cmd
-REM Edit config.cmd with your values, then run it
-notepad deployment\config.cmd
-deployment\config.cmd
-```
-
-#### 2. Run the Deployment Script
-
-```cmd
-deployment\deploy-infrastructure.cmd
-```
-
-### 3. Post-Deployment Steps
-
-After the script completes successfully:
-
-1. **Grant Microsoft Graph API permissions**:
-   - Go to Azure Portal > Azure Active Directory > App registrations
-   - Find your app registration (e.g., "extract-insight-action-graph-api-dev")
-   - Go to "API permissions"
-   - Click "Grant admin consent" for the required permissions
-
-2. **Deploy your function code**:
-   ```bash
-   # Navigate to your function folders and deploy
-   cd extract/functions/mailbox-to-queue
-   func azure functionapp publish func-mailbox-extract-insight-action-dev
-   
-   cd ../queue-to-db
-   func azure functionapp publish func-queuedb-extract-insight-action-dev
-   ```
+| Script | Purpose |
+|--------|---------|
+| `110.admin-user-access.ps1` | Configure access groups and user profile metadata |
+| `1000.local-deploy.ps1` | Run the app locally for validation |
+| `rotate-graph-api-secret.ps1` / `.sh` | Rotate the Graph API client secret |
+| `100.admin-delete-all.ps1` | **Destructive** - delete all deployed resources |
 
 ## Configuration Variables
 
-The script uses the following environment variables for configuration:
+The scripts derive resource names from a small set of values. They are passed as
+script parameters (`-Environment`/`-Suffix`) or picked up from the environment;
+any missing value is prompted for at runtime.
 
-### Required Configuration
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `PROJECT_NAME` | Base name for all resources | `extract-insight-action` | `my-project` |
-| `ENVIRONMENT` | Environment suffix | `dev` | `prod`, `staging` |
-| `LOCATION` | Azure region | `eastus` | `westus2`, `canadacentral` |
-
-### Optional Configuration
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `SUBSCRIPTION_ID` | Azure subscription ID | Current subscription |
-| `RESOURCE_GROUP_NAME` | Resource group name | `rg-{PROJECT_NAME}-{ENVIRONMENT}` |
-| `KEY_VAULT_NAME` | Key Vault name | `kv-{PROJECT_NAME}-{ENVIRONMENT}-{random}` |
-| `SERVICE_BUS_NAMESPACE` | Service Bus namespace | `sb-{PROJECT_NAME}-{ENVIRONMENT}` |
-| `STORAGE_ACCOUNT_NAME` | Storage account name | `st{PROJECT_NAME}{ENVIRONMENT}{random}` |
-
-### Graph API Configuration
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `GRAPH_APP_NAME` | Graph API app registration name | `{PROJECT_NAME}-graph-api-{ENVIRONMENT}` |
-| `GRAPH_CLIENT_ID` | Existing client ID (optional) | Created automatically |
-| `GRAPH_CLIENT_SECRET` | Existing client secret (optional) | Created automatically |
+| `PROJECT_NAME` | Base name for all resources | `eia` | `eia` |
+| `Environment` | Environment name | `dev` (prod scripts default `prod`) | `dev`, `prod` |
+| `Suffix` | Short suffix to keep names unique | `1` | `1`, `999` |
+| `Location` | Azure region | `centralus` | `eastus`, `westus2` |
 
 ## Resource Naming Convention
 
-The script follows Azure naming conventions:
+The scripts follow a consistent naming convention using the deployment key
+`{project}-{environment}-{suffix}`:
 
-- Resource Group: `rg-{project}-{environment}`
-- Key Vault: `kv-{project}-{environment}-{random}`
-- Storage Account: `st{project}{environment}{random}` (no hyphens, max 24 chars)
-- Service Bus: `sb-{project}-{environment}`
-- Function Apps: `func-{type}-{project}-{environment}`
+- Resource Group: `rg-{project}-{environment}-{suffix}`
+- Key Vault: `kv-{project}-{environment}-{suffix}`
+- Storage Account: `st{project}{environment}{suffix}` (no hyphens, max 24 chars)
+- Service Bus: `sb-{project}-{environment}-{suffix}`
+- Cosmos DB: `cosmos-{project}-{environment}-{suffix}`
+- AI Foundry: `oai-{project}-{environment}-{suffix}`
+- Content Understanding: `cu-{project}-{environment}-{suffix}`
+- Function Apps: `func-{type}-{project}-{environment}-{suffix}`
+- Web App: `app-{project}-{environment}-{suffix}`
 
-Random suffixes are added to globally unique resources to avoid naming conflicts.
+Keep `Suffix`, `Environment` and `Location` consistent across every script for
+the same deployment.
 
 ## Idempotency
 
@@ -238,24 +239,19 @@ The deployment includes Application Insights for:
 
 ### Cleanup
 
-To remove all created resources:
+To remove all created resources, use the destructive admin script (it deletes
+the resource group and the Graph API app registration):
 
-**Bash:**
-```bash
-# Delete the entire resource group (WARNING: This deletes everything!)
-az group delete --name "rg-eia-dev" --yes --no-wait
-
-# Delete the Graph API app registration separately
-az ad app delete --id "$GRAPH_CLIENT_ID"
+**PowerShell:**
+```powershell
+.\deployment\100.admin-delete-all.ps1 -Environment dev -Suffix 1
 ```
 
-**Windows cmd:**
-```cmd
-REM Delete the entire resource group (WARNING: This deletes everything!)
-az group delete --name "rg-eia-dev" --yes --no-wait
+Or delete the resource group directly:
 
-REM Delete the Graph API app registration separately
-az ad app delete --id "%GRAPH_CLIENT_ID%"
+```bash
+# Delete the entire resource group (WARNING: This deletes everything!)
+az group delete --name "rg-eia-dev-1" --yes --no-wait
 ```
 
 ## Support
@@ -268,3 +264,7 @@ For issues with the deployment script:
 4. Check Azure Portal for resource status
 
 For Azure service-specific issues, consult the official Azure documentation.
+
+## TODO
+
+- While the PowerShell scripts are tested, the Bash shell scripts (for installing from a Linux OS) are not tested yet.

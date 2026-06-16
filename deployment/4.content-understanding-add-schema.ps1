@@ -16,9 +16,9 @@
     Optional. Path to the folder containing .json schema files.
     Defaults to <script-dir>\cu-schemas.
 .USAGE
-    .\5.content-understanding-add-schema.ps1 -Suffix 0
-    .\5.content-understanding-add-schema.ps1 -Environment dev -Suffix 0
-    .\5.content-understanding-add-schema.ps1 -Suffix 0 -SchemaFolder C:\my-schemas
+    .\4.content-understanding-add-schema.ps1 -Suffix 0
+    .\4.content-understanding-add-schema.ps1 -Environment dev -Suffix 0
+    .\4.content-understanding-add-schema.ps1 -Suffix 0 -SchemaFolder C:\my-schemas
 #>
 param(
     [Parameter(HelpMessage="Environment (default: dev, example: dev)")]

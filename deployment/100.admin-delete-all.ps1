@@ -12,8 +12,8 @@
 .PARAMETER Suffix
     Optional. The same suffix used when running deploy-infrastructure.ps1.
 .USAGE
-    .\10.delete-all.ps1 -Suffix 999
-    .\10.delete-all.ps1 -Environment dev -Suffix 999
+    .\100.admin-delete-all.ps1 -Suffix 999
+    .\100.admin-delete-all.ps1 -Environment dev -Suffix 999
 #>
 param(
     [Parameter(HelpMessage="Environment (default: dev, example: dev)")]

@@ -161,7 +161,6 @@ $DeployModelsCsvPath      = Join-Path $PSScriptRoot "deploy-models.csv"
 # (see Step 9). These initial values are fallbacks if the CSV is missing.
 $AiFoundryDeploymentName  = "gpt-5.1-chat"
 $AiFoundryModelName       = "gpt-5.1-chat"
-$AiFoundryModelVersion    = "2025-11-13"
 
 # Content Understanding requires a supported completion model (separate from the main LLM deployment).
 # Supported: gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-5.2
@@ -249,7 +248,7 @@ function Test-AzResource {
 # Pass -PrincipalType 'ServicePrincipal' (or 'User') for managed identities/users
 # to use --assignee-object-id and bypass the graph.microsoft.com lookup that can
 # time out on restricted networks.
-function Ensure-RoleAssignment {
+function Set-RoleAssignment {
     param(
         [string]$Assignee,
         [string]$Role,
@@ -257,7 +256,7 @@ function Ensure-RoleAssignment {
         [string]$PrincipalType = ''
     )
     if (-not $Scope) {
-        Write-Host "[ERROR] Ensure-RoleAssignment: Scope is empty for role '$Role' on assignee '$Assignee'" -ForegroundColor Red
+        Write-Host "[ERROR] Set-RoleAssignment: Scope is empty for role '$Role' on assignee '$Assignee'" -ForegroundColor Red
         $script:DeploymentErrors.Add("RBAC: '$Role' for '$Assignee' - empty scope")
         return $false
     }
@@ -285,7 +284,7 @@ function Ensure-RoleAssignment {
 
 # Creates a custom role definition if it does not already exist.
 # DataActions is a string array; AssignableScopes is a string array.
-function Ensure-CustomRoleDefinition {
+function Set-CustomRoleDefinition {
     param(
         [string]$RoleName,
         [string]$Description,
@@ -319,7 +318,7 @@ function Ensure-CustomRoleDefinition {
 }
 
 # Returns $true if the Cosmos DB role assignment was already in place
-function Ensure-CosmosRoleAssignment {
+function Set-CosmosRoleAssignment {
     param([string]$AccountName, [string]$ResourceGroup, [string]$RoleDefinitionId, [string]$PrincipalId, [string]$Scope)
     $existing = Invoke-AzCliSilent -Arguments @('cosmosdb','sql','role','assignment','list',
         '--account-name',$AccountName,'--resource-group',$ResourceGroup,
@@ -796,7 +795,7 @@ Invoke-AzCliSilent -Arguments @('keyvault','update','--name',$KeyVaultName,
 $CurrentUserId = (Invoke-AzCliSilent -Arguments @('ad','signed-in-user','show','--query','id','-o','tsv')).Output
 $KeyVaultId = (Invoke-AzCliSilent -Arguments @('keyvault','show','--name',$KeyVaultName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 if ($CurrentUserId -and $KeyVaultId) {
-    $alreadyAssigned = Ensure-RoleAssignment -Assignee $CurrentUserId -Role 'Key Vault Administrator' -Scope $KeyVaultId
+    $alreadyAssigned = Set-RoleAssignment -Assignee $CurrentUserId -Role 'Key Vault Administrator' -Scope $KeyVaultId
     if ($alreadyAssigned) {
         Write-Host "[OK] Key Vault Administrator role already assigned to current user" -ForegroundColor Green
     } else {
@@ -873,7 +872,7 @@ if (-not $GraphClientSecret) {
     Write-Host "[WARNING] You can set it manually: az keyvault secret set --vault-name $KeyVaultName --name GraphClientSecret --value '<secret>'" -ForegroundColor Yellow
 }
 
-Write-Host "[INFO] Run .\3.grant-graph-consent.ps1 -Suffix $Suffix to grant admin consent (requires tenant admin role)" -ForegroundColor Cyan
+Write-Host "[INFO] Run .\2.grant-graph-consent.ps1 -Suffix $Suffix to grant admin consent (requires tenant admin role)" -ForegroundColor Cyan
 
 # -----------------------------------------------------------------------------
 # Web app Entra ID app registration for Spring Security OIDC login
@@ -1036,7 +1035,7 @@ if (Test-AzResource -Arguments @('cosmosdb','show','--name',$CosmosDbAccountName
                      '--default-consistency-level','Session',
                      '--tags',"project=$ProjectName","environment=$Environment",
                      '--output','table')
-    if ($result -ne $null) {
+    if ($null -ne $result) {
         Write-Host "[SUCCESS] Cosmos DB account $CosmosDbAccountName created" -ForegroundColor Green
     }
 }
@@ -1080,7 +1079,7 @@ if (Test-AzResource -Arguments @('cognitiveservices','account','show','--name',$
                      '--custom-domain',$ContentUnderstandingName,
                      '--tags',"project=$ProjectName","environment=$Environment",
                      '--output','table','--yes')
-    if ($result -ne $null) {
+    if ($null -ne $result) {
         Write-Host "[SUCCESS] Content Understanding $ContentUnderstandingName created" -ForegroundColor Green
         # The custom-domain DNS record takes time to become routable after account creation.
         # Data-plane calls to the endpoint will return 'Subdomain does not map to a resource'
@@ -1108,7 +1107,7 @@ if (Test-AzResource -Arguments @('cognitiveservices','account','show','--name',$
                      '--assign-identity',
                      '--tags',"project=$ProjectName","environment=$Environment",
                      '--output','table','--yes')
-    if ($result -ne $null) {
+    if ($null -ne $result) {
         Write-Host "[SUCCESS] AI Foundry resource $AiFoundryName created" -ForegroundColor Green
         # ARM needs time to fully initialise the new account before it can accept
         # project or deployment child-resource PUTs. Without this wait the very
@@ -1130,7 +1129,7 @@ if ($AiFoundryAccountId) {
             -Arguments @('resource','update','--ids',$AiFoundryAccountId,
                          '--set','properties.allowProjectManagement=true',
                          '--latest-include-preview','--output','none')
-        if ($apmResult -ne $null) {
+        if ($null -ne $apmResult) {
             Write-Host "[SUCCESS] Project management enabled on $AiFoundryName" -ForegroundColor Green
             Write-Host "[INFO] Waiting 90 seconds for allowProjectManagement to propagate..." -ForegroundColor Cyan
             Start-Sleep -Seconds 90
@@ -1540,7 +1539,6 @@ if (-not (Test-Path $DeployModelsCsvPath)) {
         if ($rowIndex -eq 0 -and $ok) {
             $AiFoundryDeploymentName = $modelName
             $AiFoundryModelName      = $modelName
-            $AiFoundryModelVersion   = $modelVersion
         }
         $rowIndex++
     }
@@ -1596,7 +1594,7 @@ if ($cuDeploymentExists) {
                      '--sku-name',$AiFoundrySkuName,
                      '--sku-capacity',$CuCompletionSkuCapacity,
                      '--output','table')
-    if ($result -ne $null) {
+    if ($null -ne $result) {
         Write-Host "[SUCCESS] CU completion model $CuCompletionModelName deployed as $CuCompletionDeploymentName on $ContentUnderstandingName" -ForegroundColor Green
     }
 }
@@ -1616,7 +1614,7 @@ if ($cuEmbedDeploymentExists) {
                      '--sku-name',$AiFoundrySkuName,
                      '--sku-capacity',$CuEmbeddingSkuCapacity,
                      '--output','table')
-    if ($result -ne $null) {
+    if ($null -ne $result) {
         Write-Host "[SUCCESS] CU embedding model $CuEmbeddingModelName deployed as $CuEmbeddingDeploymentName on $ContentUnderstandingName" -ForegroundColor Green
     }
 }
@@ -1642,7 +1640,7 @@ if (-not $CuEndpoint) {
 } else {
     # Ensure current user has Cognitive Services User on CU (data-plane role required for PATCH defaults)
     if ($CurrentUserId -and $CuResourceId) {
-        $cuRoleAlready = Ensure-RoleAssignment -Assignee $CurrentUserId -Role 'Cognitive Services User' -Scope $CuResourceId
+        $cuRoleAlready = Set-RoleAssignment -Assignee $CurrentUserId -Role 'Cognitive Services User' -Scope $CuResourceId
         if (-not $cuRoleAlready) {
             Write-Host "[INFO] Granted Cognitive Services User to current user on $ContentUnderstandingName" -ForegroundColor Cyan
             Write-Host "[INFO] Waiting 60 seconds for RBAC propagation..." -ForegroundColor Cyan
@@ -1722,7 +1720,7 @@ if (Test-AzResource -Arguments @('appservice','plan','show','--name',$AppService
                      '--sku','P0v3','--is-linux',
                      '--tags',"project=$ProjectName","environment=$Environment",
                      '--output','table')
-    if ($result -ne $null) {
+    if ($null -ne $result) {
         Write-Host "[SUCCESS] App Service Plan $AppServicePlanName created" -ForegroundColor Green
     }
 }
@@ -1738,7 +1736,7 @@ if (Test-AzResource -Arguments @('webapp','show','--name',$WebAppName,'--resourc
                      '--runtime','JAVA:21-java21',
                      '--tags',"project=$ProjectName","environment=$Environment","app=spring-boot-web",
                      '--output','table')
-    if ($result -ne $null) {
+    if ($null -ne $result) {
         Write-Host "[SUCCESS] Web App $WebAppName created" -ForegroundColor Green
     }
 }
@@ -1770,7 +1768,7 @@ if (Test-AzResource -Arguments @('functionapp','show','--name',$FuncMailboxName,
         -Arguments (@('functionapp','create','--name',$FuncMailboxName) + $CommonFuncArgs + @(
                      '--tags',"project=$ProjectName","environment=$Environment","function=mailbox-to-queue",
                      '--output','table'))
-    if ($result -ne $null) {
+    if ($null -ne $result) {
         Write-Host "[SUCCESS] Function app $FuncMailboxName created" -ForegroundColor Green
     }
 }
@@ -1783,7 +1781,7 @@ if (Test-AzResource -Arguments @('functionapp','show','--name',$FuncQueueDbName,
         -Arguments (@('functionapp','create','--name',$FuncQueueDbName) + $CommonFuncArgs + @(
                      '--tags',"project=$ProjectName","environment=$Environment","function=queue-to-db",
                      '--output','table'))
-    if ($result -ne $null) {
+    if ($null -ne $result) {
         Write-Host "[SUCCESS] Function app $FuncQueueDbName created" -ForegroundColor Green
     }
 }
@@ -1796,7 +1794,7 @@ if (Test-AzResource -Arguments @('functionapp','show','--name',$FuncCuQueueDbNam
         -Arguments (@('functionapp','create','--name',$FuncCuQueueDbName) + $CommonFuncArgs + @(
                      '--tags',"project=$ProjectName","environment=$Environment","function=cu-queue-to-db",
                      '--output','table'))
-    if ($result -ne $null) {
+    if ($null -ne $result) {
         Write-Host "[SUCCESS] Function app $FuncCuQueueDbName created" -ForegroundColor Green
     }
 }
@@ -1898,20 +1896,20 @@ if (-not $KeyVaultId) {
 } else {
     Write-Host "[INFO] Key Vault Secrets User role for function apps and web app" -ForegroundColor Cyan
     foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity)) {
-        if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Key Vault Secrets User' -Scope $KeyVaultId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+        if (-not (Set-RoleAssignment -Assignee $identity -Role 'Key Vault Secrets User' -Scope $KeyVaultId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
     }
 
     Write-Host "[INFO] Key Vault Secrets Officer role for web app profile updates" -ForegroundColor Cyan
-    if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Key Vault Secrets Officer' -Scope $KeyVaultId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+    if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role 'Key Vault Secrets Officer' -Scope $KeyVaultId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 }
 
 # Service Bus access
 $ServiceBusId = (Invoke-AzCliSilent -Arguments @('servicebus','namespace','show','--name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
 
 Write-Host "[INFO] Service Bus roles for function apps" -ForegroundColor Cyan
-if (-not (Ensure-RoleAssignment -Assignee $MailboxIdentity   -Role 'Azure Service Bus Data Sender'   -Scope $ServiceBusId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
-if (-not (Ensure-RoleAssignment -Assignee $QueueDbIdentity   -Role 'Azure Service Bus Data Receiver' -Scope $ServiceBusId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
-if (-not (Ensure-RoleAssignment -Assignee $CuQueueDbIdentity -Role 'Azure Service Bus Data Receiver' -Scope $ServiceBusId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+if (-not (Set-RoleAssignment -Assignee $MailboxIdentity   -Role 'Azure Service Bus Data Sender'   -Scope $ServiceBusId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+if (-not (Set-RoleAssignment -Assignee $QueueDbIdentity   -Role 'Azure Service Bus Data Receiver' -Scope $ServiceBusId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+if (-not (Set-RoleAssignment -Assignee $CuQueueDbIdentity -Role 'Azure Service Bus Data Receiver' -Scope $ServiceBusId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 
 # Storage account access (managed identity for AzureWebJobsStorage)
 $StorageAccountId = (Invoke-AzCliSilent -Arguments @('storage','account','show','--name',$StorageAccountName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
@@ -1919,24 +1917,24 @@ $StorageAccountId = (Invoke-AzCliSilent -Arguments @('storage','account','show',
 Write-Host "[INFO] Storage account roles for function apps" -ForegroundColor Cyan
 foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity)) {
     foreach ($role in @('Storage Blob Data Owner','Storage Account Contributor','Storage Queue Data Contributor','Storage Table Data Contributor')) {
-        if (-not (Ensure-RoleAssignment -Assignee $identity -Role $role -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+        if (-not (Set-RoleAssignment -Assignee $identity -Role $role -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
     }
 }
 
 Write-Host "[INFO] Storage roles for web app" -ForegroundColor Cyan
-if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Blob Data Reader'        -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
-if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Table Data Contributor' -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Blob Data Reader'        -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Table Data Contributor' -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 
 # Admin user needs blob access for container creation and direct blob operations
 if ($CurrentUserId) {
     Write-Host "[INFO] Storage Blob Data Contributor for admin user" -ForegroundColor Cyan
-    if (-not (Ensure-RoleAssignment -Assignee $CurrentUserId -Role 'Storage Blob Data Contributor' -Scope $StorageAccountId -PrincipalType 'User')) { $newAssignments++ }
+    if (-not (Set-RoleAssignment -Assignee $CurrentUserId -Role 'Storage Blob Data Contributor' -Scope $StorageAccountId -PrincipalType 'User')) { $newAssignments++ }
 }
 
 # Content Understanding needs to read blobs from Storage when given a blob URL
 if ($CuIdentity) {
     Write-Host "[INFO] Storage Blob Data Reader for Content Understanding" -ForegroundColor Cyan
-    if (-not (Ensure-RoleAssignment -Assignee $CuIdentity -Role 'Storage Blob Data Reader' -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+    if (-not (Set-RoleAssignment -Assignee $CuIdentity -Role 'Storage Blob Data Reader' -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 }
 
 # Cosmos DB access (data plane RBAC - Built-in Data Contributor)
@@ -1945,7 +1943,7 @@ $CosmosDataContributorRoleId = "00000000-0000-0000-0000-000000000002"
 
 Write-Host "[INFO] Cosmos DB Data Contributor role for function apps and web app" -ForegroundColor Cyan
 foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, $WebAppIdentity)) {
-    if (-not (Ensure-CosmosRoleAssignment -AccountName $CosmosDbAccountName -ResourceGroup $ResourceGroupName -RoleDefinitionId $CosmosDataContributorRoleId -PrincipalId $identity -Scope $CosmosDbAccountId)) { $newAssignments++ }
+    if (-not (Set-CosmosRoleAssignment -AccountName $CosmosDbAccountName -ResourceGroup $ResourceGroupName -RoleDefinitionId $CosmosDataContributorRoleId -PrincipalId $identity -Scope $CosmosDbAccountId)) { $newAssignments++ }
 }
 
 # Content Understanding access (Cognitive Services User)
@@ -1953,7 +1951,7 @@ $ContentUnderstandingId = (Invoke-AzCliSilent -Arguments @('cognitiveservices','
 
 Write-Host "[INFO] Cognitive Services User role for function apps and web app" -ForegroundColor Cyan
 foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, $WebAppIdentity)) {
-    if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Cognitive Services User' -Scope $ContentUnderstandingId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+    if (-not (Set-RoleAssignment -Assignee $identity -Role 'Cognitive Services User' -Scope $ContentUnderstandingId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 }
 
 # AI Foundry access
@@ -1965,18 +1963,18 @@ $AiFoundryProjectId = "$AiFoundryId/projects/$AiFoundryProjectName"
 
 Write-Host "[INFO] Cognitive Services OpenAI User role for function apps and web app" -ForegroundColor Cyan
 foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity, $WebAppIdentity)) {
-    if (-not (Ensure-RoleAssignment -Assignee $identity -Role 'Cognitive Services OpenAI User' -Scope $AiFoundryId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+    if (-not (Set-RoleAssignment -Assignee $identity -Role 'Cognitive Services OpenAI User' -Scope $AiFoundryId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 }
 
 Write-Host "[INFO] Azure AI Developer role for web app — account scope" -ForegroundColor Cyan
-if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Azure AI Developer' -Scope $AiFoundryId        -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role 'Azure AI Developer' -Scope $AiFoundryId        -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 Write-Host "[INFO] Azure AI Developer role for web app — project scope" -ForegroundColor Cyan
-if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role 'Azure AI Developer' -Scope $AiFoundryProjectId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role 'Azure AI Developer' -Scope $AiFoundryProjectId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 
 # EIA AI Foundry Agent Writer (custom): Azure AI Developer only covers OpenAI/* data actions;
 # the AIServices/* path (used by AI Foundry agents endpoint) is absent from that role definition.
 $EiaAgentWriterRole = 'EIA AI Foundry Agent Writer'
-Ensure-CustomRoleDefinition `
+Set-CustomRoleDefinition `
     -RoleName         $EiaAgentWriterRole `
     -Description      'Grants AIServices/* data-plane access needed for AI Foundry agents API (AIServices/* absent from Azure AI Developer role definition)' `
     -DataActions      @('Microsoft.CognitiveServices/accounts/AIServices/*') `
@@ -1988,9 +1986,9 @@ if (-not $EiaAgentWriterRoleId) {
     $script:DeploymentErrors.Add("Custom role ID lookup failed: '$EiaAgentWriterRole'")
 } else {
     Write-Host "[INFO] $EiaAgentWriterRole (custom) for web app — account scope" -ForegroundColor Cyan
-    if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role $EiaAgentWriterRoleId -Scope $AiFoundryId        -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+    if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role $EiaAgentWriterRoleId -Scope $AiFoundryId        -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
     Write-Host "[INFO] $EiaAgentWriterRole (custom) for web app — project scope" -ForegroundColor Cyan
-    if (-not (Ensure-RoleAssignment -Assignee $WebAppIdentity -Role $EiaAgentWriterRoleId -Scope $AiFoundryProjectId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+    if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role $EiaAgentWriterRoleId -Scope $AiFoundryProjectId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 }
 
 if ($newAssignments -gt 0) {
@@ -2350,12 +2348,17 @@ if ($script:DeploymentErrors.Count -gt 0) {
     Write-Host ""
     Write-Host "[INFO] Next Steps:" -ForegroundColor Cyan
     Write-Host "  1. Grant Graph API admin consent (requires tenant admin role):"
-    Write-Host "       .\3.grant-graph-consent.ps1 -Suffix $Suffix"
-    Write-Host "  2. (Optional) Configure operational tweaks in the deployed environment:"
-    Write-Host "       .\4.operation-dev.ps1 -Suffix $Suffix"
+    Write-Host "       .\2.grant-graph-consent.ps1 -Suffix $Suffix"
+    Write-Host "  2. Build and provision the Azure AI Foundry agents:"
+    Write-Host "       .\3.deploy-agents.ps1 -Suffix $Suffix"
     Write-Host "  3. Register Content Understanding analyzer schemas:"
-    Write-Host "       .\5.content-understanding-add-schema.ps1 -Suffix $Suffix"
+    Write-Host "       .\4.content-understanding-add-schema.ps1 -Suffix $Suffix"
     Write-Host "  4. Build and deploy application code (functions + web app):"
-    Write-Host "       .\9.deploy-code.ps1 -Suffix $Suffix"
-    Write-Host "  5. Test the deployment with sample data"
+    Write-Host "       .\5.deploy-code.ps1 -Suffix $Suffix"
+    Write-Host "  5. Choose the environment posture (run last, after everything is deployed):"
+    Write-Host "       - Dev  : open access + grant the signed-in user data-plane RBAC for local testing"
+    Write-Host "                .\6.operation-dev.ps1 -Suffix $Suffix"
+    Write-Host "       - Prod : harden the network (private endpoints, disable public access)"
+    Write-Host "                .\6.operation-prod.ps1 -Suffix $Suffix"
+    Write-Host "  6. Test the deployment with sample data"
 }
