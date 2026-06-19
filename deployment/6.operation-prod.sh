@@ -228,8 +228,9 @@ invoke_config_reference_refresh() {
 # -----------------------------------------------------------------------------
 PROJECT_NAME="${PROJECT_NAME:-eia}"
 PROJ_CLEAN="${PROJECT_NAME//-/}"
+STORAGE_CLEAN="${SUFFIX//-/}"
 ResourceGroupName="rg-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}"
-StorageAccountName="st${PROJ_CLEAN}${ENVIRONMENT}${SUFFIX}"
+StorageAccountName="st${PROJ_CLEAN}${ENVIRONMENT}${STORAGE_CLEAN}"
 CosmosDbAccountName="cosmos-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}"
 ContentUnderstandingName="cu-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}"
 AiFoundryName="oai-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}"
