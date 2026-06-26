@@ -178,6 +178,43 @@ Delete all deployed resources (destructive):
 ```powershell
 .\deployment\100.admin-delete-all.ps1 -Environment dev -Suffix 1
 ```
+## 12. Scale and service limits
+
+The solution supports horizontal scale for email intake, ingestion, and extraction.
+At higher throughput, capacity is primarily constrained by service quotas and API limits.
+
+### Service limits summary
+
+| Service | Throughput / API limit | Max attachment or file size | Max message size |
+|---|---|---|---|
+| Microsoft Graph (Mailbox API) | ~60,000 requests/hour (per app + mailbox) | 150 MB | Exchange limit applies (150 MB) |
+| Azure Content Understanding | 180,000 operations/hour | 200 MB | N/A |
+| Microsoft 365 Exchange Online (Mailbox) | 3,600 received emails/hour | 150 MB attachment | 150 MB total message |
+
+### Practical scaling notes
+
+- **Primary bottlenecks**
+	- Microsoft Graph and Exchange throttling are typically the first limits reached in mailbox-heavy workloads.
+
+- **Scale-out strategy**
+	- Azure Content Understanding can be scaled horizontally by deploying multiple analyzer instances.
+	- Split mailbox processing across workers/queues to keep throughput stable under burst load.
+
+- **Quota flexibility**
+	- Some limits are soft quotas and can be increased through Microsoft support requests.
+
+- **Exchange message size behavior**
+	- Default mailbox limits are 35 MB for sending and 36 MB for receiving.
+	- Administrators can configure a custom message limit from 1 MB up to 150 MB.
+	- Internal Microsoft-to-Microsoft mail flow supports up to 150 MB total message size.
+	- Mail routed outside Microsoft datacenters may incur about 33% encoding overhead, reducing practical maximum size to about 112 MB.
+
+### References
+
+- Microsoft Graph throttling limits: https://learn.microsoft.com/en-us/graph/throttling-limits
+- Microsoft Graph large attachments: https://learn.microsoft.com/en-us/graph/outlook-large-attachments
+- Azure Content Understanding service limits: https://learn.microsoft.com/en-us/azure/ai-services/content-understanding/service-limits
+- Exchange Online limits: https://learn.microsoft.com/en-us/office365/servicedescriptions/exchange-online-service-description/exchange-online-limits
 
 ## Notes
 
