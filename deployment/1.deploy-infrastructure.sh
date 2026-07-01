@@ -1643,14 +1643,16 @@ az keyvault secret recover --vault-name "$KeyVaultName" --name deployment-test -
 
 kv_ready=0
 for ((i=1; i<=12; i++)); do
+    tmp_secret_file=$(mktemp)
+    printf '%s' 'ok' > "$tmp_secret_file"
     if az keyvault secret set --vault-name "$KeyVaultName" --name deployment-test \
-            --value ok --output none 2>/tmp/kv_test_err.$$; then
+            --file "$tmp_secret_file" --encoding utf-8 --output none 2>/tmp/kv_test_err.$$; then
         kv_ready=1
         echo "[SUCCESS] Key Vault write access confirmed"
-        rm -f /tmp/kv_test_err.$$; break
+        rm -f /tmp/kv_test_err.$$ "$tmp_secret_file"; break
     fi
     reason=$(cat /tmp/kv_test_err.$$ 2>/dev/null || true)
-    rm -f /tmp/kv_test_err.$$
+    rm -f /tmp/kv_test_err.$$ "$tmp_secret_file"
     echo "[INFO] Key Vault not ready yet (attempt $i/12). Waiting 10 seconds..."
     [[ -n "$reason" ]] && echo "  Reason: $reason"
     sleep 10
@@ -1714,13 +1716,15 @@ for key in "${!KV_SECRETS[@]}"; do
         echo "[WARNING] Skipping Key Vault secret '$key' - value is empty"
         continue
     fi
+    tmp_secret_file=$(mktemp)
+    printf '%s' "$val" > "$tmp_secret_file"
     if ! az keyvault secret set --vault-name "$KeyVaultName" --name "$key" \
-            --value "$val" --output none 2>/tmp/kv_set_err.$$; then
+            --file "$tmp_secret_file" --encoding utf-8 --output none 2>/tmp/kv_set_err.$$; then
         echo "[ERROR] Failed to set Key Vault secret: $key" >&2
         cat /tmp/kv_set_err.$$ >&2 || true
         DEPLOYMENT_ERRORS+=("Key Vault secret: $key")
     fi
-    rm -f /tmp/kv_set_err.$$
+    rm -f /tmp/kv_set_err.$$ "$tmp_secret_file"
 done
 
 if (( ${#DEPLOYMENT_ERRORS[@]} == 0 )); then

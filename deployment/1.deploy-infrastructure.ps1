@@ -2107,11 +2107,17 @@ $kvSecrets = @{
     "ReadMailboxForPastNSeconds"             = $ReadMailboxForPastNSeconds
 }
 foreach ($entry in $kvSecrets.GetEnumerator()) {
-    if (-not $entry.Value) {
+    if ([string]::IsNullOrWhiteSpace([string]$entry.Value)) {
         Write-Host "[WARNING] Skipping Key Vault secret '$($entry.Key)' - value is empty" -ForegroundColor Yellow
         continue
     }
-    $r = Invoke-AzCliSilent -Arguments @('keyvault','secret','set','--vault-name',$KeyVaultName,'--name',$entry.Key,'--value',$entry.Value,'--output','none')
+    $secretFile = [System.IO.Path]::GetTempFileName()
+    try {
+        Set-Content -Path $secretFile -Value $entry.Value -NoNewline -Encoding utf8
+        $r = Invoke-AzCliSilent -Arguments @('keyvault','secret','set','--vault-name',$KeyVaultName,'--name',$entry.Key,'--file',$secretFile,'--encoding','utf-8','--output','none')
+    } finally {
+        Remove-Item $secretFile -Force -ErrorAction SilentlyContinue
+    }
     if ($r.ExitCode -ne 0) {
         Write-Host "[ERROR] Failed to set Key Vault secret: $($entry.Key)" -ForegroundColor Red
         if ($r.Error) { Write-Host "  $($r.Error)" -ForegroundColor Red }
