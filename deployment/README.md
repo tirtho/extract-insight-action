@@ -76,6 +76,12 @@ Example deployment key: `eia-dev-1`
 | 5 | `5.deploy-code.ps1` | `5.deploy-code.sh` | Build and deploy the function and web app code |
 | 6 | `6.operation-dev.ps1` / `6.operation-prod.ps1` | `6.operation-dev.sh` / `6.operation-prod.sh` | Apply the environment posture (run **last**) |
 
+> Hardened production note: after `6.operation-prod` is already applied, use
+> `5.deploy-code-secure-window.ps1` for subsequent laptop-driven code deploys.
+> It temporarily opens a narrow deployment window (policy bypass tag + laptop
+> IP firewall rules), runs `5.deploy-code.ps1`, then automatically removes the
+> temporary access and tags.
+
 Step 6 is an either/or posture choice, run after everything else is deployed:
 
 - **`6.operation-dev`** - opens public access and grants the signed-in user
@@ -100,6 +106,26 @@ pre-hardening state. RBAC role assignments are left untouched.
 ```bash
 ./deployment/6.operation-prod.sh 1 --environment prod --rollback
 ```
+
+### Code Deploy To Hardened Environment (PowerShell)
+
+Use this after `6.operation-prod.ps1` has already hardened the environment and
+you need to deploy new code from your laptop without full rollback/re-harden.
+
+```powershell
+.\deployment\5.deploy-code-secure-window.ps1 -Environment prod -Suffix 1
+```
+
+What the wrapper does:
+
+1. Detects current laptop public IP.
+2. Applies `SecurityControl=Ignore` on required resources.
+3. Adds temporary, minimal firewall/IP rules for deployment.
+4. Executes `5.deploy-code.ps1`.
+5. Always removes temporary rules and tags in cleanup.
+
+This keeps managed identities, VNets, private endpoints, and other hardening in
+place between deployments.
 
 ### Example (PowerShell)
 
@@ -131,6 +157,7 @@ These sit outside the numbered sequence:
 |--------|---------|
 | `110.admin-user-access.ps1` | Configure access groups and user profile metadata |
 | `1000.local-deploy.ps1` | Run the app locally for validation |
+| `5.deploy-code-secure-window.ps1` | Deploy code into an already hardened environment by opening/closing a temporary secure deployment window |
 | `rotate-graph-api-secret.ps1` / `.sh` | Rotate the Graph API client secret |
 | `100.admin-delete-all.ps1` | **Destructive** - delete all deployed resources |
 

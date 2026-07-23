@@ -94,6 +94,16 @@ Then choose the environment posture (run last, after everything is deployed):
 .\deployment\6.operation-prod.ps1 -Environment prod -Suffix 1
 ```
 
+If the environment is already hardened with `6.operation-prod.ps1`, use the
+secure deployment window wrapper for code redeploys from your laptop:
+
+```powershell
+.\deployment\5.deploy-code-secure-window.ps1 -Environment prod -Suffix 1
+```
+
+The wrapper temporarily applies the approved exception controls, runs
+`5.deploy-code.ps1`, then automatically removes temporary rules/tags.
+
 `6.operation-prod` prompts **"Allow local testing access?"**: answer **yes** to
 temporarily allow your current public IP through the firewalls and grant your
 signed-in user the data-plane RBAC (Storage, Key Vault, Cosmos DB, Cognitive
@@ -128,6 +138,12 @@ Then redeploy changed workloads:
 .\deployment\5.deploy-code.ps1 -Environment dev -Suffix 1
 ```
 
+For hardened prod environments, use:
+
+```powershell
+.\deployment\5.deploy-code-secure-window.ps1 -Environment prod -Suffix 1
+```
+
 ## 9. Run The App Locally
 
 For local validation, use:
@@ -158,6 +174,9 @@ If needed, explicitly pass Key Vault URL:
 6. deployment/6.operation-dev.ps1 (or 6.operation-prod.ps1 to harden for prod — run last)
 7. deployment/110.admin-user-access.ps1
 
+After step 6 hardens prod, use `deployment/5.deploy-code-secure-window.ps1`
+for subsequent code deployments into that hardened environment.
+
 ## 11. Utilities
 
 Rotate Graph secret:
@@ -177,6 +196,13 @@ Delete all deployed resources (destructive):
 
 ```powershell
 .\deployment\100.admin-delete-all.ps1 -Environment dev -Suffix 1
+```
+
+Deploy code into an already hardened prod environment (temporary secure window,
+automatic cleanup):
+
+```powershell
+.\deployment\5.deploy-code-secure-window.ps1 -Environment prod -Suffix 1
 ```
 ## 12. Scale and service limits
 

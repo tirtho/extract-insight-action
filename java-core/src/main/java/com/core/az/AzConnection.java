@@ -131,6 +131,7 @@ public class AzConnection implements AutoCloseable {
             cosmosClient = new CosmosClientBuilder()
                     .endpoint(endpoint)
                     .credential(defaultCredential)
+                    .gatewayMode()
                     .buildClient();
             LOG.info("CosmosClient created for endpoint: {}", endpoint);
         }

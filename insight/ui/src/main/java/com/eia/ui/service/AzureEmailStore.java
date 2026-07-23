@@ -96,6 +96,7 @@ public class AzureEmailStore implements AutoCloseable {
             cosmosClient = new CosmosClientBuilder()
                     .endpoint(cosmosEndpoint)
                     .credential(credential)
+                    .gatewayMode()
                     .buildClient();
             cosmosContainer = cosmosClient.getDatabase(databaseName).getContainer(containerName);
             cosmosContainer.read();

@@ -125,6 +125,17 @@ function Ensure-FunctionHostSettings {
     )
 
     Write-Host "[INFO] Ensuring required Functions host settings on $FunctionAppName..." -ForegroundColor Cyan
+    $currentStorageAccount = az functionapp config appsettings list `
+        --name $FunctionAppName `
+        --resource-group $ResourceGroupName `
+        --query "[?name=='AzureWebJobsStorage__accountName'].value | [0]" `
+        -o tsv 2>$null
+
+    if ($LASTEXITCODE -eq 0 -and $currentStorageAccount -eq $StorageAccountName) {
+        Write-Host "[INFO] Required host setting already present on $FunctionAppName; skipping update." -ForegroundColor DarkCyan
+        return
+    }
+
     # Note: FUNCTIONS_WORKER_RUNTIME and FUNCTIONS_EXTENSION_VERSION are managed
     # by the platform on Flex Consumption plans and must NOT be set as app settings.
     $settingsOutput = az functionapp config appsettings set `
@@ -382,6 +393,9 @@ function Wait-ForScmDeploymentsIdle {
             $activeIds = ($activeDeployments | ForEach-Object { $_.id }) -join ', '
             Write-Host "[INFO] Waiting for active deployment(s) on $FunctionLabel to finish: $activeIds" -ForegroundColor DarkCyan
         } catch {
+            if (Test-ScmIpForbidden -Exception $_.Exception) {
+                throw "SCM access for $FunctionLabel is blocked (403 Ip Forbidden). This usually means 6.operation-prod.ps1 has already disabled public inbound access for the Function App. Deploy code before prod hardening, or temporarily undo the hardening and retry."
+            }
             Write-Host "[WARNING] Could not query current SCM deployments for $FunctionLabel; retrying..." -ForegroundColor Yellow
         }
 
@@ -455,6 +469,19 @@ function Get-HttpStatusCodeFromException {
     } catch {
         return $null
     }
+}
+
+function Test-ScmIpForbidden {
+    param(
+        [Parameter(Mandatory=$true)]$Exception
+    )
+
+    $statusCode = Get-HttpStatusCodeFromException -Exception $Exception
+    if ($statusCode -ne 403) {
+        return $false
+    }
+
+    return ($Exception.Message -match 'Ip Forbidden|IP Forbidden|Forbidden')
 }
 
 # =============================================================================
@@ -819,6 +846,14 @@ foreach ($target in $targets) {
             $deployId = ($deployResp.Content | ConvertFrom-Json)
             Write-Host "[INFO] Deployment accepted (id: $deployId). Polling for completion..." -ForegroundColor Cyan
         } catch {
+            if (Test-ScmIpForbidden -Exception $_.Exception) {
+                Write-Host "[ERROR] SCM access is blocked for $FunctionLabel (403 Ip Forbidden)." -ForegroundColor Red
+                Write-Host "[ERROR] The Function App was likely hardened by 6.operation-prod.ps1 before code deployment." -ForegroundColor Red
+                Write-Host "[ERROR] Re-enable Function App public inbound access or run 6.operation-prod.ps1 -Rollback, deploy code, then re-run 6.operation-prod.ps1." -ForegroundColor Red
+                $deploymentErrors.Add($FunctionLabel)
+                $recordedFunctionError = $true
+                break
+            }
             Write-Host "[ERROR] Failed to initiate deployment for $FunctionLabel." -ForegroundColor Red
             Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
             $deploymentErrors.Add($FunctionLabel)
@@ -870,6 +905,30 @@ foreach ($target in $targets) {
 
     if (-not $deployOk) {
         Write-Host "[ERROR] Deployment did not complete successfully for $FunctionLabel (status: $deployStatus)." -ForegroundColor Red
+        if ($deployStatus -eq 3 -and $deployId) {
+            try {
+                $failedDeploy = Invoke-RestMethod `
+                    -Uri "https://$scmHost/api/deployments/$deployId" `
+                    -Headers @{ Authorization = "Bearer $armToken" } `
+                    -TimeoutSec 30 `
+                    -ErrorAction Stop
+
+                $statusText = [string]$failedDeploy.status_text
+                if (-not [string]::IsNullOrWhiteSpace($statusText)) {
+                    Write-Host "[ERROR] OneDeploy status text: $statusText" -ForegroundColor Red
+                }
+
+                if ($statusText -match 'InaccessibleStorageException|BlobUploadFailedException|Failed to access storage account') {
+                    Write-Host "[ERROR] Deployment pipeline cannot write to the Functions storage account." -ForegroundColor Red
+                    Write-Host "[ERROR] Check storage network/auth policy posture for this environment. OneDeploy requires deployment-time blob upload access." -ForegroundColor Red
+                    Write-Host "[ERROR] Quick checks:" -ForegroundColor Red
+                    Write-Host "        az storage account show -n $StorageAccountName -g $ResourceGroupName --query '{pna:publicNetworkAccess,defaultAction:networkRuleSet.defaultAction,bypass:networkRuleSet.bypass,allowSharedKeyAccess:allowSharedKeyAccess}'" -ForegroundColor Red
+                    Write-Host "[ERROR] If policy forces pna=Disabled, request a policy exception or a deployment-approved storage configuration." -ForegroundColor Red
+                }
+            } catch {
+                Write-Host "[WARNING] Could not fetch detailed deployment failure text for $FunctionLabel." -ForegroundColor Yellow
+            }
+        }
         if (-not $recordedFunctionError) {
             $deploymentErrors.Add($FunctionLabel)
         }
