@@ -374,8 +374,11 @@ function Wait-ForScmDeploymentsIdle {
         [Parameter(Mandatory=$true)][string]$ArmToken,
         [Parameter(Mandatory=$true)][string]$FunctionLabel,
         [Parameter()][int]$MaxPollAttempts = 60,
-        [Parameter()][int]$PollIntervalSeconds = 10
+        [Parameter()][int]$PollIntervalSeconds = 10,
+        [Parameter()][int]$MaxForbiddenRetries = 6
     )
+
+    $forbiddenCount = 0
 
     for ($attempt = 1; $attempt -le $MaxPollAttempts; $attempt++) {
         try {
@@ -390,11 +393,21 @@ function Wait-ForScmDeploymentsIdle {
                 return $true
             }
 
+            # Any successful call means SCM access has propagated.
+            $forbiddenCount = 0
+
             $activeIds = ($activeDeployments | ForEach-Object { $_.id }) -join ', '
             Write-Host "[INFO] Waiting for active deployment(s) on $FunctionLabel to finish: $activeIds" -ForegroundColor DarkCyan
         } catch {
             if (Test-ScmIpForbidden -Exception $_.Exception) {
-                throw "SCM access for $FunctionLabel is blocked (403 Ip Forbidden). This usually means 6.operation-prod.ps1 has already disabled public inbound access for the Function App. Deploy code before prod hardening, or temporarily undo the hardening and retry."
+                $forbiddenCount++
+                if ($forbiddenCount -lt $MaxForbiddenRetries) {
+                    Write-Host "[WARNING] SCM access for $FunctionLabel is returning 403 Ip Forbidden (attempt $forbiddenCount/$MaxForbiddenRetries). This can be temporary while access rules propagate; retrying..." -ForegroundColor Yellow
+                    Start-Sleep -Seconds $PollIntervalSeconds
+                    continue
+                }
+
+                throw "SCM access for $FunctionLabel is blocked (403 Ip Forbidden) after $forbiddenCount consecutive checks. This usually means 6.operation-prod.ps1 has already disabled public inbound access for the Function App. Deploy code before prod hardening, or temporarily undo the hardening and retry."
             }
             Write-Host "[WARNING] Could not query current SCM deployments for $FunctionLabel; retrying..." -ForegroundColor Yellow
         }

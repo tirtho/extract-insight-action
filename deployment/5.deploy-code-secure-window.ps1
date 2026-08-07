@@ -121,6 +121,39 @@ function Remove-IgnoreTag {
     }
 }
 
+function Test-ScmReachableWithArmToken {
+    param(
+        [Parameter(Mandatory=$true)][string]$FunctionAppName,
+        [Parameter(Mandatory=$true)][string]$ArmToken
+    )
+
+    $scmHost = "$FunctionAppName.scm.azurewebsites.net"
+
+    try {
+        Invoke-RestMethod -Uri "https://$scmHost/api/deployments" `
+            -Headers @{ Authorization = "Bearer $ArmToken" } `
+            -TimeoutSec 30 `
+            -ErrorAction Stop | Out-Null
+        return $true
+    } catch {
+        $statusCode = $null
+        try {
+            if ($_.Exception.Response) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+        } catch {
+        }
+
+        $message = [string]$_.Exception.Message
+        if ($statusCode -eq 403 -and $message -match 'Ip Forbidden|IP Forbidden') {
+            return $false
+        }
+
+        # Non-IP errors are not treated as network blocks.
+        return $true
+    }
+}
+
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
     throw "Azure CLI is not installed."
 }
@@ -136,6 +169,7 @@ if (-not (Test-Path $DeployScriptPath)) {
 
 $publicIp = Get-CurrentPublicIp
 $ruleName = "temp-laptop-ip"
+$fallbackScmRuleName = "temp-scm-any"
 
 $storageResourceId = (Invoke-AzCli -Arguments @('storage', 'account', 'show', '--name', $StorageAccountName, '--resource-group', $ResourceGroupName, '--query', 'id', '-o', 'tsv'))
 
@@ -150,6 +184,7 @@ foreach ($fa in $FunctionApps) {
     $functionState[$fa] = @{
         ResourceId = $faId
         PublicNetworkAccess = $pna
+        FallbackAnyScmRuleAdded = $false
     }
 }
 
@@ -184,6 +219,13 @@ $windowOpened = $false
 try {
     Write-Host "[INFO] Opening secure deployment window..." -ForegroundColor Cyan
 
+    $windowOpened = $true
+
+    $armToken = (Invoke-AzCli -Arguments @('account', 'get-access-token', '--resource', 'https://management.azure.com/', '--query', 'accessToken', '-o', 'tsv')).Trim()
+    if ([string]::IsNullOrWhiteSpace($armToken)) {
+        throw "Failed to obtain ARM access token for SCM reachability checks."
+    }
+
     Merge-IgnoreTag -ResourceId $storageResourceId
     Write-Host "[SUCCESS] Applied SecurityControl=Ignore on storage account" -ForegroundColor Green
 
@@ -210,6 +252,25 @@ try {
         }
 
         Write-Host "[SUCCESS] SCM IP allow rule added for $fa ($publicIp)" -ForegroundColor Green
+
+        if (-not (Test-ScmReachableWithArmToken -FunctionAppName $fa -ArmToken $armToken)) {
+            Write-Host "[WARNING] SCM still reports 403 Ip Forbidden for $fa after adding laptop IP rule." -ForegroundColor Yellow
+            Write-Host "[WARNING] Adding temporary SCM allow-any fallback rule for this secure deploy window." -ForegroundColor Yellow
+
+            $existingFallback = Get-AzValue -Arguments @('functionapp', 'config', 'access-restriction', 'show', '--name', $fa, '--resource-group', $ResourceGroupName,
+                '--query', "scmIpSecurityRestrictions[?name=='$fallbackScmRuleName'] | [0].name", '-o', 'tsv')
+            if (-not $existingFallback) {
+                Invoke-AzCli -Arguments @('functionapp', 'config', 'access-restriction', 'add', '--name', $fa, '--resource-group', $ResourceGroupName,
+                    '--rule-name', $fallbackScmRuleName, '--action', 'Allow', '--ip-address', '0.0.0.0/0', '--priority', '110', '--scm-site', 'true', '--output', 'none') | Out-Null
+            }
+
+            if (-not (Test-ScmReachableWithArmToken -FunctionAppName $fa -ArmToken $armToken)) {
+                throw "SCM remains blocked for $fa even after fallback rule. Check hardening/policy state and retry."
+            }
+
+            $functionState[$fa].FallbackAnyScmRuleAdded = $true
+            Write-Host "[SUCCESS] Temporary SCM fallback rule active for $fa" -ForegroundColor Green
+        }
     }
 
     $windowOpened = $true
@@ -246,6 +307,17 @@ finally {
             } catch {
                 Write-Host "[WARNING] Failed removing SCM IP allow rule for $fa" -ForegroundColor Yellow
                 Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+
+            if ($functionState[$fa].FallbackAnyScmRuleAdded) {
+                try {
+                    Invoke-AzCli -Arguments @('functionapp', 'config', 'access-restriction', 'remove', '--name', $fa, '--resource-group', $ResourceGroupName,
+                        '--rule-name', $fallbackScmRuleName, '--scm-site', 'true', '--output', 'none') | Out-Null
+                    Write-Host "[SUCCESS] Removed temporary SCM fallback rule for $fa" -ForegroundColor Green
+                } catch {
+                    Write-Host "[WARNING] Failed removing temporary SCM fallback rule for $fa" -ForegroundColor Yellow
+                    Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+                }
             }
 
             $originalFaPna = $functionState[$fa].PublicNetworkAccess
