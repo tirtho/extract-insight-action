@@ -71,7 +71,8 @@ $FuncMailboxName   = "func-mailbox-$ProjectName-$Environment-$Suffix"
 $FuncQueueDbName   = "func-queuedb-$ProjectName-$Environment-$Suffix"
 $FuncCuQueueDbName = "func-cuqueuedb-$ProjectName-$Environment-$Suffix"
 $ProjClean         = $ProjectName -replace '-',''
-$StorageAccountName = "st$ProjClean$Environment$Suffix"
+$StorageClean      = ($Suffix.ToLowerInvariant()) -replace '[^a-z0-9]',''
+$StorageAccountName = "st$ProjClean$Environment$StorageClean"
 $WebAppName        = "app-$ProjectName-$Environment-$Suffix"
 
 $ScriptRoot      = $PSScriptRoot

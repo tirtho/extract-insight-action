@@ -115,10 +115,11 @@ SubscriptionId="${SUBSCRIPTION_ID:-$(az account show --query id -o tsv 2>/dev/nu
 TenantId="${TENANT_ID:-$(az account show --query tenantId -o tsv 2>/dev/null || true)}"
 
 ProjClean="${ProjectName//-/}"
+StorageClean="${SUFFIX//-/}"
 ResourceGroupName="${RESOURCE_GROUP_NAME:-rg-${ProjectName}-${Environment}-${SUFFIX}}"
 KeyVaultName="${KEY_VAULT_NAME}"
 ServiceBusNamespace="${SERVICE_BUS_NAMESPACE:-sb-${ProjectName}-${Environment}-${SUFFIX}}"
-StorageAccountName="${STORAGE_ACCOUNT_NAME:-st${ProjClean}${Environment}${SUFFIX}}"
+StorageAccountName="${STORAGE_ACCOUNT_NAME:-st${ProjClean}${Environment}${StorageClean}}"
 FuncMailboxName="${FUNCTION_APP_MAILBOX_NAME:-func-mailbox-${ProjectName}-${Environment}-${SUFFIX}}"
 FuncQueueDbName="${FUNCTION_APP_QUEUE_DB_NAME:-func-queuedb-${ProjectName}-${Environment}-${SUFFIX}}"
 FuncCuQueueDbName="${FUNCTION_APP_CU_QUEUE_DB_NAME:-func-cuqueuedb-${ProjectName}-${Environment}-${SUFFIX}}"

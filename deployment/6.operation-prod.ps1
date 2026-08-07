@@ -277,8 +277,9 @@ function Invoke-ConfigReferenceRefresh {
 # =============================================================================
 $ProjectName        = if ($env:PROJECT_NAME) { $env:PROJECT_NAME } else { "eia" }
 $ProjClean          = $ProjectName -replace '-',''
+$StorageClean       = ($Suffix.ToLowerInvariant()) -replace '[^a-z0-9]',''
 $ResourceGroupName  = "rg-$ProjectName-$Environment-$Suffix"
-$StorageAccountName = "st$ProjClean$Environment$Suffix"
+$StorageAccountName = "st$ProjClean$Environment$StorageClean"
 $CosmosDbAccountName = "cosmos-$ProjectName-$Environment-$Suffix"
 $ContentUnderstandingName = "cu-$ProjectName-$Environment-$Suffix"
 $AiFoundryName       = "oai-$ProjectName-$Environment-$Suffix"
