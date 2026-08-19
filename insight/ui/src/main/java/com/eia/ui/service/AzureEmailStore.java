@@ -187,7 +187,7 @@ public class AzureEmailStore implements AutoCloseable {
         int poolSize = rerank ? RERANK_CANDIDATE_POOL : Math.max(1, Math.min(MAX_TOP_N, topN));
         List<ObjectNode> candidates = expandAttachmentMatchesToEmails(hybrid
                 ? rrfHybridQuery(query, queryVector, poolSize, options)
-                : similarityQuery("vector", query, queryVector, poolSize, options));
+                : similarityQuery(queryVector, poolSize, options));
 
         if (rerank) {
             return rerankCandidates(query, candidates, topN, queryVector);
@@ -255,18 +255,11 @@ public class AzureEmailStore implements AutoCloseable {
         }
     }
 
-    /** Runs the vector (or hybrid keyword-filtered) similarity query, nearest-first. */
-    private List<ObjectNode> similarityQuery(String mode, String query, List<Double> queryVector,
-                                             int top, CosmosQueryRequestOptions options) {
-        String sql = "SELECT TOP " + top + " * FROM c WHERE IS_DEFINED(c.embedding) ";
-        if ("hybrid".equals(mode)) {
-            sql += "AND (CONTAINS(LOWER(c.subject), LOWER(@query)) "
-                    + "OR CONTAINS(LOWER(c.bodyPreview), LOWER(@query)) "
-                    + "OR CONTAINS(LOWER(c.bodyContent), LOWER(@query))) ";
-        }
-        sql += "ORDER BY VectorDistance(c.embedding, @embedding)";
+    /** Runs the vector similarity query, nearest-first. */
+    private List<ObjectNode> similarityQuery(List<Double> queryVector, int top, CosmosQueryRequestOptions options) {
+        String sql = "SELECT TOP " + top + " * FROM c WHERE IS_DEFINED(c.embedding) "
+                + "ORDER BY VectorDistance(c.embedding, @embedding)";
         SqlQuerySpec spec = new SqlQuerySpec(sql, List.of(
-                new SqlParameter("@query", query),
                 new SqlParameter("@embedding", queryVector)));
         return queryItems(spec, options);
     }
@@ -276,7 +269,7 @@ public class AzureEmailStore implements AutoCloseable {
                                             CosmosQueryRequestOptions options) {
         List<String> terms = tokenize(query);
         if (terms.isEmpty()) {
-            return similarityQuery("vector", query, queryVector, top, options);
+            return similarityQuery(queryVector, top, options);
         }
         StringBuilder termArgs = new StringBuilder();
         List<SqlParameter> params = new ArrayList<>();
