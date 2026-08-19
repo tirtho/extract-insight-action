@@ -35,6 +35,7 @@ public class AzEnvNames {
     public static final String KV_AI_FOUNDRY_MODEL_NAME = "AiFoundryModelName";
     public static final String KV_AI_FOUNDRY_API_VERSION = "AiFoundryApiVersion";
     public static final String KV_AI_FOUNDRY_AGENTS = "AiFoundryAgents";
+    public static final String KV_AI_FOUNDRY_EMBEDDINGS_DEPLOYMENT_NAME = "AiFoundryEmbeddingsDeploymentName";
     public static final String KV_STORAGE_ENDPOINT = "StorageEndpoint";
     public static final String KV_STORAGE_TABLE_ENDPOINT = "StorageTableEndpoint";
     public static final String KV_STORAGE_CONTAINER_NAME = "StorageContainerName";

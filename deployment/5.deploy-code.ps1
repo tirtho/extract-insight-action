@@ -870,6 +870,12 @@ foreach ($target in $targets) {
             }
             Write-Host "[ERROR] Failed to initiate deployment for $FunctionLabel." -ForegroundColor Red
             Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
+            # 502/503 from the SCM site during Kudu cold start are transient — retry like any other attempt.
+            if ($deployAttempt -lt $maxDeployAttempts) {
+                Write-Host "[INFO] Retrying in $RetryDelaySeconds second(s)..." -ForegroundColor Cyan
+                Start-Sleep -Seconds $RetryDelaySeconds
+                continue
+            }
             $deploymentErrors.Add($FunctionLabel)
             $recordedFunctionError = $true
             break

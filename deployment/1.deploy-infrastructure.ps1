@@ -145,6 +145,8 @@ $PollingMailboxName = "Inbox"
 $ReadMailboxForPastNSeconds = "3600"
 $CosmosDbDatabaseName = "DocAIDatabase"
 $CosmosDbContainerName = "EmailExtracts"
+# Must match the output dimensions of the embeddings model in deploy-models.csv.
+$CosmosDbVectorDimensions = 1536
 $AppServicePlanName   = "plan-$ProjectName-$Environment"
 $WebAppName           = "app-$ProjectName-$Environment-$Suffix"
 $ContentUnderstandingName = "cu-$ProjectName-$Environment-$Suffix"
@@ -153,14 +155,25 @@ $AiFoundryProjectName     = "proj-$ProjectName-$Environment-$Suffix"
 $AiFoundryProjectApiVersion = "2025-04-01-preview"
 $AiFoundryApiVersion      = "2024-12-01-preview"
 $AiFoundrySkuName         = "GlobalStandard"
-$AiFoundrySkuCapacity     = "50"
+# SKU Capacity is now dynamically calculated based on available quota (see Get-AvailableCapacity function)
+# Exempts resources from the governance policies that would otherwise disable public network access.
+# Hardening is applied later by 5.deploy-code-secure-window.ps1.
+$SecurityControlTag       = "SecurityControl=Ignore"
 $DeployModelsCsvPath      = Join-Path $PSScriptRoot "deploy-models.csv"
 
 # The "primary" model used by the Java app (deployment name stored in Key Vault).
-# Defaults are derived from the first row of deploy-models.csv at runtime
-# (see Step 9). These initial values are fallbacks if the CSV is missing.
+# Defaults are derived from deploy-models.csv at runtime (see Step 9).
+# These initial values are fallbacks if the CSV is missing or contains no LLM entries.
 $AiFoundryDeploymentName  = "gpt-5.1-chat"
 $AiFoundryModelName       = "gpt-5.1-chat"
+
+# AI Foundry embeddings model for vector search on emails and attachments.
+# Defaults are derived from deploy-models.csv at runtime (see Step 9).
+# These initial values are fallbacks if the CSV is missing or contains no embeddings entries.
+$AiFoundryEmbeddingsDeploymentName = "text-embedding-3-small"
+$AiFoundryEmbeddingsModelName      = "text-embedding-3-small"
+$AiFoundryEmbeddingsModelVersion   = "1"
+$AiFoundryEmbeddingsSkuCapacity    = "50"
 
 # Content Understanding requires a supported completion model (separate from the main LLM deployment).
 # Supported: gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-5.2
@@ -663,7 +676,7 @@ if (Test-AzResource -Arguments @('group','show','--name',$ResourceGroupName,'--q
 } else {
     $result = Invoke-AzCli -Description "Creating resource group: $ResourceGroupName" `
         -Arguments @('group','create','--name',$ResourceGroupName,'--location',$LocationResourceGroup,
-                     '--tags',"project=$ProjectName","environment=$Environment",'--output','table')
+                     '--tags',"project=$ProjectName","environment=$Environment",$SecurityControlTag,'--output','table')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Resource group $ResourceGroupName created" -ForegroundColor Green
     }
@@ -682,11 +695,20 @@ if (Test-AzResource -Arguments @('storage','account','show','--name',$StorageAcc
         -Arguments @('storage','account','create','--name',$StorageAccountName,
                      '--resource-group',$ResourceGroupName,'--location',$LocationStorage,
                      '--sku','Standard_LRS','--kind','StorageV2','--access-tier','Hot',
-                     '--tags',"project=$ProjectName","environment=$Environment",'--output','table')
+                     '--tags',"project=$ProjectName","environment=$Environment",$SecurityControlTag,'--output','table')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Storage account $StorageAccountName created" -ForegroundColor Green
     }
 }
+
+# Governance policy can disable public network access on create, which blocks the
+# data-plane calls below. Re-open it here; 5.deploy-code-secure-window.ps1 hardens it later.
+Invoke-AzCliSilent -Arguments @('resource','tag','--tags',"project=$ProjectName","environment=$Environment",$SecurityControlTag,
+                                '--name',$StorageAccountName,'--resource-group',$ResourceGroupName,
+                                '--resource-type','Microsoft.Storage/storageAccounts','--is-incremental','--output','none') | Out-Null
+Invoke-AzCliSilent -Arguments @('storage','account','update','--name',$StorageAccountName,'--resource-group',$ResourceGroupName,
+                                '--public-network-access','Enabled','--bypass','AzureServices','--default-action','Allow',
+                                '--output','none') | Out-Null
 
 # Disable soft-delete for blobs, containers, and file shares
 Write-Host "[INFO] Disabling soft-delete on storage account: $StorageAccountName" -ForegroundColor Cyan
@@ -776,7 +798,7 @@ if (Test-AzResource -Arguments @('keyvault','show','--name',$KeyVaultName,'--que
                      '--resource-group',$ResourceGroupName,'--location',$LocationKeyVault,
                      '--sku','standard','--enable-rbac-authorization','true',
                      '--retention-days','7',
-                     '--tags',"project=$ProjectName","environment=$Environment",'--output','table')
+                     '--tags',"project=$ProjectName","environment=$Environment",$SecurityControlTag,'--output','table')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Key Vault $KeyVaultName created" -ForegroundColor Green
     }
@@ -964,7 +986,7 @@ if (Test-AzResource -Arguments @('servicebus','namespace','show','--name',$Servi
         -Arguments @('servicebus','namespace','create','--name',$ServiceBusNamespace,
                      '--resource-group',$ResourceGroupName,'--location',$LocationServiceBus,
                      '--sku','Standard',
-                     '--tags',"project=$ProjectName","environment=$Environment",'--output','table')
+                     '--tags',"project=$ProjectName","environment=$Environment",$SecurityControlTag,'--output','table')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Service Bus namespace $ServiceBusNamespace created" -ForegroundColor Green
     }
@@ -1012,7 +1034,7 @@ if (Test-AzResource -Arguments @('monitor','app-insights','component','show','--
         -Arguments @('monitor','app-insights','component','create','--app',$AppInsightsName,
                      '--resource-group',$ResourceGroupName,'--location',$LocationAppInsights,
                      '--kind','web','--application-type','web',
-                     '--tags',"project=$ProjectName","environment=$Environment",'--output','table')
+                     '--tags',"project=$ProjectName","environment=$Environment",$SecurityControlTag,'--output','table')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Application Insights $AppInsightsName created" -ForegroundColor Green
     }
@@ -1033,7 +1055,7 @@ if (Test-AzResource -Arguments @('cosmosdb','show','--name',$CosmosDbAccountName
                      '--locations',"regionName=$LocationCosmosDb","failoverPriority=0","isZoneRedundant=false",
                      '--kind','GlobalDocumentDB',
                      '--default-consistency-level','Session',
-                     '--tags',"project=$ProjectName","environment=$Environment",
+                     '--tags',"project=$ProjectName","environment=$Environment",$SecurityControlTag,
                      '--output','table')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Cosmos DB account $CosmosDbAccountName created" -ForegroundColor Green
@@ -1052,15 +1074,154 @@ if ($dbExists) {
 }
 
 # Create container
+# vectorIndexes require the account-level capability and a container vector embedding policy.
+$existingCaps = @()
+$capsJson = (Invoke-AzCliSilent -Arguments @('cosmosdb','show','--name',$CosmosDbAccountName,'--resource-group',$ResourceGroupName,'--query','capabilities[].name','-o','tsv')).Output
+if ($capsJson) { $existingCaps = @($capsJson -split "`n" | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() }) }
+if ($existingCaps -contains 'EnableNoSQLVectorSearch') {
+    Write-Host "[OK] Vector search capability already enabled on $CosmosDbAccountName" -ForegroundColor Green
+} else {
+    # --capabilities replaces the list, so existing ones must be passed through.
+    $newCaps = @($existingCaps + 'EnableNoSQLVectorSearch' | Select-Object -Unique)
+    $capResult = Invoke-AzCli -Description "Enabling vector search capability on $CosmosDbAccountName" `
+        -Arguments (@('cosmosdb','update','--name',$CosmosDbAccountName,'--resource-group',$ResourceGroupName,'--capabilities') + $newCaps + @('--output','none'))
+    if ($null -eq $capResult) {
+        Write-Host "[ERROR] Could not enable EnableNoSQLVectorSearch - container creation with a vector policy will fail" -ForegroundColor Red
+    } else {
+        # The data plane rejects vector policies until the capability propagates.
+        for ($i = 1; $i -le 12; $i++) {
+            $check = (Invoke-AzCliSilent -Arguments @('cosmosdb','show','--name',$CosmosDbAccountName,'--resource-group',$ResourceGroupName,'--query',"capabilities[?name=='EnableNoSQLVectorSearch'].name",'-o','tsv')).Output
+            if ($check) { Write-Host "[SUCCESS] Vector search capability enabled on $CosmosDbAccountName" -ForegroundColor Green; break }
+            Write-Host "[INFO] Waiting for vector search capability to propagate ($i/12)..." -ForegroundColor Cyan
+            Start-Sleep -Seconds 10
+        }
+    }
+}
+
+$vectorEmbeddingPolicyJson = @{
+    vectorEmbeddings = @(
+        @{
+            path             = "/embedding"
+            dataType         = "float32"
+            dimensions       = $CosmosDbVectorDimensions
+            distanceFunction = "cosine"
+        }
+    )
+} | ConvertTo-Json -Depth 10 -Compress
+
+# Full-text policy enables BM25 keyword scoring for Cosmos-native hybrid (RANK RRF) search.
+$fullTextPolicyJson = @{
+    defaultLanguage = "en-US"
+    fullTextPaths = @(
+        @{ path = "/subject";     language = "en-US" }
+        @{ path = "/bodyContent"; language = "en-US" }
+    )
+} | ConvertTo-Json -Depth 10 -Compress
+
 $containerExists = (Invoke-AzCliSilent -Arguments @('cosmosdb','sql','container','show','--account-name',$CosmosDbAccountName,'--resource-group',$ResourceGroupName,'--database-name',$CosmosDbDatabaseName,'--name',$CosmosDbContainerName,'--query','name','-o','tsv')).Output
 if ($containerExists) {
-    Write-Host "[WARNING] Container $CosmosDbContainerName already exists, skipping" -ForegroundColor Yellow
+    Write-Host "[WARNING] Container $CosmosDbContainerName already exists, skipping creation" -ForegroundColor Yellow
+    
+    # Update indexing policy for vector + full-text search (safe to run on existing container)
+    Write-Host "[INFO] Updating indexing policy (vector + full-text) on $CosmosDbContainerName..." -ForegroundColor Cyan
+    $indexingPolicyJson = @{
+        indexingMode = "consistent"
+        automatic = $true
+        includedPaths = @(
+            @{ path = "/*" }
+        )
+        excludedPaths = @(
+            @{ path = '/"_etag"/?' }
+        )
+        vectorIndexes = @(
+            @{
+                path = "/embedding"
+                type = "quantizedFlat"
+            }
+        )
+        fullTextIndexes = @(
+            @{ path = "/subject" }
+            @{ path = "/bodyContent" }
+        )
+    } | ConvertTo-Json -Depth 10 -Compress
+    
+    $indexPolicyFile = [System.IO.Path]::GetTempFileName()
+    Set-Content -Path $indexPolicyFile -Value $indexingPolicyJson -Encoding utf8
+    $vectorPolicyFile = [System.IO.Path]::GetTempFileName()
+    Set-Content -Path $vectorPolicyFile -Value $vectorEmbeddingPolicyJson -Encoding utf8
+    $fullTextPolicyFile = [System.IO.Path]::GetTempFileName()
+    Set-Content -Path $fullTextPolicyFile -Value $fullTextPolicyJson -Encoding utf8
+    
+    try {
+        $indexResult = Invoke-AzCliSilent -Arguments @('cosmosdb','sql','container','update',
+                         '--account-name',$CosmosDbAccountName,
+                         '--resource-group',$ResourceGroupName,
+                         '--database-name',$CosmosDbDatabaseName,
+                         '--name',$CosmosDbContainerName,
+                         '--idx',"@$indexPolicyFile",
+                         '--vector-embeddings',"@$vectorPolicyFile",
+                         '--full-text-policy',"@$fullTextPolicyFile",
+                         '--output','none')
+        if ($indexResult.ExitCode -eq 0) {
+            Write-Host "[SUCCESS] Vector + full-text indexing policy updated on $CosmosDbContainerName" -ForegroundColor Green
+        } else {
+            Write-Host "[WARNING] Could not update indexing policy: $($indexResult.Error)" -ForegroundColor Yellow
+        }
+    } finally {
+        Remove-Item $indexPolicyFile -Force -ErrorAction SilentlyContinue
+        Remove-Item $vectorPolicyFile -Force -ErrorAction SilentlyContinue
+        Remove-Item $fullTextPolicyFile -Force -ErrorAction SilentlyContinue
+    }
 } else {
-    Invoke-AzCli -Description "Creating container: $CosmosDbContainerName (partition key: /id)" `
-        -Arguments @('cosmosdb','sql','container','create','--account-name',$CosmosDbAccountName,
-                     '--resource-group',$ResourceGroupName,'--database-name',$CosmosDbDatabaseName,
-                     '--name',$CosmosDbContainerName,'--partition-key-path','/id',
-                     '--output','table')
+    # Create container with vector + full-text indexing policy
+    $indexingPolicyJson = @{
+        indexingMode = "consistent"
+        automatic = $true
+        includedPaths = @(
+            @{ path = "/*" }
+        )
+        excludedPaths = @(
+            @{ path = '/"_etag"/?' }
+        )
+        vectorIndexes = @(
+            @{
+                path = "/embedding"
+                type = "quantizedFlat"
+            }
+        )
+        fullTextIndexes = @(
+            @{ path = "/subject" }
+            @{ path = "/bodyContent" }
+        )
+    } | ConvertTo-Json -Depth 10 -Compress
+    
+    $indexPolicyFile = [System.IO.Path]::GetTempFileName()
+    Set-Content -Path $indexPolicyFile -Value $indexingPolicyJson -Encoding utf8
+    $vectorPolicyFile = [System.IO.Path]::GetTempFileName()
+    Set-Content -Path $vectorPolicyFile -Value $vectorEmbeddingPolicyJson -Encoding utf8
+    $fullTextPolicyFile = [System.IO.Path]::GetTempFileName()
+    Set-Content -Path $fullTextPolicyFile -Value $fullTextPolicyJson -Encoding utf8
+    
+    try {
+        $containerResult = Invoke-AzCli -Description "Creating container: $CosmosDbContainerName (partition key: /id, vector + full-text indexing)" `
+            -Arguments @('cosmosdb','sql','container','create',
+                         '--account-name',$CosmosDbAccountName,
+                         '--resource-group',$ResourceGroupName,
+                         '--database-name',$CosmosDbDatabaseName,
+                         '--name',$CosmosDbContainerName,
+                         '--partition-key-path','/id',
+                         '--idx',"@$indexPolicyFile",
+                         '--vector-embeddings',"@$vectorPolicyFile",
+                         '--full-text-policy',"@$fullTextPolicyFile",
+                         '--output','table')
+        if ($null -ne $containerResult) {
+            Write-Host "[SUCCESS] Container $CosmosDbContainerName created with vector + full-text indexing policy" -ForegroundColor Green
+        }
+    } finally {
+        Remove-Item $indexPolicyFile -Force -ErrorAction SilentlyContinue
+        Remove-Item $vectorPolicyFile -Force -ErrorAction SilentlyContinue
+        Remove-Item $fullTextPolicyFile -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # =============================================================================
@@ -1077,7 +1238,7 @@ if (Test-AzResource -Arguments @('cognitiveservices','account','show','--name',$
                      '--resource-group',$ResourceGroupName,'--location',$LocationContentUnderstanding,
                      '--kind','AIServices','--sku','S0',
                      '--custom-domain',$ContentUnderstandingName,
-                     '--tags',"project=$ProjectName","environment=$Environment",
+                     '--tags',"project=$ProjectName","environment=$Environment",$SecurityControlTag,
                      '--output','table','--yes')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Content Understanding $ContentUnderstandingName created" -ForegroundColor Green
@@ -1105,7 +1266,7 @@ if (Test-AzResource -Arguments @('cognitiveservices','account','show','--name',$
                      '--kind','AIServices','--sku','S0',
                      '--custom-domain',$AiFoundryName,
                      '--assign-identity',
-                     '--tags',"project=$ProjectName","environment=$Environment",
+                     '--tags',"project=$ProjectName","environment=$Environment",$SecurityControlTag,
                      '--output','table','--yes')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] AI Foundry resource $AiFoundryName created" -ForegroundColor Green
@@ -1359,6 +1520,52 @@ function Show-ModelSuggestions {
     }
 }
 
+function Get-AvailableCapacity {
+    param(
+        [Parameter(Mandatory=$true)][string]$Location,
+        [Parameter(Mandatory=$false)][string]$SkuName = "GlobalStandard",
+        [Parameter(Mandatory=$false)][int]$DefaultCapacity = 50
+    )
+    
+    try {
+        $usageResult = Invoke-AzCliSilent -Arguments @('cognitiveservices','usage','list','--location',$Location,'-o','json')
+        if ($usageResult.ExitCode -ne 0 -or -not $usageResult.Output) {
+            Write-Host "[WARNING] Could not retrieve quota for '$Location', using default capacity: $DefaultCapacity K TPM" -ForegroundColor Yellow
+            return $DefaultCapacity
+        }
+
+        $usageData = $usageResult.Output | ConvertFrom-Json -ErrorAction Stop
+        $skuQuota = $null
+        
+        # Look for GlobalStandard quota entry
+        foreach ($entry in $usageData) {
+            if ($entry.name.value -match "\.${SkuName}$") {
+                $skuQuota = @{ Current = [long]$entry.currentValue; Limit = [long]$entry.limit }
+                break
+            }
+        }
+
+        if ($null -eq $skuQuota) {
+            Write-Host "[WARNING] No quota data found for '$SkuName' SKU in '$Location', using default: $DefaultCapacity K TPM" -ForegroundColor Yellow
+            return $DefaultCapacity
+        }
+
+        # Calculate available capacity: 80% of (limit - current), minimum 1, maximum limit
+        $available = $skuQuota.Limit - $skuQuota.Current
+        if ($available -le 0) {
+            Write-Host "[WARNING] No available quota for '$SkuName' in '$Location' (used: $($skuQuota.Current)K / limit: $($skuQuota.Limit)K), using default: $DefaultCapacity K TPM" -ForegroundColor Yellow
+            return $DefaultCapacity
+        }
+
+        $capacity = [Math]::Max(1, [long][Math]::Floor($available * 0.80))
+        Write-Host "[INFO] Available capacity for '$SkuName' in '$Location': $capacity K TPM (used: $($skuQuota.Current)K / limit: $($skuQuota.Limit)K)" -ForegroundColor Cyan
+        return $capacity
+    } catch {
+        Write-Host "[WARNING] Error calculating available capacity: $_`nUsing default: $DefaultCapacity K TPM" -ForegroundColor Yellow
+        return $DefaultCapacity
+    }
+}
+
 function Invoke-FoundryModelDeployment {
     param(
         [Parameter(Mandatory=$true)][string]$AccountName,
@@ -1497,7 +1704,7 @@ if (-not (Test-Path $DeployModelsCsvPath)) {
     Write-Host "[WARNING] $DeployModelsCsvPath not found - skipping model deployments" -ForegroundColor Yellow
 } else {
     $modelLines = Get-Content $DeployModelsCsvPath | Where-Object { $_ -and ($_.Trim() -ne '') -and (-not $_.Trim().StartsWith('#')) }
-    $rowIndex = 0
+    $llmRowIndex = 0
     foreach ($modelLine in $modelLines) {
         $cols = $modelLine -split ','
         if ($cols.Count -lt 3) {
@@ -1507,9 +1714,16 @@ if (-not (Test-Path $DeployModelsCsvPath)) {
         $modelName    = $cols[0].Trim()
         $modelSku     = $cols[1].Trim()
         $modelVersion = $cols[2].Trim()
+        $modelType    = if ($cols.Count -ge 4) { $cols[3].Trim() } else { "llm" }
 
+        # Skip non-LLM models (embeddings handled separately below)
+        if ($modelType -eq "embeddings") {
+            continue
+        }
+
+        $capacity = Get-AvailableCapacity -Location $LocationAiFoundry -SkuName $modelSku
         $ok = Invoke-FoundryModelDeployment -AccountName $AiFoundryName -ResourceGroup $ResourceGroupName `
-                -ModelName $modelName -SkuName $modelSku -ModelVersion $modelVersion -Capacity $AiFoundrySkuCapacity
+                -ModelName $modelName -SkuName $modelSku -ModelVersion $modelVersion -Capacity $capacity
 
         while (-not $ok) {
             Show-ModelSuggestions -Location $LocationAiFoundry -RequestedModel $modelName -RequestedSku $modelSku
@@ -1530,17 +1744,71 @@ if (-not (Test-Path $DeployModelsCsvPath)) {
             $modelName    = $altModel.Trim()
             $modelSku     = $altSku.Trim()
             $modelVersion = $altVersion.Trim()
+            $capacity = Get-AvailableCapacity -Location $LocationAiFoundry -SkuName $modelSku
             $ok = Invoke-FoundryModelDeployment -AccountName $AiFoundryName -ResourceGroup $ResourceGroupName `
-                    -ModelName $modelName -SkuName $modelSku -ModelVersion $modelVersion -Capacity $AiFoundrySkuCapacity
+                    -ModelName $modelName -SkuName $modelSku -ModelVersion $modelVersion -Capacity $capacity
         }
 
-        # The first successfully-handled row becomes the "primary" model used by the
-        # Java app (its deployment name/model name/version are stored in Key Vault).
-        if ($rowIndex -eq 0 -and $ok) {
+        # The first successfully-handled LLM row becomes the "primary" model used by the
+        # Java app (its deployment name/model name are stored in Key Vault).
+        if ($llmRowIndex -eq 0 -and $ok) {
             $AiFoundryDeploymentName = $modelName
             $AiFoundryModelName      = $modelName
         }
-        $rowIndex++
+        $llmRowIndex++
+    }
+    
+    # Process embeddings models from CSV
+    foreach ($modelLine in $modelLines) {
+        $cols = $modelLine -split ','
+        if ($cols.Count -lt 3) { continue }
+        $modelName    = $cols[0].Trim()
+        $modelSku     = $cols[1].Trim()
+        $modelVersion = $cols[2].Trim()
+        $modelType    = if ($cols.Count -ge 4) { $cols[3].Trim() } else { "llm" }
+
+        # Only process embeddings models
+        if ($modelType -ne "embeddings") {
+            continue
+        }
+
+        Write-Host ""
+        Write-Host "[INFO] Processing embeddings model from CSV: $modelName v$modelVersion (SKU: $modelSku)" -ForegroundColor Cyan
+
+        $capacity = Get-AvailableCapacity -Location $LocationAiFoundry -SkuName $modelSku
+        $ok = Invoke-FoundryModelDeployment -AccountName $AiFoundryName -ResourceGroup $ResourceGroupName `
+                -ModelName $modelName -SkuName $modelSku -ModelVersion $modelVersion -Capacity $capacity
+
+        while (-not $ok) {
+            Show-ModelSuggestions -Location $LocationAiFoundry -RequestedModel $modelName -RequestedSku $modelSku
+            Write-Host ""
+            Write-Host "[INPUT] Embeddings model '$modelName' (sku '$modelSku', version '$modelVersion') is unavailable. Provide an alternative or press Enter to keep default." -ForegroundColor Yellow
+            $altModel = Read-Host "Alternative embeddings model name (Enter to keep default)"
+            if ([string]::IsNullOrWhiteSpace($altModel)) {
+                Write-Host "[INFO] Keeping default embeddings model: $AiFoundryEmbeddingsModelName" -ForegroundColor Cyan
+                break
+            }
+            $altSku = Read-Host "Alternative deployment type / sku-name (default: $modelSku)"
+            if ([string]::IsNullOrWhiteSpace($altSku)) { $altSku = $modelSku }
+            $altVersion = Read-Host "Alternative model version"
+            if ([string]::IsNullOrWhiteSpace($altVersion)) {
+                Write-Host "[ERROR] Model version is required" -ForegroundColor Red
+                continue
+            }
+            $modelName    = $altModel.Trim()
+            $modelSku     = $altSku.Trim()
+            $modelVersion = $altVersion.Trim()
+            $capacity = Get-AvailableCapacity -Location $LocationAiFoundry -SkuName $modelSku
+            $ok = Invoke-FoundryModelDeployment -AccountName $AiFoundryName -ResourceGroup $ResourceGroupName `
+                    -ModelName $modelName -SkuName $modelSku -ModelVersion $modelVersion -Capacity $capacity
+        }
+
+        # Update embeddings configuration from CSV
+        if ($ok) {
+            $AiFoundryEmbeddingsDeploymentName = $modelName
+            $AiFoundryEmbeddingsModelName      = $modelName
+            $AiFoundryEmbeddingsModelVersion   = $modelVersion
+        }
     }
 }
 
@@ -1616,6 +1884,31 @@ if ($cuEmbedDeploymentExists) {
                      '--output','table')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] CU embedding model $CuEmbeddingModelName deployed as $CuEmbeddingDeploymentName on $ContentUnderstandingName" -ForegroundColor Green
+    }
+}
+
+# Deploy AI Foundry embeddings model for email and attachment vector search.
+# This deployment is separate from Content Understanding and used by the Java
+# orchestration functions for generating embeddings for semantic search.
+Write-Host ""
+Write-Host ">>> Deploying AI Foundry embeddings model for email/attachment search" -ForegroundColor White
+
+$aiFoundryEmbedDeploymentExists = (Invoke-AzCliSilent -Arguments @('cognitiveservices','account','deployment','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--deployment-name',$AiFoundryEmbeddingsDeploymentName,'--query','name','-o','tsv')).Output
+if ($aiFoundryEmbedDeploymentExists) {
+    Write-Host "[WARNING] AI Foundry embeddings model deployment $AiFoundryEmbeddingsDeploymentName already exists on $AiFoundryName, skipping" -ForegroundColor Yellow
+} else {
+    $result = Invoke-AzCli -Description "Deploying AI Foundry embeddings model $AiFoundryEmbeddingsModelName on $AiFoundryName ($AiFoundrySkuName, ${AiFoundryEmbeddingsSkuCapacity}K TPM)" `
+        -Arguments @('cognitiveservices','account','deployment','create',
+                     '--name',$AiFoundryName,'--resource-group',$ResourceGroupName,
+                     '--deployment-name',$AiFoundryEmbeddingsDeploymentName,
+                     '--model-name',$AiFoundryEmbeddingsModelName,
+                     '--model-version',$AiFoundryEmbeddingsModelVersion,
+                     '--model-format','OpenAI',
+                     '--sku-name',$AiFoundrySkuName,
+                     '--sku-capacity',$AiFoundryEmbeddingsSkuCapacity,
+                     '--output','table')
+    if ($null -ne $result) {
+        Write-Host "[SUCCESS] AI Foundry embeddings model $AiFoundryEmbeddingsModelName deployed as $AiFoundryEmbeddingsDeploymentName on $AiFoundryName" -ForegroundColor Green
     }
 }
 
@@ -1718,7 +2011,7 @@ if (Test-AzResource -Arguments @('appservice','plan','show','--name',$AppService
         -Arguments @('appservice','plan','create','--name',$AppServicePlanName,
                      '--resource-group',$ResourceGroupName,'--location',$LocationAppService,
                      '--sku','P0v3','--is-linux',
-                     '--tags',"project=$ProjectName","environment=$Environment",
+                     '--tags',"project=$ProjectName","environment=$Environment",$SecurityControlTag,
                      '--output','table')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] App Service Plan $AppServicePlanName created" -ForegroundColor Green
@@ -1734,7 +2027,7 @@ if (Test-AzResource -Arguments @('webapp','show','--name',$WebAppName,'--resourc
                      '--resource-group',$ResourceGroupName,
                      '--plan',$AppServicePlanName,
                      '--runtime','JAVA:21-java21',
-                     '--tags',"project=$ProjectName","environment=$Environment","app=spring-boot-web",
+                     '--tags',"project=$ProjectName","environment=$Environment","app=spring-boot-web",$SecurityControlTag,
                      '--output','table')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Web App $WebAppName created" -ForegroundColor Green
@@ -1766,7 +2059,7 @@ if (Test-AzResource -Arguments @('functionapp','show','--name',$FuncMailboxName,
 } else {
     $result = Invoke-AzCli -Description "Creating function app: $FuncMailboxName" `
         -Arguments (@('functionapp','create','--name',$FuncMailboxName) + $CommonFuncArgs + @(
-                     '--tags',"project=$ProjectName","environment=$Environment","function=mailbox-to-queue",
+                     '--tags',"project=$ProjectName","environment=$Environment","function=mailbox-to-queue",$SecurityControlTag,
                      '--output','table'))
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Function app $FuncMailboxName created" -ForegroundColor Green
@@ -1779,7 +2072,7 @@ if (Test-AzResource -Arguments @('functionapp','show','--name',$FuncQueueDbName,
 } else {
     $result = Invoke-AzCli -Description "Creating function app: $FuncQueueDbName" `
         -Arguments (@('functionapp','create','--name',$FuncQueueDbName) + $CommonFuncArgs + @(
-                     '--tags',"project=$ProjectName","environment=$Environment","function=queue-to-db",
+                     '--tags',"project=$ProjectName","environment=$Environment","function=queue-to-db",$SecurityControlTag,
                      '--output','table'))
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Function app $FuncQueueDbName created" -ForegroundColor Green
@@ -1792,7 +2085,7 @@ if (Test-AzResource -Arguments @('functionapp','show','--name',$FuncCuQueueDbNam
 } else {
     $result = Invoke-AzCli -Description "Creating function app: $FuncCuQueueDbName" `
         -Arguments (@('functionapp','create','--name',$FuncCuQueueDbName) + $CommonFuncArgs + @(
-                     '--tags',"project=$ProjectName","environment=$Environment","function=cu-queue-to-db",
+                     '--tags',"project=$ProjectName","environment=$Environment","function=cu-queue-to-db",$SecurityControlTag,
                      '--output','table'))
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Function app $FuncCuQueueDbName created" -ForegroundColor Green
@@ -2097,6 +2390,8 @@ $kvSecrets = @{
     "AiFoundryDeploymentName"               = $AiFoundryDeploymentName
     "AiFoundryModelName"                    = $AiFoundryModelName
     "AiFoundryApiVersion"                   = $AiFoundryApiVersion
+    "AiFoundryEmbeddingsDeploymentName"     = $AiFoundryEmbeddingsDeploymentName
+    "AiFoundryEmbeddingsModelName"          = $AiFoundryEmbeddingsModelName
     "StorageEndpoint"                       = $StorageBlobEndpoint
     "StorageTableEndpoint"                  = $StorageTableEndpoint
     "StorageContainerName"                  = $StorageContainerName

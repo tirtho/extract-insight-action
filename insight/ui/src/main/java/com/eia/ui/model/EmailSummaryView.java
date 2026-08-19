@@ -8,6 +8,7 @@ public record EmailSummaryView(
         String receivedDateTime,
         String extractedAt,
         String bodyPreview,
-        int attachmentCount
+        int attachmentCount,
+        Double similarityScore
 ) {
 }

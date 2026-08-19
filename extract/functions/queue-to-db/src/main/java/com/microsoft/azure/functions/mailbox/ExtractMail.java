@@ -6,6 +6,7 @@ import com.azure.cosmos.models.PartitionKey;
 import com.core.az.AzConnection;
 import com.core.az.AzContentUnderstanding;
 import com.core.az.AzEnvNames;
+import com.core.az.AzOpenAiEmbeddings;
 import com.core.az.AzStorageBlob;
 import com.core.az.AzStorageQueue;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -20,7 +21,9 @@ import com.microsoft.azure.functions.mailbox.model.AttachmentResult;
 import com.microsoft.azure.functions.mailbox.model.EmailData;
 import com.microsoft.azure.functions.mailbox.model.ProcessAttachmentInput;
 import com.microsoft.azure.functions.mailbox.model.StoreDocumentInput;
+import com.microsoft.durabletask.RetryPolicy;
 import com.microsoft.durabletask.Task;
+import com.microsoft.durabletask.TaskOptions;
 import com.microsoft.durabletask.TaskOrchestrationContext;
 import com.microsoft.durabletask.azurefunctions.DurableActivityTrigger;
 import com.microsoft.durabletask.azurefunctions.DurableClientContext;
@@ -31,6 +34,7 @@ import com.microsoft.graph.models.AttachmentCollectionResponse;
 import com.microsoft.graph.models.FileAttachment;
 import com.microsoft.graph.serviceclient.GraphServiceClient;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -140,7 +144,13 @@ public class ExtractMail {
         docInput.setBodyContent(stripHtmlTags(emailData.getBodyContent()));
         docInput.setAttachments(results);
 
-        ctx.callActivity("StoreInCosmos", docInput, Void.class).await();
+        // StoreInCosmos generates the email embedding before the single upsert, so a
+        // failure fails the activity and is retried; the email is not persisted until
+        // it (and its embedding) succeed.
+        RetryPolicy storeRetryPolicy = new RetryPolicy(3, Duration.ofSeconds(5))
+                .setBackoffCoefficient(2.0)
+                .setMaxRetryInterval(Duration.ofSeconds(30));
+        ctx.callActivity("StoreInCosmos", docInput, new TaskOptions(storeRetryPolicy)).await();
 
         return "Completed: " + emailData.getInternetMessageId();
     }
@@ -498,6 +508,40 @@ public class ExtractMail {
                 doc.put("bodyContent", input.getBodyContent());
             }
             doc.set("attachments", attachmentRefs);
+
+            // Generate the email embedding before the single upsert so the document is
+            // written atomically with its vector. A failure throws, failing (and retrying)
+            // this activity; the email is never stored without its embedding.
+            StringBuilder textToEmbed = new StringBuilder();
+            if (input.getSubject() != null && !input.getSubject().isEmpty()) {
+                textToEmbed.append(input.getSubject()).append(". ");
+            }
+            if (input.getFromAddress() != null && !input.getFromAddress().isEmpty()) {
+                textToEmbed.append("From: ").append(input.getFromAddress()).append(". ");
+            }
+            if (input.getBodyContent() != null) {
+                textToEmbed.append(input.getBodyContent());
+            }
+            String embedText = textToEmbed.toString().trim();
+            if (!embedText.isEmpty()) {
+                String embeddingsDeploymentName = azConnection.getSecret(
+                        AzEnvNames.KV_AI_FOUNDRY_EMBEDDINGS_DEPLOYMENT_NAME);
+                AzOpenAiEmbeddings embeddingsHelper = new AzOpenAiEmbeddings(
+                        azConnection.getAiFoundryChatClient(), embeddingsDeploymentName);
+                String truncatedText = AzOpenAiEmbeddings.truncateForEmbedding(embedText);
+                List<Double> embedding = embeddingsHelper.embedText(truncatedText);
+                ArrayNode embeddingArray = objectMapper.createArrayNode();
+                for (Double value : embedding) {
+                    embeddingArray.add(value);
+                }
+                doc.set("embedding", embeddingArray);
+                doc.put("embeddingGeneratedAt", LocalDateTime.now().toString());
+                logger.info("Generated email embedding (vector dimension: "
+                        + embedding.size() + ") for id: " + emailDocId);
+            } else {
+                logger.info("Email has no text content to embed; storing without embedding: "
+                        + emailDocId);
+            }
 
             container.upsertItem(doc, new PartitionKey(emailDocId),
                     new CosmosItemRequestOptions());

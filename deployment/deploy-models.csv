@@ -1,4 +1,10 @@
 # Models to deploy on the Azure AI Foundry account/project.
-# Format: <model-name>,<sku-name>,<model-version>
+# Format: <model-name>,<sku-name>,<model-version>[,<type>]
 # The deployment name will match the model name.
-gpt-5.4-pro,GlobalStandard,2026-03-05
+# type: 'llm' (default) or 'embeddings'
+# Examples:
+#   gpt-5.4-pro,GlobalStandard,2026-03-05,llm        (primary LLM model)
+#   text-embedding-3-small,GlobalStandard,1,embeddings  (embeddings for vector search)
+# gpt-5.4-pro,GlobalStandard,2026-03-05
+gpt-5.6-luna,GlobalStandard,2026-07-09,llm
+text-embedding-3-small,GlobalStandard,1,embeddings

@@ -61,17 +61,27 @@ $FunctionApps = @(
 $DeployScriptPath = Join-Path $PSScriptRoot "5.deploy-code.ps1"
 
 function Invoke-AzCli {
-    param([string[]]$Arguments)
+    param([string[]]$Arguments, [int]$MaxAttempts = 3, [int]$RetryDelaySeconds = 5)
 
-    $allOutput = & az @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $allOutput = & az @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            return (($allOutput | Out-String).Trim())
+        }
 
-    if ($exitCode -ne 0) {
         $msg = ($allOutput | Out-String).Trim()
+        # Corporate proxies/VPNs occasionally reset the TLS connection to ARM;
+        # retry those instead of aborting the whole secure window.
+        $isTransient = $msg -match 'Connection aborted|ConnectionResetError|actively refused|timed out|Temporary failure'
+        if ($isTransient -and $attempt -lt $MaxAttempts) {
+            Write-Host "[WARNING] Transient Azure CLI error (attempt $attempt/$MaxAttempts), retrying in $RetryDelaySeconds second(s)..." -ForegroundColor Yellow
+            Start-Sleep -Seconds $RetryDelaySeconds
+            continue
+        }
+
         throw "Azure CLI command failed: az $($Arguments -join ' ')`n$msg"
     }
-
-    return (($allOutput | Out-String).Trim())
 }
 
 function Get-AzValue {
@@ -229,11 +239,14 @@ try {
     Merge-IgnoreTag -ResourceId $storageResourceId
     Write-Host "[SUCCESS] Applied SecurityControl=Ignore on storage account" -ForegroundColor Green
 
+    # App Service/Functions is not an eligible resource type for storage resourceAccessRules
+    # (--resource-id/--tenant-id rules), and Flex Consumption apps have no fixed outbound IPs
+    # (possibleOutboundIpAddresses is null), so IP allow-listing cannot cover OneDeploy's blob
+    # upload either. defaultAction=Allow for the duration of this window is the only option
+    # short of standing up a private endpoint + VNet integration.
     Invoke-AzCli -Arguments @('storage', 'account', 'update', '--name', $StorageAccountName, '--resource-group', $ResourceGroupName,
-        '--public-network-access', 'Enabled', '--default-action', 'Deny', '--bypass', 'AzureServices', '--output', 'none') | Out-Null
-    Invoke-AzCli -Arguments @('storage', 'account', 'network-rule', 'add', '--account-name', $StorageAccountName, '--resource-group', $ResourceGroupName,
-        '--ip-address', $publicIp, '--output', 'none') | Out-Null
-    Write-Host "[SUCCESS] Storage temporary IP allow rule added ($publicIp)" -ForegroundColor Green
+        '--public-network-access', 'Enabled', '--default-action', 'Allow', '--bypass', 'AzureServices', '--output', 'none') | Out-Null
+    Write-Host "[SUCCESS] Storage network default action temporarily set to Allow" -ForegroundColor Green
 
     foreach ($fa in $FunctionApps) {
         $faId = $functionState[$fa].ResourceId
@@ -290,14 +303,8 @@ finally {
     Write-Host "[INFO] Closing secure deployment window..." -ForegroundColor Cyan
 
     if ($windowOpened) {
-        try {
-            Invoke-AzCli -Arguments @('storage', 'account', 'network-rule', 'remove', '--account-name', $StorageAccountName, '--resource-group', $ResourceGroupName,
-                '--ip-address', $publicIp, '--output', 'none') | Out-Null
-            Write-Host "[SUCCESS] Removed storage IP allow rule ($publicIp)" -ForegroundColor Green
-        } catch {
-            Write-Host "[WARNING] Failed to remove storage IP allow rule." -ForegroundColor Yellow
-            Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
-        }
+        # Storage defaultAction is restored (to its original value) further below;
+        # nothing IP/resource-specific was added since defaultAction=Allow was used instead.
 
         foreach ($fa in $FunctionApps) {
             try {

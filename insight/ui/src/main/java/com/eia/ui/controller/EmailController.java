@@ -50,10 +50,14 @@ public class EmailController {
     public String emails(@RequestParam(value = "emailId", required = false) String emailId,
                          @RequestParam(value = "filterEmail", required = false, defaultValue = "") String filterEmail,
                          @RequestParam(value = "filterSubject", required = false, defaultValue = "") String filterSubject,
+                         @RequestParam(value = "searchMode", required = false, defaultValue = "fields") String searchMode,
+                         @RequestParam(value = "searchQuery", required = false, defaultValue = "") String searchQuery,
+                         @RequestParam(value = "topN", required = false, defaultValue = "3") int topN,
+                         @RequestParam(value = "rerank", required = false, defaultValue = "false") boolean rerank,
                          Authentication authentication,
                          Model model) {
         List<String> userIdentifiers = resolveUserIdentifiers(authentication);
-        var allEmails = azureEmailStore.listEmails(userIdentifiers);
+        var allEmails = azureEmailStore.listEmails(userIdentifiers, searchMode, searchQuery, topN, rerank);
         
         // Use final local variables for lambda expressions
         final String email_filter = filterEmail;
@@ -80,6 +84,10 @@ public class EmailController {
         model.addAttribute("selectedEmail", selectedEmail);
         model.addAttribute("filterEmail", filterEmail);
         model.addAttribute("filterSubject", filterSubject);
+        model.addAttribute("searchMode", azureEmailStore.normalizeSearchMode(searchMode));
+        model.addAttribute("searchQuery", searchQuery);
+        model.addAttribute("topN", topN);
+        model.addAttribute("rerank", rerank);
         model.addAttribute("isAuthenticated", isUserAuthenticated(authentication));
         model.addAttribute("oidcEnabled", isOidcConfigured());
         model.addAttribute("userDisplayName", resolveUserDisplayName(authentication));

@@ -8,9 +8,11 @@ import com.azure.storage.queue.models.QueueMessageItem;
 import com.core.az.AzConnection;
 import com.core.az.AzContentUnderstanding;
 import com.core.az.AzEnvNames;
+import com.core.az.AzOpenAiEmbeddings;
 import com.core.az.AzStorageQueue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.microsoft.azure.functions.ExecutionContext;
 import com.microsoft.azure.functions.annotation.FunctionName;
@@ -133,6 +135,11 @@ public class PollCuAnalysis {
                 logger.info("Updated attachment " + attachmentDocId
                         + " with analysis results (succeeded)");
 
+                // Generate embeddings for attachment after CU analysis succeeds
+                try (AzConnection embeddingConnection = new AzConnection(System.getenv("AZURE_KEY_VAULT_URL"))) {
+                    generateAttachmentEmbeddings(attachmentDocId, attDoc, container, embeddingConnection);
+                }
+
                 // Remove from queue
                 storageQueue.deleteMessage(queueMsg.getMessageId(), queueMsg.getPopReceipt());
 
@@ -168,5 +175,116 @@ public class PollCuAnalysis {
             logger.warning("Failed to process queue message: " + e.getMessage()
                     + " | body: " + body);
         }
+    }
+
+    /**
+     * Generates embeddings for an attachment's analyzed content.
+     * Extracts text from the analyzeResult and creates vector embeddings
+     * for semantic search across attachments.
+     *
+     * @param attachmentDocId The Cosmos DB document ID of the attachment
+     * @param attDoc The attachment document with analyzeResult
+     * @param container The Cosmos DB container
+     * @param azConnection The Azure connection for credentials
+     */
+    private void generateAttachmentEmbeddings(String attachmentDocId, ObjectNode attDoc,
+                                               CosmosContainer container, AzConnection azConnection) {
+        try {
+            logger.info("Starting embedding generation for attachment: " + attachmentDocId);
+
+            // Extract text from analyzeResult for embedding
+            String textToEmbed = extractTextForEmbedding(attDoc);
+
+            if (textToEmbed == null || textToEmbed.trim().isEmpty()) {
+                logger.info("No text content found in attachment " + attachmentDocId
+                        + " for embedding; skipping");
+                return;
+            }
+
+            // Create embeddings helper with OpenAI client
+            String embeddingsDeploymentName = azConnection.getSecret(
+                    AzEnvNames.KV_AI_FOUNDRY_EMBEDDINGS_DEPLOYMENT_NAME);
+            AzOpenAiEmbeddings embeddingsHelper = new AzOpenAiEmbeddings(
+                    azConnection.getAiFoundryChatClient(),
+                    embeddingsDeploymentName);
+
+            // Generate embedding (truncate text to avoid token limits)
+            String truncatedText = AzOpenAiEmbeddings.truncateForEmbedding(textToEmbed);
+            List<Double> embedding = embeddingsHelper.embedText(truncatedText);
+
+            // Store embedding in attachment document
+            ArrayNode embeddingArray = objectMapper.createArrayNode();
+            for (Double value : embedding) {
+                embeddingArray.add(value);
+            }
+            attDoc.set("embedding", embeddingArray);
+            attDoc.put("embeddingGeneratedAt", LocalDateTime.now().toString());
+
+            // Upsert the updated document
+            container.upsertItem(attDoc, new PartitionKey(attachmentDocId),
+                    new CosmosItemRequestOptions());
+
+            logger.info("Successfully generated and stored embedding for attachment: "
+                    + attachmentDocId + " (vector dimension: " + embedding.size() + ")");
+
+        } catch (Exception e) {
+            logger.warning("Failed to generate embedding for attachment " + attachmentDocId
+                    + ": " + e.getMessage());
+            // Don't throw – embedding generation failure should not block the polling process
+        }
+    }
+
+    /**
+     * Extracts text content from an attachment's analyzeResult for embedding.
+     * Handles different analyzer types (document, image, video, audio) by extracting
+     * the most relevant text content.
+     *
+     * @param attDoc The attachment document with analyzeResult
+     * @return Extracted text content, or null if no text found
+     */
+    private String extractTextForEmbedding(ObjectNode attDoc) {
+        StringBuilder textBuilder = new StringBuilder();
+
+        // Try to extract from analyzeResult
+        if (attDoc.has("analyzeResult") && attDoc.get("analyzeResult").isObject()) {
+            JsonNode analyzeResult = attDoc.get("analyzeResult");
+
+            // Document analyzer: extract OCR'd text
+            if (analyzeResult.has("analyzeResult")) {
+                JsonNode result = analyzeResult.get("analyzeResult");
+                if (result.has("content")) {
+                    textBuilder.append(result.get("content").asText()).append(" ");
+                }
+            }
+
+            // Image analyzer: extract text and descriptions
+            if (analyzeResult.has("content")) {
+                textBuilder.append(analyzeResult.get("content").asText()).append(" ");
+            }
+            if (analyzeResult.has("description")) {
+                textBuilder.append(analyzeResult.get("description").asText()).append(" ");
+            }
+
+            // Video analyzer: extract captions, transcript, or description
+            if (analyzeResult.has("videoCaption")) {
+                textBuilder.append(analyzeResult.get("videoCaption").asText()).append(" ");
+            }
+            if (analyzeResult.has("transcript")) {
+                textBuilder.append(analyzeResult.get("transcript").asText()).append(" ");
+            }
+
+            // Audio analyzer: extract transcript
+            if (analyzeResult.has("transcript")) {
+                textBuilder.append(analyzeResult.get("transcript").asText()).append(" ");
+            }
+        }
+
+        // Fallback: include attachment metadata
+        if (attDoc.has("attachmentName")) {
+            textBuilder.append("File: ").append(attDoc.get("attachmentName").asText()).append(" ");
+        }
+
+        String result = textBuilder.toString().trim();
+        return result.isEmpty() ? null : result;
     }
 }

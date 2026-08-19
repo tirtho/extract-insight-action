@@ -68,7 +68,7 @@
         </div>
     </section>
 
-    <section class="workspace" th:if="${!emails.isEmpty()}">
+    <section class="workspace">
         <aside class="sidebar">
             <div class="sidebar-head">
                 <div class="sidebar-head-row">
@@ -82,8 +82,21 @@
             </div>
             
             <div class="filter-box">
+                <div class="search-tabs" role="tablist" aria-label="Search type">
+                    <a th:each="mode : ${ {'fields', 'text', 'vector', 'hybrid'} }"
+                       th:classappend="${searchMode == mode} ? ' active' : ''"
+                       th:href="@{/emails(searchMode=${mode}, searchQuery=${searchQuery}, topN=${topN}, rerank=${rerank})}"
+                       class="search-tab" role="tab"
+                       th:attr="aria-selected=${searchMode == mode},
+                                title=${mode == 'fields' ? 'Fields — filter by sender, subject and other fields (exact structured match).'
+                                     : (mode == 'text' ? 'Text — keyword search; finds emails that literally contain your words.'
+                                     : (mode == 'vector' ? 'Vector — semantic search; finds emails similar in meaning to your query, even without matching words.'
+                                     : 'Hybrid — fuses keyword + meaning using RRF (Reciprocal Rank Fusion); a strong match on either keyword or meaning ranks high.'))}"
+                       th:text="${mode == 'fields' ? 'Fields' : (mode == 'text' ? 'Text' : (mode == 'vector' ? 'Vector' : 'Hybrid'))}"></a>
+                </div>
                 <form id="emailFilterForm" th:action="@{/emails}" method="get">
-                    <div class="filter-group">
+                    <input type="hidden" name="searchMode" th:value="${searchMode}">
+                    <div class="filter-group" th:if="${searchMode == 'fields'}">
                         <label for="filterEmail">Email Address</label>
                         <input type="text" id="filterEmail" name="filterEmail" 
                                th:value="${filterEmail}"
@@ -97,6 +110,24 @@
                                placeholder="e.g., *invoice* or *urgent*"
                                class="filter-input">
                     </div>
+                    <div class="filter-group" th:if="${searchMode != 'fields'}">
+                        <label for="searchQuery" th:text="${searchMode == 'text' ? 'Search email content' : (searchMode == 'vector' ? 'Find similar content' : 'Match keywords and meaning')}"></label>
+                        <input type="search" id="searchQuery" name="searchQuery" th:value="${searchQuery}"
+                               placeholder="e.g., renewal notice or claim status" class="filter-input">
+                    </div>
+                    <div class="filter-group filter-check" th:if="${searchMode != 'fields'}">
+                        <label class="rerank-check">
+                            <input type="checkbox" id="rerankToggle" name="rerank" value="true"
+                                   th:checked="${rerank}" onchange="toggleTopN()">
+                            <span>Rerank results (AI relevance, high &#8594; low)</span>
+                        </label>
+                    </div>
+                    <div class="filter-group" id="topNGroup" th:if="${searchMode != 'fields'}"
+                         th:style="${(searchMode == 'vector' or rerank) ? '' : 'display:none'}">
+                        <label for="topN">Top results (N)</label>
+                        <input type="number" id="topN" name="topN" min="1" max="100" step="1"
+                               th:value="${topN}" placeholder="3" class="filter-input">
+                    </div>
                     <div class="filter-actions">
                         <button type="submit" class="btn-filter">Filter</button>
                         <button type="reset" class="btn-reset" onclick="clearFilters()">Clear</button>
@@ -108,23 +139,26 @@
                 <a class="email-link"
                    th:classappend="${selectedEmail != null and selectedEmail.id() == email.id} ? ' active' : ''"
                    th:each="email : ${emails}"
-                   th:href="@{/emails(emailId=${email.id}, filterEmail=${filterEmail}, filterSubject=${filterSubject})}">
+                   th:href="@{/emails(emailId=${email.id}, filterEmail=${filterEmail}, filterSubject=${filterSubject}, searchMode=${searchMode}, searchQuery=${searchQuery}, topN=${topN}, rerank=${rerank})}">
                     <div class="el-top">
                         <span class="el-name" th:text="${email.fromName.isBlank() ? (email.fromAddress.isBlank() ? 'Unknown sender' : email.fromAddress) : email.fromName}"></span>
                         <span class="el-date" th:text="${email.receivedDateTime}"></span>
                     </div>
                     <div class="el-subject" th:text="${email.subject}"></div>
                     <div class="el-preview" th:if="${!email.bodyPreview.isBlank()}" th:text="${email.bodyPreview}"></div>
-                    <div class="el-footer" th:if="${email.attachmentCount > 0}">
-                        <span class="el-attach">
+                    <div class="el-footer" th:if="${email.attachmentCount > 0 or email.similarityScore != null}">
+                        <span class="el-attach" th:if="${email.attachmentCount > 0}">
                             <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                                 <path d="M4.5 3a2.5 2.5 0 0 1 5 0v9a1.5 1.5 0 0 1-3 0V5a.5.5 0 0 1 1 0v7a.5.5 0 0 0 1 0V3a1.5 1.5 0 1 0-3 0v9a2.5 2.5 0 0 0 5 0V5a.5.5 0 0 1 1 0v7a3.5 3.5 0 1 1-7 0z"/>
                             </svg>
                             <span th:text="${email.attachmentCount}"></span>
                         </span>
+                        <span class="el-score" th:if="${email.similarityScore != null}"
+                              th:text="'score ' + ${#numbers.formatDecimal(email.similarityScore, 1, 3)}"></span>
                     </div>
                 </a>
             </nav>
+            <p class="email-empty-note" th:if="${emails.isEmpty()}">No emails to display. Try a different search, or switch to Fields / clear filters.</p>
         </aside>
 
         <section class="detail-panel" th:if="${selectedEmail != null}">
@@ -264,11 +298,6 @@
                 </section>
             </section>
         </section>
-    </section>
-
-    <section class="empty-state" th:if="${emails.isEmpty()}">
-        <h2 class="panel-title">No email documents available</h2>
-        <p>No current items were returned from the configured Cosmos DB container.</p>
     </section>
 </main>
 <script>
@@ -895,11 +924,21 @@
         }
     });
 
-    // Clear filters and reload without filter parameters
+    // Clear filters/search and reload, staying on the current search tab.
     function clearFilters() {
-        document.getElementById('filterEmail').value = '';
-        document.getElementById('filterSubject').value = '';
-        window.location.href = '/emails';
+        var modeInput = document.querySelector('input[name="searchMode"]');
+        var mode = modeInput && modeInput.value ? modeInput.value : 'fields';
+        window.location.href = '/emails?searchMode=' + encodeURIComponent(mode);
+    }
+
+    // Show the Top-N field when reranking is on (or when Vector mode is active).
+    function toggleTopN() {
+        var group = document.getElementById('topNGroup');
+        if (!group) return;
+        var modeInput = document.querySelector('input[name="searchMode"]');
+        var isVector = modeInput && modeInput.value === 'vector';
+        var cb = document.getElementById('rerankToggle');
+        group.style.display = (isVector || (cb && cb.checked)) ? '' : 'none';
     }
 
     // =========================================================================

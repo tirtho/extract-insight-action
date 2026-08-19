@@ -140,6 +140,8 @@ PollingMailboxName="${POLLING_MAILBOX_NAME:-Inbox}"
 ReadMailboxForPastNSeconds="${READ_MAILBOX_FOR_PAST_N_SECONDS:-3600}"
 CosmosDbDatabaseName="DocAIDatabase"
 CosmosDbContainerName="EmailExtracts"
+# Must match the output dimensions of the embeddings model in deploy-models.csv.
+CosmosDbVectorDimensions=1536
 AppServicePlanName="${APP_SERVICE_PLAN_NAME:-plan-${ProjectName}-${Environment}}"
 WebAppName="${WEB_APP_NAME:-app-${ProjectName}-${Environment}-${SUFFIX}}"
 ContentUnderstandingName="${CONTENT_UNDERSTANDING_NAME:-cu-${ProjectName}-${Environment}-${SUFFIX}}"
@@ -148,13 +150,24 @@ AiFoundryProjectName="${AI_FOUNDRY_PROJECT_NAME:-proj-${ProjectName}-${Environme
 AiFoundryProjectApiVersion="2025-04-01-preview"
 AiFoundryApiVersion="2024-12-01-preview"
 AiFoundrySkuName="GlobalStandard"
-AiFoundrySkuCapacity="50"
+# SKU Capacity is now dynamically calculated based on available quota (see get_available_capacity function)
+# Exempts resources from the governance policies that would otherwise disable public network access.
+# Hardening is applied later by 5.deploy-code-secure-window.sh.
+SecurityControlTag="SecurityControl=Ignore"
 DeployModelsCsvPath="$SCRIPT_DIR/deploy-models.csv"
 
 # Primary model (updated from CSV row 0 at runtime)
 AiFoundryDeploymentName="gpt-5.1-chat"
 AiFoundryModelName="gpt-5.1-chat"
 AiFoundryModelVersion="2025-11-13"
+
+# AI Foundry embeddings model for vector search on emails and attachments
+# Defaults are derived from deploy-models.csv at runtime (see below).
+# These initial values are fallbacks if the CSV is missing or contains no embeddings entries.
+AiFoundryEmbeddingsDeploymentName="text-embedding-3-small"
+AiFoundryEmbeddingsModelName="text-embedding-3-small"
+AiFoundryEmbeddingsModelVersion="1"
+AiFoundryEmbeddingsSkuCapacity="50"
 
 # CU models
 CuCompletionDeploymentName="gpt-4.1"
@@ -523,6 +536,55 @@ show_model_suggestions() {
     fi
 }
 
+get_available_capacity() {
+    local location="$1" sku_name="${2:-GlobalStandard}" default_capacity="${3:-50}"
+    local usage_json capacity available current limit
+    
+    # Query quota usage for the location
+    usage_json=$(az cognitiveservices usage list --location "$location" -o json 2>/dev/null || true)
+    if [[ -z "$usage_json" ]]; then
+        echo "[WARNING] Could not retrieve quota for '$location', using default capacity: $default_capacity K TPM" >&2
+        echo "$default_capacity"
+        return 0
+    fi
+    
+    # Extract quota for the specified SKU (e.g., "GlobalStandard")
+    # Expected format in JSON: name.value contains "OpenAI.GlobalStandard.modelname"
+    local sku_entry
+    sku_entry=$(echo "$usage_json" | jq ".[] | select(.name.value | endswith(\".$sku_name\")) | select(.currentValue != null)" | head -1)
+    
+    if [[ -z "$sku_entry" ]]; then
+        echo "[WARNING] No quota data found for '$sku_name' SKU in '$location', using default: $default_capacity K TPM" >&2
+        echo "$default_capacity"
+        return 0
+    fi
+    
+    # Parse current and limit values
+    current=$(echo "$sku_entry" | jq -r '.currentValue // 0')
+    limit=$(echo "$sku_entry" | jq -r '.limit // 0')
+    
+    if [[ -z "$current" ]] || [[ -z "$limit" ]] || [[ $limit -le 0 ]]; then
+        echo "[WARNING] Invalid quota data for '$sku_name' in '$location', using default: $default_capacity K TPM" >&2
+        echo "$default_capacity"
+        return 0
+    fi
+    
+    # Calculate available capacity: 80% of (limit - current)
+    available=$((limit - current))
+    if [[ $available -le 0 ]]; then
+        echo "[WARNING] No available quota for '$sku_name' in '$location' (used: ${current}K / limit: ${limit}K), using default: $default_capacity K TPM" >&2
+        echo "$default_capacity"
+        return 0
+    fi
+    
+    # Calculate 80% of available, minimum 1
+    capacity=$(( (available * 80) / 100 ))
+    [[ $capacity -lt 1 ]] && capacity=1
+    
+    echo "[INFO] Available capacity for '$sku_name' in '$location': $capacity K TPM (used: ${current}K / limit: ${limit}K)" >&2
+    echo "$capacity"
+}
+
 invoke_foundry_model_deployment() {
     local account="$1" rg="$2" model_name="$3" sku_name="$4" model_version="$5" capacity="$6"
     local deploy_name="$model_name"
@@ -635,7 +697,7 @@ if test_az_resource group show --name "$ResourceGroupName" --query name -o tsv; 
     echo "[WARNING] Resource group $ResourceGroupName already exists, skipping"
 else
     if az group create --name "$ResourceGroupName" --location "$LocationResourceGroup" \
-            --tags "project=$ProjectName" "environment=$Environment" --output table; then
+            --tags "project=$ProjectName" "environment=$Environment" "$SecurityControlTag" --output table; then
         echo "[SUCCESS] Resource group $ResourceGroupName created"
     else
         DEPLOYMENT_ERRORS+=("Creating resource group: $ResourceGroupName")
@@ -654,12 +716,21 @@ else
     if az storage account create --name "$StorageAccountName" \
             --resource-group "$ResourceGroupName" --location "$LocationStorage" \
             --sku Standard_LRS --kind StorageV2 --access-tier Hot \
-            --tags "project=$ProjectName" "environment=$Environment" --output table; then
+            --tags "project=$ProjectName" "environment=$Environment" "$SecurityControlTag" --output table; then
         echo "[SUCCESS] Storage account $StorageAccountName created"
     else
         DEPLOYMENT_ERRORS+=("Creating storage account: $StorageAccountName")
     fi
 fi
+
+# Governance policy can disable public network access on create, which blocks the
+# data-plane calls below. Re-open it here; 5.deploy-code-secure-window.sh hardens it later.
+az resource tag --tags "project=$ProjectName" "environment=$Environment" "$SecurityControlTag" \
+    --name "$StorageAccountName" --resource-group "$ResourceGroupName" \
+    --resource-type Microsoft.Storage/storageAccounts --is-incremental --output none 2>/dev/null || true
+az storage account update --name "$StorageAccountName" --resource-group "$ResourceGroupName" \
+    --public-network-access Enabled --bypass AzureServices --default-action Allow \
+    --output none 2>/dev/null || true
 
 # Disable soft-delete for blobs, containers, file shares
 echo "[INFO] Disabling soft-delete on storage account: $StorageAccountName"
@@ -723,7 +794,7 @@ else
     if az keyvault create --name "$KeyVaultName" --resource-group "$ResourceGroupName" \
             --location "$LocationKeyVault" --sku standard \
             --enable-rbac-authorization true --retention-days 7 \
-            --tags "project=$ProjectName" "environment=$Environment" --output table; then
+            --tags "project=$ProjectName" "environment=$Environment" "$SecurityControlTag" --output table; then
         echo "[SUCCESS] Key Vault $KeyVaultName created"
     else
         DEPLOYMENT_ERRORS+=("Creating Key Vault: $KeyVaultName")
@@ -873,7 +944,7 @@ if test_az_resource servicebus namespace show --name "$ServiceBusNamespace" \
 else
     if az servicebus namespace create --name "$ServiceBusNamespace" \
             --resource-group "$ResourceGroupName" --location "$LocationServiceBus" --sku Standard \
-            --tags "project=$ProjectName" "environment=$Environment" --output table; then
+            --tags "project=$ProjectName" "environment=$Environment" "$SecurityControlTag" --output table; then
         echo "[SUCCESS] Service Bus namespace $ServiceBusNamespace created"
     else
         DEPLOYMENT_ERRORS+=("Creating Service Bus namespace: $ServiceBusNamespace")
@@ -922,7 +993,7 @@ else
     if az monitor app-insights component create --app "$AppInsightsName" \
             --resource-group "$ResourceGroupName" --location "$LocationAppInsights" \
             --kind web --application-type web \
-            --tags "project=$ProjectName" "environment=$Environment" --output table; then
+            --tags "project=$ProjectName" "environment=$Environment" "$SecurityControlTag" --output table; then
         echo "[SUCCESS] Application Insights $AppInsightsName created"
     else
         DEPLOYMENT_ERRORS+=("Creating Application Insights: $AppInsightsName")
@@ -941,7 +1012,7 @@ else
     if az cosmosdb create --name "$CosmosDbAccountName" --resource-group "$ResourceGroupName" \
             --locations "regionName=$LocationCosmosDb" "failoverPriority=0" "isZoneRedundant=false" \
             --kind GlobalDocumentDB --default-consistency-level Session \
-            --tags "project=$ProjectName" "environment=$Environment" --output table; then
+            --tags "project=$ProjectName" "environment=$Environment" "$SecurityControlTag" --output table; then
         echo "[SUCCESS] Cosmos DB account $CosmosDbAccountName created"
     else
         DEPLOYMENT_ERRORS+=("Creating Cosmos DB account: $CosmosDbAccountName")
@@ -961,13 +1032,126 @@ fi
 container_exists=$(az cosmosdb sql container show --account-name "$CosmosDbAccountName" \
     --resource-group "$ResourceGroupName" --database-name "$CosmosDbDatabaseName" \
     --name "$CosmosDbContainerName" --query name -o tsv 2>/dev/null || true)
-if [[ -n "$container_exists" ]]; then
-    echo "[WARNING] Container $CosmosDbContainerName already exists, skipping"
+
+# vectorIndexes require the account-level capability and a container vector embedding policy.
+existing_caps=$(az cosmosdb show --name "$CosmosDbAccountName" --resource-group "$ResourceGroupName" \
+    --query "capabilities[].name" -o tsv 2>/dev/null || true)
+if echo "$existing_caps" | grep -q '^EnableNoSQLVectorSearch$'; then
+    echo "[OK] Vector search capability already enabled on $CosmosDbAccountName"
 else
-    az cosmosdb sql container create --account-name "$CosmosDbAccountName" \
-        --resource-group "$ResourceGroupName" --database-name "$CosmosDbDatabaseName" \
-        --name "$CosmosDbContainerName" --partition-key-path /id --output table 2>/dev/null || \
+    # --capabilities replaces the list, so existing ones must be passed through.
+    cap_args=()
+    while IFS= read -r cap; do [[ -n "$cap" ]] && cap_args+=("$cap"); done <<< "$existing_caps"
+    cap_args+=("EnableNoSQLVectorSearch")
+    if az cosmosdb update --name "$CosmosDbAccountName" --resource-group "$ResourceGroupName" \
+            --capabilities "${cap_args[@]}" --output none; then
+        # The data plane rejects vector policies until the capability propagates.
+        for i in $(seq 1 12); do
+            if az cosmosdb show --name "$CosmosDbAccountName" --resource-group "$ResourceGroupName" \
+                    --query "capabilities[?name=='EnableNoSQLVectorSearch'].name" -o tsv 2>/dev/null | grep -q .; then
+                echo "[SUCCESS] Vector search capability enabled on $CosmosDbAccountName"
+                break
+            fi
+            echo "[INFO] Waiting for vector search capability to propagate ($i/12)..."
+            sleep 10
+        done
+    else
+        echo "[ERROR] Could not enable EnableNoSQLVectorSearch - container creation with a vector policy will fail"
+    fi
+fi
+
+vector_embedding_policy=$(cat <<EOF
+{
+  "vectorEmbeddings": [
+    {
+      "path": "/embedding",
+      "dataType": "float32",
+      "dimensions": $CosmosDbVectorDimensions,
+      "distanceFunction": "cosine"
+    }
+  ]
+}
+EOF
+)
+
+# Indexing policy with vector search support
+read -r -d '' indexing_policy <<'EOF' || true
+{
+  "indexingMode": "consistent",
+  "automatic": true,
+  "includedPaths": [
+    { "path": "/*" }
+  ],
+  "excludedPaths": [
+    { "path": "/_etag/?" }
+  ],
+  "vectorIndexes": [
+    {
+      "path": "/embedding",
+      "type": "quantizedFlat"
+    }
+  ],
+  "fullTextIndexes": [
+    { "path": "/subject" },
+    { "path": "/bodyContent" }
+  ]
+}
+EOF
+
+# Full-text policy for Cosmos-native hybrid (RANK RRF) keyword scoring
+read -r -d '' full_text_policy <<'EOF' || true
+{
+  "defaultLanguage": "en-US",
+  "fullTextPaths": [
+    { "path": "/subject", "language": "en-US" },
+    { "path": "/bodyContent", "language": "en-US" }
+  ]
+}
+EOF
+
+if [[ -n "$container_exists" ]]; then
+    echo "[WARNING] Container $CosmosDbContainerName already exists, skipping creation"
+    
+    # Update indexing policy for vector search (safe to run on existing container)
+    echo "[INFO] Updating indexing policy for vector search on $CosmosDbContainerName..."
+    tmp_indexing_file=$(mktemp)
+    printf '%s' "$indexing_policy" > "$tmp_indexing_file"
+    tmp_vector_file=$(mktemp)
+    printf '%s' "$vector_embedding_policy" > "$tmp_vector_file"
+    tmp_ft_file=$(mktemp)
+    printf '%s' "$full_text_policy" > "$tmp_ft_file"
+    
+    if az cosmosdb sql container update --account-name "$CosmosDbAccountName" \
+            --resource-group "$ResourceGroupName" --database-name "$CosmosDbDatabaseName" \
+            --name "$CosmosDbContainerName" --idx "@$tmp_indexing_file" \
+            --vector-embeddings "@$tmp_vector_file" \
+            --full-text-policy "@$tmp_ft_file" \
+            --output none 2>/dev/null; then
+        echo "[SUCCESS] Vector + full-text indexing policy updated on $CosmosDbContainerName"
+    else
+        echo "[WARNING] Could not update indexing policy on $CosmosDbContainerName"
+    fi
+    rm -f "$tmp_indexing_file" "$tmp_vector_file" "$tmp_ft_file"
+else
+    # Create container with vector indexing policy
+    tmp_indexing_file=$(mktemp)
+    printf '%s' "$indexing_policy" > "$tmp_indexing_file"
+    tmp_vector_file=$(mktemp)
+    printf '%s' "$vector_embedding_policy" > "$tmp_vector_file"
+    tmp_ft_file=$(mktemp)
+    printf '%s' "$full_text_policy" > "$tmp_ft_file"
+    
+    if az cosmosdb sql container create --account-name "$CosmosDbAccountName" \
+            --resource-group "$ResourceGroupName" --database-name "$CosmosDbDatabaseName" \
+            --name "$CosmosDbContainerName" --partition-key-path /id \
+            --idx "@$tmp_indexing_file" --vector-embeddings "@$tmp_vector_file" \
+            --full-text-policy "@$tmp_ft_file" \
+            --output table; then
+        echo "[SUCCESS] Container $CosmosDbContainerName created with vector + full-text indexing policy"
+    else
         DEPLOYMENT_ERRORS+=("Creating container: $CosmosDbContainerName")
+    fi
+    rm -f "$tmp_indexing_file" "$tmp_vector_file" "$tmp_ft_file"
 fi
 
 # =============================================================================
@@ -982,7 +1166,7 @@ else
     if az cognitiveservices account create --name "$ContentUnderstandingName" \
             --resource-group "$ResourceGroupName" --location "$LocationContentUnderstanding" \
             --kind AIServices --sku S0 --custom-domain "$ContentUnderstandingName" \
-            --tags "project=$ProjectName" "environment=$Environment" --output table --yes; then
+            --tags "project=$ProjectName" "environment=$Environment" "$SecurityControlTag" --output table --yes; then
         echo "[SUCCESS] Content Understanding $ContentUnderstandingName created"
         # The custom-domain DNS record takes time to become routable after account creation.
         # Data-plane calls to the endpoint will return 'Subdomain does not map to a resource'
@@ -1007,7 +1191,7 @@ else
             --resource-group "$ResourceGroupName" --location "$LocationAiFoundry" \
             --kind AIServices --sku S0 --custom-domain "$AiFoundryName" \
             --assign-identity \
-            --tags "project=$ProjectName" "environment=$Environment" --output table --yes; then
+            --tags "project=$ProjectName" "environment=$Environment" "$SecurityControlTag" --output table --yes; then
         echo "[SUCCESS] AI Foundry resource $AiFoundryName created"
         # ARM needs time to fully initialise before accepting project child-resource PUTs.
         # provisioningState=Succeeded on the control plane does NOT mean the AI Foundry
@@ -1198,7 +1382,7 @@ fi
 if [[ ! -f "$DeployModelsCsvPath" ]]; then
     echo "[WARNING] $DeployModelsCsvPath not found - skipping model deployments"
 else
-    row_index=0
+    llm_row_index=0
     while IFS= read -r model_line || [[ -n "$model_line" ]]; do
         model_line="${model_line#"${model_line%%[![:space:]]*}"}"; model_line="${model_line%"${model_line##*[![:space:]]}"}"
         [[ -z "$model_line" || "$model_line" == \#* ]] && continue
@@ -1208,10 +1392,16 @@ else
             continue
         fi
         model_name="${cols[0]// /}"; model_sku="${cols[1]// /}"; model_version="${cols[2]// /}"
+        model_type="${cols[3]// /}"
+        [[ -z "$model_type" ]] && model_type="llm"
+
+        # Skip embeddings models (processed separately below)
+        [[ "$model_type" == "embeddings" ]] && continue
 
         ok=0
+        capacity=$(get_available_capacity "$LocationAiFoundry" "$model_sku")
         invoke_foundry_model_deployment "$AiFoundryName" "$ResourceGroupName" \
-            "$model_name" "$model_sku" "$model_version" "$AiFoundrySkuCapacity" && ok=1
+            "$model_name" "$model_sku" "$model_version" "$capacity" && ok=1
 
         while [[ $ok -eq 0 ]]; do
             show_model_suggestions "$LocationAiFoundry" "$model_name" "$model_sku"
@@ -1230,16 +1420,70 @@ else
                 [[ -z "$alt_version" ]] && echo "[ERROR] Model version is required"
             done
             model_name="${alt_model// /}"; model_sku="${alt_sku// /}"; model_version="${alt_version// /}"
+            capacity=$(get_available_capacity "$LocationAiFoundry" "$model_sku")
             invoke_foundry_model_deployment "$AiFoundryName" "$ResourceGroupName" \
-                "$model_name" "$model_sku" "$model_version" "$AiFoundrySkuCapacity" && ok=1
+                "$model_name" "$model_sku" "$model_version" "$capacity" && ok=1
         done
 
-        if (( row_index == 0 && ok == 1 )); then
+        if (( llm_row_index == 0 && ok == 1 )); then
             AiFoundryDeploymentName="$model_name"
             AiFoundryModelName="$model_name"
             AiFoundryModelVersion="$model_version"
         fi
-        ((row_index++)) || true
+        ((llm_row_index++)) || true
+    done < "$DeployModelsCsvPath"
+
+    # Process embeddings models from CSV
+    while IFS= read -r model_line || [[ -n "$model_line" ]]; do
+        model_line="${model_line#"${model_line%%[![:space:]]*}"}"; model_line="${model_line%"${model_line##*[![:space:]]}"}"
+        [[ -z "$model_line" || "$model_line" == \#* ]] && continue
+        IFS=',' read -ra cols <<< "$model_line"
+        if (( ${#cols[@]} < 3 )); then
+            continue
+        fi
+        model_name="${cols[0]// /}"; model_sku="${cols[1]// /}"; model_version="${cols[2]// /}"
+        model_type="${cols[3]// /}"
+        [[ -z "$model_type" ]] && model_type="llm"
+
+        # Only process embeddings models
+        [[ "$model_type" != "embeddings" ]] && continue
+
+        echo ""
+        echo "[INFO] Processing embeddings model from CSV: $model_name v$model_version (SKU: $model_sku)"
+
+        ok=0
+        capacity=$(get_available_capacity "$LocationAiFoundry" "$model_sku")
+        invoke_foundry_model_deployment "$AiFoundryName" "$ResourceGroupName" \
+            "$model_name" "$model_sku" "$model_version" "$capacity" && ok=1
+
+        while [[ $ok -eq 0 ]]; do
+            show_model_suggestions "$LocationAiFoundry" "$model_name" "$model_sku"
+            echo ""
+            echo "[INPUT] Embeddings model '$model_name' (sku '$model_sku', version '$model_version') is unavailable. Provide an alternative or press Enter to keep default."
+            read -r -p "Alternative embeddings model name (Enter to keep default): " alt_model
+            if [[ -z "$alt_model" ]]; then
+                echo "[INFO] Keeping default embeddings model: $AiFoundryEmbeddingsModelName"
+                break
+            fi
+            read -r -p "Alternative deployment type / sku-name (default: $model_sku): " alt_sku
+            [[ -z "$alt_sku" ]] && alt_sku="$model_sku"
+            alt_version=""
+            while [[ -z "$alt_version" ]]; do
+                read -r -p "Alternative model version: " alt_version
+                [[ -z "$alt_version" ]] && echo "[ERROR] Model version is required"
+            done
+            model_name="${alt_model// /}"; model_sku="${alt_sku// /}"; model_version="${alt_version// /}"
+            capacity=$(get_available_capacity "$LocationAiFoundry" "$model_sku")
+            invoke_foundry_model_deployment "$AiFoundryName" "$ResourceGroupName" \
+                "$model_name" "$model_sku" "$model_version" "$capacity" && ok=1
+        done
+
+        # Update embeddings configuration from CSV
+        if (( ok == 1 )); then
+            AiFoundryEmbeddingsDeploymentName="$model_name"
+            AiFoundryEmbeddingsModelName="$model_name"
+            AiFoundryEmbeddingsModelVersion="$model_version"
+        fi
     done < "$DeployModelsCsvPath"
 fi
 
@@ -1277,6 +1521,30 @@ else
         echo "[SUCCESS] CU embedding model $CuEmbeddingModelName deployed as $CuEmbeddingDeploymentName on $ContentUnderstandingName"
     else
         DEPLOYMENT_ERRORS+=("Deploying CU embedding model $CuEmbeddingModelName on $ContentUnderstandingName")
+    fi
+fi
+
+# Deploy AI Foundry embeddings model for email and attachment vector search.
+# This deployment is separate from Content Understanding and used by the Java
+# orchestration functions for generating embeddings for semantic search.
+echo ""
+echo ">>> Deploying AI Foundry embeddings model for email/attachment search"
+
+ai_foundry_embed_exists=$(az cognitiveservices account deployment show \
+    --name "$AiFoundryName" --resource-group "$ResourceGroupName" \
+    --deployment-name "$AiFoundryEmbeddingsDeploymentName" --query name -o tsv 2>/dev/null || true)
+if [[ -n "$ai_foundry_embed_exists" ]]; then
+    echo "[WARNING] AI Foundry embeddings model deployment $AiFoundryEmbeddingsDeploymentName already exists on $AiFoundryName, skipping"
+else
+    if az cognitiveservices account deployment create \
+            --name "$AiFoundryName" --resource-group "$ResourceGroupName" \
+            --deployment-name "$AiFoundryEmbeddingsDeploymentName" \
+            --model-name "$AiFoundryEmbeddingsModelName" --model-version "$AiFoundryEmbeddingsModelVersion" \
+            --model-format OpenAI --sku-name "$AiFoundrySkuName" --sku-capacity "$AiFoundryEmbeddingsSkuCapacity" \
+            --output table 2>/dev/null; then
+        echo "[SUCCESS] AI Foundry embeddings model $AiFoundryEmbeddingsModelName deployed as $AiFoundryEmbeddingsDeploymentName on $AiFoundryName"
+    else
+        DEPLOYMENT_ERRORS+=("Deploying AI Foundry embeddings model $AiFoundryEmbeddingsModelName on $AiFoundryName")
     fi
 fi
 
@@ -1366,7 +1634,7 @@ else
     if az appservice plan create --name "$AppServicePlanName" \
             --resource-group "$ResourceGroupName" --location "$LocationAppService" \
             --sku P0v3 --is-linux \
-            --tags "project=$ProjectName" "environment=$Environment" --output table; then
+            --tags "project=$ProjectName" "environment=$Environment" "$SecurityControlTag" --output table; then
         echo "[SUCCESS] App Service Plan $AppServicePlanName created"
     else
         DEPLOYMENT_ERRORS+=("Creating App Service Plan: $AppServicePlanName")
@@ -1379,7 +1647,7 @@ if test_az_resource webapp show --name "$WebAppName" \
 else
     if az webapp create --name "$WebAppName" --resource-group "$ResourceGroupName" \
             --plan "$AppServicePlanName" --runtime "JAVA:21-java21" \
-            --tags "project=$ProjectName" "environment=$Environment" "app=spring-boot-web" --output table; then
+            --tags "project=$ProjectName" "environment=$Environment" "app=spring-boot-web" "$SecurityControlTag" --output table; then
         echo "[SUCCESS] Web App $WebAppName created"
     else
         DEPLOYMENT_ERRORS+=("Creating Web App: $WebAppName")
@@ -1412,7 +1680,7 @@ create_func() {
         echo "[WARNING] Function app $name already exists, skipping"
     else
         if az functionapp create --name "$name" "${COMMON_FUNC_ARGS[@]}" \
-                --tags "project=$ProjectName" "environment=$Environment" "function=$tag_func" \
+                --tags "project=$ProjectName" "environment=$Environment" "function=$tag_func" "$SecurityControlTag" \
                 --output table; then
             echo "[SUCCESS] Function app $name created"
         else
@@ -1703,6 +1971,8 @@ declare -A KV_SECRETS=(
     [AiFoundryDeploymentName]="$AiFoundryDeploymentName"
     [AiFoundryModelName]="$AiFoundryModelName"
     [AiFoundryApiVersion]="$AiFoundryApiVersion"
+    [AiFoundryEmbeddingsDeploymentName]="$AiFoundryEmbeddingsDeploymentName"
+    [AiFoundryEmbeddingsModelName]="$AiFoundryEmbeddingsModelName"
     [StorageEndpoint]="$StorageBlobEndpoint"
     [StorageContainerName]="$StorageContainerName"
     [StorageQueueName]="$StorageQueueName"
