@@ -74,6 +74,19 @@ Run in order:
 .\deployment\4.content-understanding-add-schema.ps1 -Environment dev -Suffix 1
 ```
 
+### Adding a configured worker agent
+
+1. Add the worker's `agentType`, `instructions`, and capability metadata to
+	`deployment/multiagent-workers.json`.
+2. Run `.\deployment\3.deploy-agents.ps1 -Environment dev -Suffix 1` and choose
+	`3` (`Configured generic worker agents`).
+3. Confirm the final `Restart Function App ...? [Y/n]` prompt. Press Enter or `Y`
+	to restart immediately; choose `N` to restart manually later.
+
+The script provisions the Foundry agent and publishes the manifest to Key Vault.
+On Function App cold start, each configured worker is instantiated, registered
+as `live` in the `AgentCatalog` table, and made available to the orchestrator.
+
 ## 6. Build And Deploy Application Code
 
 Run:

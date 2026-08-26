@@ -138,6 +138,13 @@ public class AgentChatController {
         }
         // 280 s — slightly under the 300 s server async timeout
         SseEmitter emitter = new SseEmitter(280_000L);
+        try {
+            // Commit the event-stream response before the model call, which may take time.
+            emitter.send(SseEmitter.event().comment("connected"));
+        } catch (Exception e) {
+            emitter.completeWithError(e);
+            return emitter;
+        }
         ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "agent-stream");
             t.setDaemon(true);
@@ -160,7 +167,9 @@ public class AgentChatController {
                 LOG.error("Agent stream failed for emailId={}: {}", req.emailId(), e.getMessage(), e);
                 try { emitter.send(SseEmitter.event().name("error").data(e.getMessage())); }
                 catch (Exception ignore) {}
-                emitter.completeWithError(e);
+                // The response is already committed as text/event-stream, so complete it
+                // normally after sending the protocol-level error event.
+                emitter.complete();
             } finally {
                 executor.shutdown();
             }

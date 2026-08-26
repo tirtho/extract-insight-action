@@ -12,6 +12,8 @@
 
     <modules>
         <module>java-core</module>
+        <module>multiagent</module>
+        <module>agent-service</module>
         <module>extract/functions/mailbox-to-queue</module>
         <module>extract/functions/queue-to-db</module>
         <module>extract/functions/cu-queue-to-db</module>

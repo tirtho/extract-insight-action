@@ -49,6 +49,8 @@ __*__.json
 **/__*__.json
 
 # Generated log folders
+logs-extracted/
+logs-latest/
 *-logs/
 *-logs-latest/
 *-logs-now/

@@ -1258,6 +1258,29 @@ strong, b {
     border-color: rgba(11, 110, 79, 0.45);
 }
 
+.multiagent-insight-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 12px;
+    padding: 0.42rem 0.9rem;
+    border: 1px solid rgba(11, 110, 79, 0.35);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.72);
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.multiagent-insight-btn:hover {
+    background: var(--accent-soft);
+    border-color: rgba(11, 110, 79, 0.55);
+    transform: translateY(-1px);
+}
+
 /* Override body-dialog defaults for the taller chat layout */
 .agent-chat-dialog {
     width: min(760px, calc(100vw - 32px));

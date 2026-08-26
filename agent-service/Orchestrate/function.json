@@ -1,0 +1,19 @@
+{
+  "scriptFile": "../agent-service-1.0.0.jar",
+  "entryPoint": "com.microsoft.azure.functions.agent.OrchestrateFunction.run",
+  "bindings": [
+    {
+      "type": "httpTrigger",
+      "direction": "in",
+      "name": "req",
+      "authLevel": "anonymous",
+      "methods": ["post"],
+      "route": "orchestrate"
+    },
+    {
+      "type": "http",
+      "direction": "out",
+      "name": "$return"
+    }
+  ]
+}

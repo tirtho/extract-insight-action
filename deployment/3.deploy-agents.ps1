@@ -16,6 +16,8 @@
     Optional. The same suffix used when running deploy-infrastructure.ps1.
 .PARAMETER MavenTimeoutMinutes
     Maximum time to allow each Maven build before failing (default: 15).
+.PARAMETER WorkerDefinitionsPath
+    JSON manifest containing generic worker definitions (default: deployment/multiagent-workers.json).
 .USAGE
     .\3.deploy-agents.ps1 -Suffix 999
     .\3.deploy-agents.ps1 -Environment dev -Suffix 999
@@ -29,7 +31,10 @@ param(
 
     [Parameter(HelpMessage="Maximum time to allow each Maven package run before failing. Use 0 to disable the timeout.")]
     [ValidateRange(0, 1440)]
-    [int]$MavenTimeoutMinutes = 15
+    [int]$MavenTimeoutMinutes = 15,
+
+    [Parameter(HelpMessage="JSON manifest containing generic multi-agent worker definitions.")]
+    [string]$WorkerDefinitionsPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,6 +71,13 @@ $AiFoundryProjectName = "proj-$ProjectName-$Environment-$Suffix"
 $ScriptRoot  = $PSScriptRoot
 $RepoRoot    = Split-Path $ScriptRoot -Parent
 $AgentsRoot  = Join-Path $RepoRoot "insight\agents"
+$MultiAgentRoot = Join-Path $RepoRoot "multiagent"
+$DefaultWorkerDefinitionsPath = Join-Path $ScriptRoot "multiagent-workers.json"
+if ([string]::IsNullOrWhiteSpace($WorkerDefinitionsPath)) {
+    $WorkerDefinitionsPath = $DefaultWorkerDefinitionsPath
+} elseif (-not [System.IO.Path]::IsPathRooted($WorkerDefinitionsPath)) {
+    $WorkerDefinitionsPath = Join-Path $RepoRoot $WorkerDefinitionsPath
+}
 
 # =============================================================================
 # PREREQUISITES
@@ -189,29 +201,49 @@ function Get-ArtifactSha256 {
     }
 }
 
+function Get-LatestProjectInputTime {
+    param([Parameter(Mandatory=$true)][string]$SourceDir)
+
+    $inputs = @()
+    $pomPath = Join-Path $SourceDir 'pom.xml'
+    if (Test-Path $pomPath) {
+        $inputs += Get-Item $pomPath
+    }
+    $sourcePath = Join-Path $SourceDir 'src'
+    if (Test-Path $sourcePath) {
+        $inputs += Get-ChildItem $sourcePath -File -Recurse
+    }
+    if ($inputs.Count -eq 0) {
+        return [DateTime]::MinValue
+    }
+    return ($inputs | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).LastWriteTimeUtc
+}
+
 # =============================================================================
 # STEP 1: Select which agent(s) to provision
 # =============================================================================
 Write-Host "Which agent(s) do you want to provision?" -ForegroundColor White
 Write-Host "  1. eia-email-reviewer"
-Write-Host "  2. All"
+Write-Host "  2. Multi-Agent System (Orchestrator + Jury)"
+Write-Host "  3. Configured generic worker agents"
+Write-Host "  4. All"
 Write-Host ""
 Write-Host "  You can enter a single number or comma-separated list (e.g. 1)" -ForegroundColor DarkCyan
 Write-Host ""
 
-$validOptions = @('1','2')
+$validOptions = @('1','2','3','4')
 do {
     $rawInput   = (Read-Host "Enter selection(s)").Trim()
     $selections = $rawInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
     $allValid   = ($selections.Count -gt 0) -and ($selections | Where-Object { $_ -notin $validOptions }).Count -eq 0
     if (-not $allValid) {
-        Write-Host "[ERROR] Please enter 1, 2, or a comma-separated list." -ForegroundColor Red
+        Write-Host "[ERROR] Please enter 1, 2, 3, 4, or a comma-separated list." -ForegroundColor Red
     }
 } while (-not $allValid)
 
-$selectedAll = $selections -contains '2'
+$selectedAll = $selections -contains '4'
 
-if ($selectedAll) { $selections = @('1') }
+if ($selectedAll) { $selections = @('1','2','3') }
 else { $selections = $selections | Select-Object -Unique }
 
 $targets = [System.Collections.Generic.List[hashtable]]::new()
@@ -220,6 +252,44 @@ if ($selections -contains '1') {
         Label     = "eia-email-reviewer"
         SourceDir = Join-Path $AgentsRoot "eia-email-reviewer"
     })
+}
+if ($selections -contains '2') {
+    # Both system agents live in the single `multiagent` Maven module; each has its own
+    # static createAgent(String[])/main(String[]) entry point, invoked via `java -cp`
+    # (not `-jar`) since the shaded JAR has no single Main-Class for the two of them.
+    $targets.Add(@{
+        Label     = "multiagent-orchestrator"
+        SourceDir = $MultiAgentRoot
+        MainClass = "com.eia.multiagent.OrchestratorAgent"
+    })
+    $targets.Add(@{
+        Label     = "multiagent-jury"
+        SourceDir = $MultiAgentRoot
+        MainClass = "com.eia.multiagent.JuryAgent"
+    })
+}
+if ($selections -contains '3') {
+    if (-not (Test-Path $WorkerDefinitionsPath)) {
+        throw "Worker definitions manifest not found: $WorkerDefinitionsPath"
+    }
+    $workerDefinitions = @(Get-Content -Path $WorkerDefinitionsPath -Raw | ConvertFrom-Json)
+    foreach ($worker in $workerDefinitions) {
+        if ([string]::IsNullOrWhiteSpace($worker.agentType) -or
+            [string]::IsNullOrWhiteSpace($worker.instructions)) {
+            throw "Each worker definition must contain non-empty 'agentType' and 'instructions': $WorkerDefinitionsPath"
+        }
+        $targets.Add(@{
+            Label        = "multiagent-worker-$($worker.agentType)"
+            SourceDir    = $MultiAgentRoot
+            MainClass    = "com.eia.multiagent.WorkerAgent"
+            AgentType    = [string]$worker.agentType
+            Instructions = [string]$worker.instructions
+            IsConfigured = $true
+        })
+    }
+    if ($workerDefinitions.Count -eq 0) {
+        Write-Host "[WARNING] Worker manifest contains no definitions: $WorkerDefinitionsPath" -ForegroundColor Yellow
+    }
 }
 
 # =============================================================================
@@ -232,10 +302,17 @@ Write-Host ""
 
 # Keep defaults per agent label. Add a new entry here whenever a new agent is added.
 $defaultInstructionsByAgent = @{
-    "eia-email-reviewer" = "You are a helpful assistant, who can read user data, detect anomalies, missing data, recommend action items, classify content into a multi-class hierarchy, summarize content, and provide insights."
+    "eia-email-reviewer"      = "You are a helpful assistant, who can read user data, detect anomalies, missing data, recommend action items, classify content into a multi-class hierarchy, summarize content, and provide insights."
+    "multiagent-orchestrator" = "You are the orchestrator of a multi-agent framework. Decompose user requests into a minimal directed task graph, score worker agents against each task from their declared capabilities, and synthesise a clear final answer from task results."
+    "multiagent-jury"         = "You are a jury agent. When given a task and two or more competing candidate outputs, decide whether to select one verbatim or merge them into a single, more complete answer, and explain your rationale briefly."
 }
 
 foreach ($target in $targets) {
+    if ($target.IsConfigured) {
+        Write-Host "[INFO] '$($target.Label)' loaded from worker manifest." -ForegroundColor DarkCyan
+        continue
+    }
+
     $defaultInstruction = $defaultInstructionsByAgent[$target.Label]
     if (-not $defaultInstruction) {
         throw "No default instructions configured for agent '$($target.Label)'. Add it to `$defaultInstructionsByAgent in this script."
@@ -317,6 +394,14 @@ if (-not $CurrentUserId) {
 }
 $SubscriptionId = az account show --query id -o tsv 2>$null
 $AiFoundryId = az cognitiveservices account show --name $AiFoundryName --resource-group $ResourceGroupName --query id -o tsv 2>$null
+$AgentServiceName = "func-agentservice-$ProjectName-$Environment-$Suffix"
+$AgentServicePrincipalId = az functionapp identity show --name $AgentServiceName --resource-group $ResourceGroupName --query principalId -o tsv 2>$null
+$StorageAccountName = "st$($ProjectName.ToLowerInvariant())$($Environment.ToLowerInvariant())$($Suffix.ToLowerInvariant())"
+$StorageAccountId = if ($StorageAccountName) {
+    az storage account show --name $StorageAccountName --resource-group $ResourceGroupName --query id -o tsv 2>$null
+} else {
+    $null
+}
 
 # Idempotent role assignment for the signed-in user. Accepts a role name or a
 # role-definition ID (custom roles must be referenced by ID at sub-resource scope).
@@ -344,7 +429,10 @@ if (-not $AiFoundryId) {
 
     # Custom role: Azure AI Developer covers OpenAI/* but not the AIServices/*
     # data actions used by the agents endpoint. Create it if absent.
-    $EiaAgentWriterRole = 'EIA AI Foundry Agent Writer'
+    # Custom role names are tenant-wide. Include the deployment key so a role
+    # left behind by another subscription or an earlier failed deployment does
+    # not block creation or make the role impossible to resolve here.
+    $EiaAgentWriterRole = "EIA AI Foundry Agent Writer $Environment $Suffix"
     $existingCustomRole = az role definition list --name $EiaAgentWriterRole --query '[0].name' -o tsv 2>$null
     if (-not $existingCustomRole) {
         Write-Host "  [INFO] Creating custom role '$EiaAgentWriterRole'" -ForegroundColor Cyan
@@ -357,20 +445,48 @@ if (-not $AiFoundryId) {
         } | ConvertTo-Json -Depth 5
         $tmpFile = Join-Path $env:TEMP "eia-custom-role-$([guid]::NewGuid().ToString('N')).json"
         Set-Content -Path $tmpFile -Value $roleJson -Encoding UTF8
-        az role definition create --role-definition "@$tmpFile" --output none 2>$null
+        $roleCreateOutput = @(az role definition create --role-definition "@$tmpFile" --output none 2>&1)
+        $roleCreateExitCode = $LASTEXITCODE
         Remove-Item $tmpFile -ErrorAction SilentlyContinue
+        if ($roleCreateExitCode -ne 0) {
+            Write-Host "  [WARNING] Could not create custom role '$EiaAgentWriterRole': $($roleCreateOutput -join ' ')" -ForegroundColor Yellow
+        }
     }
     # Resolve by ID — az cannot resolve custom role names at deep sub-resource scopes.
-    $EiaAgentWriterRoleId = az role definition list --name $EiaAgentWriterRole --query '[0].id' -o tsv 2>$null
+    # Role definitions can take a short time to become visible after creation.
+    $EiaAgentWriterRoleId = $null
+    for ($attempt = 1; $attempt -le 6 -and -not $EiaAgentWriterRoleId; $attempt++) {
+        $EiaAgentWriterRoleId = az role definition list --name $EiaAgentWriterRole --query '[0].id' -o tsv 2>$null
+        if (-not $EiaAgentWriterRoleId -and $attempt -lt 6) {
+            Start-Sleep -Seconds 5
+        }
+    }
     if ($EiaAgentWriterRoleId) {
         $EiaAgentWriterRoleId = $EiaAgentWriterRoleId.Trim()
         Add-CurrentUserRole -RoleNameOrId $EiaAgentWriterRoleId -Scope $AiFoundryId        -Label "$EiaAgentWriterRole (account)"
         Add-CurrentUserRole -RoleNameOrId $EiaAgentWriterRoleId -Scope $AiFoundryProjectId -Label "$EiaAgentWriterRole (project)"
+        if ($AgentServicePrincipalId) {
+            foreach ($scope in @($AiFoundryId, $AiFoundryProjectId)) {
+                $existingServiceRole = az role assignment list --assignee-object-id $AgentServicePrincipalId --role $EiaAgentWriterRoleId --scope $scope --query '[0].id' -o tsv 2>$null
+                if (-not $existingServiceRole) {
+                    az role assignment create --assignee-object-id $AgentServicePrincipalId --assignee-principal-type ServicePrincipal --role $EiaAgentWriterRoleId --scope $scope --output none 2>$null
+                }
+            }
+            Write-Host "  [SUCCESS] $EiaAgentWriterRole assigned to $AgentServiceName (account + project)" -ForegroundColor Green
+        } else {
+            Write-Host "  [WARNING] Could not resolve managed identity for $AgentServiceName; runtime agent access may fail." -ForegroundColor Yellow
+        }
     } else {
         Write-Host "  [WARNING] Could not resolve custom role '$EiaAgentWriterRole'; agent registration may fail." -ForegroundColor Yellow
     }
 
     Write-Host "  [INFO] RBAC propagation may take up to 5 minutes if roles were just created." -ForegroundColor Cyan
+}
+
+if ($StorageAccountId) {
+    Add-CurrentUserRole -RoleNameOrId 'Storage Table Data Contributor' -Scope $StorageAccountId -Label 'Storage Table Data Contributor (account)'
+} else {
+    Write-Host "[WARNING] Storage account for '$ResourceGroupName' could not be resolved; table cleanup may fail." -ForegroundColor Yellow
 }
 
 # =============================================================================
@@ -383,6 +499,8 @@ $javaExe  = Join-Path $env:JAVA_HOME 'bin\java.exe'
 if (-not (Test-Path $javaExe)) { $javaExe = 'java' }
 
 $provisionErrors = [System.Collections.Generic.List[string]]::new()
+$configuredWorkerJar = $null
+$configuredWorkerBuildChecked = $false
 
 foreach ($target in $targets) {
     $Label        = $target.Label
@@ -401,29 +519,82 @@ foreach ($target in $targets) {
         $provisionErrors.Add($Label); continue
     }
 
-    # Maven build — -Dlibrary also copies the thin JAR to project-lib/java
-    Write-Host "[INFO] Building $Label with Maven..." -ForegroundColor Cyan
-    if ($MavenTimeoutMinutes -gt 0) {
-        Write-Host "[INFO] Maven timeout: $MavenTimeoutMinutes minute(s)." -ForegroundColor DarkCyan
+    if ($target.IsConfigured) {
+        if (-not $configuredWorkerBuildChecked) {
+            $configuredWorkerBuildChecked = $true
+            $javaCoreJarPath = Join-Path $JavaCoreRoot 'target\java-core-1.0-SNAPSHOT.jar'
+            $javaCoreNeedsBuild = -not (Test-Path $javaCoreJarPath) -or
+                ((Get-LatestProjectInputTime -SourceDir $JavaCoreRoot) -gt (Get-Item $javaCoreJarPath).LastWriteTimeUtc)
+
+            if ($javaCoreNeedsBuild) {
+                Write-Host "[INFO] java-core changed or is missing; building it once for configured workers..." -ForegroundColor Cyan
+                try {
+                    Invoke-MavenPackage `
+                        -SourceDir $JavaCoreRoot -Label 'java-core' `
+                        -MavenPath $mvn.Source -TimeoutMinutes $MavenTimeoutMinutes `
+                        -ExtraArgs @('-Dlibrary')
+                } catch {
+                    Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
+                    $provisionErrors.Add($Label); continue
+                }
+            } else {
+                Write-Host "[INFO] java-core unchanged; reusing existing JAR." -ForegroundColor DarkCyan
+            }
+
+            $multiAgentJarPath = Get-ChildItem (Join-Path $MultiAgentRoot 'target') -Filter '*-exec.jar' -File -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending |
+                Select-Object -First 1
+            $multiAgentNeedsBuild = $null -eq $multiAgentJarPath -or
+                ((Get-LatestProjectInputTime -SourceDir $MultiAgentRoot) -gt $multiAgentJarPath.LastWriteTimeUtc) -or
+                ((Get-Item $javaCoreJarPath).LastWriteTimeUtc -gt $multiAgentJarPath.LastWriteTimeUtc)
+
+            if ($multiAgentNeedsBuild) {
+                Write-Host "[INFO] multiagent changed or is missing; building it once for configured workers..." -ForegroundColor Cyan
+                try {
+                    Invoke-MavenPackage `
+                        -SourceDir $MultiAgentRoot -Label 'multiagent' `
+                        -MavenPath $mvn.Source -TimeoutMinutes $MavenTimeoutMinutes `
+                        -ExtraArgs @('-Dlibrary')
+                } catch {
+                    Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
+                    $provisionErrors.Add($Label); continue
+                }
+                $multiAgentJarPath = Get-ChildItem (Join-Path $MultiAgentRoot 'target') -Filter '*-exec.jar' -File |
+                    Sort-Object LastWriteTime -Descending |
+                    Select-Object -First 1
+            } else {
+                Write-Host "[INFO] multiagent unchanged; reusing $($multiAgentJarPath.Name)." -ForegroundColor DarkCyan
+            }
+            $configuredWorkerJar = $multiAgentJarPath
+        } else {
+            Write-Host "[INFO] Reusing shared multiagent JAR for configured worker '$Label'." -ForegroundColor DarkCyan
+        }
+        $jarFile = $configuredWorkerJar
     } else {
-        Write-Host "[INFO] Maven timeout disabled." -ForegroundColor DarkCyan
-    }
+        # Maven build — -Dlibrary also copies the thin JAR to project-lib/java
+        Write-Host "[INFO] Building $Label with Maven..." -ForegroundColor Cyan
+        if ($MavenTimeoutMinutes -gt 0) {
+            Write-Host "[INFO] Maven timeout: $MavenTimeoutMinutes minute(s)." -ForegroundColor DarkCyan
+        } else {
+            Write-Host "[INFO] Maven timeout disabled." -ForegroundColor DarkCyan
+        }
 
-    try {
-        Invoke-MavenPackage `
-            -SourceDir $SourceDir -Label $Label `
-            -MavenPath $mvn.Source -TimeoutMinutes $MavenTimeoutMinutes `
-            -ExtraArgs @('-Dlibrary')
-    } catch {
-        Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
-        $provisionErrors.Add($Label); continue
-    }
-    Write-Host "[SUCCESS] Maven build completed for $Label" -ForegroundColor Green
+        try {
+            Invoke-MavenPackage `
+                -SourceDir $SourceDir -Label $Label `
+                -MavenPath $mvn.Source -TimeoutMinutes $MavenTimeoutMinutes `
+                -ExtraArgs @('-Dlibrary')
+        } catch {
+            Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
+            $provisionErrors.Add($Label); continue
+        }
+        Write-Host "[SUCCESS] Maven build completed for $Label" -ForegroundColor Green
 
-    # Locate the executable fat JAR produced by maven-shade-plugin
-    $jarFile = Get-ChildItem (Join-Path $SourceDir 'target') -Filter '*-exec.jar' -File |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
+        # Locate the executable fat JAR produced by maven-shade-plugin
+        $jarFile = Get-ChildItem (Join-Path $SourceDir 'target') -Filter '*-exec.jar' -File |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+    }
 
     if (-not $jarFile) {
         Write-Host "[ERROR] Executable JAR (*-exec.jar) not found under $(Join-Path $SourceDir 'target')" -ForegroundColor Red
@@ -435,12 +606,35 @@ foreach ($target in $targets) {
 
     # Run provisioning — main(keyVaultUrl, instructions...)
     Write-Host "[INFO] Registering agent in Azure AI Foundry..." -ForegroundColor Cyan
-    & $javaExe -jar $jarFile.FullName $kvUrl $Instructions
+    if ($target.MainClass -eq "com.eia.multiagent.WorkerAgent") {
+        & $javaExe -cp $jarFile.FullName $target.MainClass $kvUrl $target.AgentType $Instructions
+    } elseif ($target.MainClass) {
+        # Multi-agent system JAR has no single Main-Class (two agents share one module);
+        # invoke the specific agent's static main() explicitly via -cp.
+        & $javaExe -cp $jarFile.FullName $target.MainClass $kvUrl $Instructions
+    } else {
+        & $javaExe -jar $jarFile.FullName $kvUrl $Instructions
+    }
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[ERROR] Provisioning failed for $Label (exit code $LASTEXITCODE)" -ForegroundColor Red
         $provisionErrors.Add($Label); continue
     }
     Write-Host "[SUCCESS] Agent provisioned: $Label" -ForegroundColor Green
+}
+
+if ($selections -contains '3') {
+    $workerManifest = Get-Content -Path $WorkerDefinitionsPath -Raw
+    $manifestTempFile = [System.IO.Path]::GetTempFileName()
+    try {
+        Set-Content -Path $manifestTempFile -Value $workerManifest -Encoding UTF8 -NoNewline
+        az keyvault secret set --vault-name $KeyVaultName --name 'MultiAgentWorkerDefinitions' --file $manifestTempFile --output none
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not publish worker definitions to Key Vault: MultiAgentWorkerDefinitions"
+        }
+    } finally {
+        Remove-Item -Path $manifestTempFile -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "[SUCCESS] Published worker definitions to Key Vault. They will register on the next Function App cold start." -ForegroundColor Green
 }
 
 # =============================================================================
@@ -459,4 +653,19 @@ if ($provisionErrors.Count -eq 0) {
         Write-Host "  - $err" -ForegroundColor Red
     }
     exit 1
+}
+
+if ($selections -contains '3') {
+    $restart = Read-Host "Restart Function App '$AgentServiceName' so the new worker is registered now? [Y/n]"
+    if ($restart.Trim() -notmatch '^[Nn]') {
+        Write-Host "[INFO] Restarting Function App '$AgentServiceName'..." -ForegroundColor Cyan
+        az functionapp restart --name $AgentServiceName --resource-group $ResourceGroupName --output none
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[WARNING] Function App restart failed. Restart it manually before using the new worker." -ForegroundColor Yellow
+        } else {
+            Write-Host "[SUCCESS] Function App restart requested. The new worker will register during cold start." -ForegroundColor Green
+        }
+    } else {
+        Write-Host "[INFO] Function App restart skipped. Restart '$AgentServiceName' before using the new worker." -ForegroundColor Yellow
+    }
 }

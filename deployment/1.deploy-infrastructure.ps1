@@ -72,8 +72,16 @@ if ([string]::IsNullOrWhiteSpace($userNamePart)) {
 }
 $UserEmailAddress = "$userNamePart@$tenantFqdn"
 
+$contentUnderstandingLocationInput = Read-Host "Enter Content Understanding deployment region [default: $Location, example: eastus]"
+$ContentUnderstandingRequestedLocation = if ([string]::IsNullOrWhiteSpace($contentUnderstandingLocationInput)) {
+    $Location
+} else {
+    $contentUnderstandingLocationInput.Trim().ToLowerInvariant()
+}
+
 Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix" -ForegroundColor Cyan
 Write-Host "[INFO] User email    : $UserEmailAddress" -ForegroundColor Cyan
+Write-Host "[INFO] Content Understanding region: $ContentUnderstandingRequestedLocation" -ForegroundColor Cyan
 
 # Derived: SUFFIX / KEY_VAULT_NAME / AZURE_KEY_VAULT_URL exported for downstream scripts.
 # Also write env.bat at the repo root so cmd-based tools can pick up AZURE_KEY_VAULT_URL.
@@ -149,6 +157,27 @@ $CosmosDbContainerName = "EmailExtracts"
 $CosmosDbVectorDimensions = 1536
 $AppServicePlanName   = "plan-$ProjectName-$Environment"
 $WebAppName           = "app-$ProjectName-$Environment-$Suffix"
+
+# Multi-agent orchestration framework (agent-service) — isolated VNet + Flex Consumption
+# function app, separate from the extract/functions/* apps (see MULTIAGENT_FRAMEWORK_DESIGN.md).
+$FuncAgentServiceName        = "func-agentservice-$ProjectName-$Environment-$Suffix"
+$AgentServiceApiAppName      = "$ProjectName-agent-service-api-$Environment-$Suffix"
+$AgentServiceVNetName        = "vnet-agentservice-$ProjectName-$Environment-$Suffix"
+$AgentServiceSubnetName      = "snet-agentservice"
+$AgentServiceVNetAddressSpace   = "10.100.0.0/24"
+$AgentServiceSubnetAddressSpace = "10.100.0.0/24"
+# Defaults written to Key Vault so OrchestratorAgent.fromKeyVault() works before
+# 3.deploy-agents.ps1 provisions the orchestrator/jury agents; matches MultiAgentConfig's
+# fallback values and AgentProvisioning's DEFAULT_AGENT_NAME constants.
+$MultiAgentOrchestratorAgentName = "MultiAgentOrchestrator"
+$MultiAgentJuryAgentName         = "MultiAgentJury"
+$MultiAgentJuryTieMargin         = "0.10"
+$MultiAgentJuryMinDispatchScore  = "0.6"
+$MultiAgentJuryMaxCandidates     = "3"
+$MultiAgentTaskMaxRetries        = "3"
+$MultiAgentTaskMaxTotalCalls     = "6"
+$MultiAgentAsyncStateTtlDays     = "3"
+
 $ContentUnderstandingName = "cu-$ProjectName-$Environment-$Suffix"
 $AiFoundryName            = "oai-$ProjectName-$Environment-$Suffix"
 $AiFoundryProjectName     = "proj-$ProjectName-$Environment-$Suffix"
@@ -177,12 +206,12 @@ $AiFoundryEmbeddingsSkuCapacity    = "50"
 
 # Content Understanding requires a supported completion model (separate from the main LLM deployment).
 # Supported: gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-5.2
-$CuCompletionDeploymentName = "gpt-4.1"
-$CuCompletionModelName      = "gpt-4.1"
-$CuCompletionModelVersion   = "2025-04-14"
+$CuCompletionDeploymentName = "gpt-5.2"
+$CuCompletionModelName      = "gpt-5.2"
+$CuCompletionModelVersion   = ""
 $CuCompletionSkuCapacity    = "50"
-$CuEmbeddingDeploymentName  = "text-embedding-3-large"
-$CuEmbeddingModelName       = "text-embedding-3-large"
+$CuEmbeddingDeploymentName  = "text-embedding-3-small"
+$CuEmbeddingModelName       = "text-embedding-3-small"
 $CuEmbeddingModelVersion    = "1"
 $CuEmbeddingSkuCapacity     = "50"
 
@@ -304,8 +333,8 @@ function Set-CustomRoleDefinition {
         [string[]]$DataActions,
         [string[]]$AssignableScopes
     )
-    $existing = Invoke-AzCliSilent -Arguments @('role','definition','list','--name',$RoleName,'--query','[0].name','-o','tsv')
-    if ($existing.ExitCode -eq 0 -and $existing.Output.Trim()) {
+    $existing = Get-CustomRoleDefinitionId -RoleName $RoleName
+    if ($existing) {
         Write-Host "[OK] Custom role '$RoleName' already exists" -ForegroundColor Green
         return
     }
@@ -323,11 +352,51 @@ function Set-CustomRoleDefinition {
     $result = Invoke-AzCliSilent -Arguments @('role','definition','create','--role-definition',"@$tmpFile")
     Remove-Item $tmpFile -ErrorAction SilentlyContinue
     if ($result.ExitCode -ne 0) {
+        if ($result.Error -match 'RoleDefinitionWithSameNameExists|same name already exists') {
+            $existingAfterConflict = Get-CustomRoleDefinitionId -RoleName $RoleName
+            if ($existingAfterConflict) {
+                Write-Host "[OK] Custom role '$RoleName' already exists" -ForegroundColor Green
+                return
+            }
+        }
         Write-Host "[ERROR] Failed to create custom role '$RoleName': $($result.Error)" -ForegroundColor Red
         $script:DeploymentErrors.Add("Custom role: '$RoleName'")
     } else {
         Write-Host "[SUCCESS] Custom role '$RoleName' created" -ForegroundColor Green
     }
+}
+
+function Get-CustomRoleDefinitionId {
+    param([Parameter(Mandatory=$true)][string]$RoleName)
+
+    $query = "[?roleName=='$RoleName' || name=='$RoleName'] | [0].id"
+    $result = Invoke-AzCliSilent -Arguments @('role','definition','list',
+        '--custom-role-only','true','--query',$query,'-o','tsv')
+    if ($result.ExitCode -eq 0 -and $result.Output) { return $result.Output.Trim() }
+
+    $fallback = Invoke-AzCliSilent -Arguments @('role','definition','list',
+        '--name',$RoleName,'--query','[0].id','-o','tsv')
+    if ($fallback.ExitCode -eq 0 -and $fallback.Output) { return $fallback.Output.Trim() }
+
+    # Directory-wide custom roles may not appear under the current subscription.
+    # Query the tenant-level endpoint and follow nextLink pagination.
+    $nextUrl = "https://management.azure.com/providers/Microsoft.Authorization/roleDefinitions?api-version=2022-04-01"
+    while ($nextUrl) {
+        $rest = Invoke-AzCliSilent -Arguments @('rest','--method','GET','--url',$nextUrl,'-o','json')
+        if ($rest.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($rest.Output)) { break }
+        try {
+            $page = $rest.Output | ConvertFrom-Json
+            $definition = @($page.value) | Where-Object {
+                [string]$_.properties.roleName -ieq $RoleName
+            } | Select-Object -First 1
+            if ($definition -and $definition.id) { return ([string]$definition.id).Trim() }
+            $nextUrl = [string]$page.nextLink
+            if ([string]::IsNullOrWhiteSpace($nextUrl)) { $nextUrl = $null }
+        } catch {
+            $nextUrl = $null
+        }
+    }
+    return $null
 }
 
 # Returns $true if the Cosmos DB role assignment was already in place
@@ -549,21 +618,27 @@ function Get-ServiceLocation {
                 $script:ServiceLocationCache[$ServiceName] = $DefaultLocation
                 return $DefaultLocation
             }
-            # Location not supported - prompt user to choose from supported list
-            Write-Host "" 
+            # Location not supported - let the user choose from the supported
+            # regions while preserving the early region-input flow.
             Write-Host "[WARNING] Location '$DefaultLocation' is not supported for service '$ServiceName'." -ForegroundColor Yellow
             Write-Host "[INFO] Supported locations: $($supportedLocations -join ', ')" -ForegroundColor Cyan
+            for ($i = 0; $i -lt $supportedLocations.Count; $i++) {
+                Write-Host ("  [{0}] {1}" -f ($i + 1), $supportedLocations[$i]) -ForegroundColor Cyan
+            }
             do {
-                $userInput = Read-Host "Enter a supported location for '$ServiceName'"
-                $userInput = $userInput.Trim().ToLower()
-                if ($userInput -eq '' -or $supportedLocations -notcontains $userInput) {
-                    Write-Host "[ERROR] '$userInput' is not in the supported list. Please try again." -ForegroundColor Red
+                $regionSelection = Read-Host "Select Content Understanding region [1-$($supportedLocations.Count)]"
+                $validSelection = $regionSelection -match '^\d+$' -and
+                    [int]$regionSelection -ge 1 -and
+                    [int]$regionSelection -le $supportedLocations.Count
+                if (-not $validSelection) {
+                    Write-Host "[ERROR] Enter a number between 1 and $($supportedLocations.Count)." -ForegroundColor Red
                 }
-            } while ($userInput -eq '' -or $supportedLocations -notcontains $userInput)
+            } while (-not $validSelection)
 
-            $script:ServiceLocationCache[$ServiceName] = $userInput
-            Write-Host "[INFO] Using location '$userInput' for $ServiceName" -ForegroundColor Cyan
-            return $userInput
+            $chosenLocation = $supportedLocations[[int]$regionSelection - 1]
+            $script:ServiceLocationCache[$ServiceName] = $chosenLocation
+            Write-Host "[INFO] Using selected location '$chosenLocation' for $ServiceName" -ForegroundColor Cyan
+            return $chosenLocation
         }
     }
 
@@ -658,7 +733,7 @@ $LocationKeyVault             = Get-ServiceLocation -ServiceName "keyvault"     
 $LocationServiceBus           = Get-ServiceLocation -ServiceName "servicebus"           -DefaultLocation $Location
 $LocationAppInsights          = Get-ServiceLocation -ServiceName "applicationinsights"  -DefaultLocation $Location
 $LocationCosmosDb             = Get-ServiceLocation -ServiceName "cosmosdb"             -DefaultLocation $Location
-$LocationContentUnderstanding = Get-ServiceLocation -ServiceName "contentunderstanding" -DefaultLocation $Location
+$LocationContentUnderstanding = Get-ServiceLocation -ServiceName "contentunderstanding" -DefaultLocation $ContentUnderstandingRequestedLocation
 $LocationAiFoundry            = Get-ServiceLocation -ServiceName "aifoundry"            -DefaultLocation $Location -AlwaysPrompt
 $LocationAppService           = Get-ServiceLocation -ServiceName "appservice"           -DefaultLocation $Location
 $LocationFunctionApp          = Get-ServiceLocation -ServiceName "functionapp"          -DefaultLocation $Location
@@ -1076,24 +1151,32 @@ if ($dbExists) {
 # Create container
 # vectorIndexes require the account-level capability and a container vector embedding policy.
 $existingCaps = @()
+$vectorSearchEnabled = $false
 $capsJson = (Invoke-AzCliSilent -Arguments @('cosmosdb','show','--name',$CosmosDbAccountName,'--resource-group',$ResourceGroupName,'--query','capabilities[].name','-o','tsv')).Output
 if ($capsJson) { $existingCaps = @($capsJson -split "`n" | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() }) }
 if ($existingCaps -contains 'EnableNoSQLVectorSearch') {
+    $vectorSearchEnabled = $true
     Write-Host "[OK] Vector search capability already enabled on $CosmosDbAccountName" -ForegroundColor Green
 } else {
     # --capabilities replaces the list, so existing ones must be passed through.
     $newCaps = @($existingCaps + 'EnableNoSQLVectorSearch' | Select-Object -Unique)
-    $capResult = Invoke-AzCli -Description "Enabling vector search capability on $CosmosDbAccountName" `
-        -Arguments (@('cosmosdb','update','--name',$CosmosDbAccountName,'--resource-group',$ResourceGroupName,'--capabilities') + $newCaps + @('--output','none'))
-    if ($null -eq $capResult) {
-        Write-Host "[ERROR] Could not enable EnableNoSQLVectorSearch - container creation with a vector policy will fail" -ForegroundColor Red
+    $capResult = Invoke-AzCliSilent -Arguments (@('cosmosdb','update','--name',$CosmosDbAccountName,'--resource-group',$ResourceGroupName,'--capabilities') + $newCaps + @('--output','none'))
+    if ($capResult.ExitCode -ne 0) {
+        Write-Host "[WARNING] Could not enable EnableNoSQLVectorSearch: $($capResult.Error). Vector indexing will be skipped." -ForegroundColor Yellow
     } else {
         # The data plane rejects vector policies until the capability propagates.
         for ($i = 1; $i -le 12; $i++) {
             $check = (Invoke-AzCliSilent -Arguments @('cosmosdb','show','--name',$CosmosDbAccountName,'--resource-group',$ResourceGroupName,'--query',"capabilities[?name=='EnableNoSQLVectorSearch'].name",'-o','tsv')).Output
-            if ($check) { Write-Host "[SUCCESS] Vector search capability enabled on $CosmosDbAccountName" -ForegroundColor Green; break }
+            if ($check) {
+                $vectorSearchEnabled = $true
+                Write-Host "[SUCCESS] Vector search capability enabled on $CosmosDbAccountName" -ForegroundColor Green
+                break
+            }
             Write-Host "[INFO] Waiting for vector search capability to propagate ($i/12)..." -ForegroundColor Cyan
             Start-Sleep -Seconds 10
+        }
+        if (-not $vectorSearchEnabled) {
+            Write-Host "[WARNING] Cosmos vector search is not enabled after the propagation wait. Vector policy will be skipped; full-text indexing remains enabled." -ForegroundColor Yellow
         }
     }
 }
@@ -1133,35 +1216,38 @@ if ($containerExists) {
         excludedPaths = @(
             @{ path = '/"_etag"/?' }
         )
-        vectorIndexes = @(
-            @{
-                path = "/embedding"
-                type = "quantizedFlat"
-            }
-        )
         fullTextIndexes = @(
             @{ path = "/subject" }
             @{ path = "/bodyContent" }
         )
     } | ConvertTo-Json -Depth 10 -Compress
+    if ($vectorSearchEnabled) {
+        $indexingPolicy = $indexingPolicyJson | ConvertFrom-Json
+        $indexingPolicy | Add-Member -MemberType NoteProperty -Name vectorIndexes -Value @([pscustomobject]@{ path = "/embedding"; type = "quantizedFlat" })
+        $indexingPolicyJson = $indexingPolicy | ConvertTo-Json -Depth 10 -Compress
+    }
     
     $indexPolicyFile = [System.IO.Path]::GetTempFileName()
     Set-Content -Path $indexPolicyFile -Value $indexingPolicyJson -Encoding utf8
-    $vectorPolicyFile = [System.IO.Path]::GetTempFileName()
-    Set-Content -Path $vectorPolicyFile -Value $vectorEmbeddingPolicyJson -Encoding utf8
     $fullTextPolicyFile = [System.IO.Path]::GetTempFileName()
     Set-Content -Path $fullTextPolicyFile -Value $fullTextPolicyJson -Encoding utf8
     
     try {
-        $indexResult = Invoke-AzCliSilent -Arguments @('cosmosdb','sql','container','update',
+        $updateArgs = @('cosmosdb','sql','container','update',
                          '--account-name',$CosmosDbAccountName,
                          '--resource-group',$ResourceGroupName,
                          '--database-name',$CosmosDbDatabaseName,
                          '--name',$CosmosDbContainerName,
                          '--idx',"@$indexPolicyFile",
-                         '--vector-embeddings',"@$vectorPolicyFile",
-                         '--full-text-policy',"@$fullTextPolicyFile",
-                         '--output','none')
+                         '--full-text-policy',"@$fullTextPolicyFile"
+                         )
+        if ($vectorSearchEnabled) {
+            $vectorPolicyFile = [System.IO.Path]::GetTempFileName()
+            Set-Content -Path $vectorPolicyFile -Value $vectorEmbeddingPolicyJson -Encoding utf8
+            $updateArgs += @('--vector-embeddings', "@$vectorPolicyFile")
+        }
+        $updateArgs += @('--output', 'none')
+        $indexResult = Invoke-AzCliSilent -Arguments $updateArgs
         if ($indexResult.ExitCode -eq 0) {
             Write-Host "[SUCCESS] Vector + full-text indexing policy updated on $CosmosDbContainerName" -ForegroundColor Green
         } else {
@@ -1169,11 +1255,12 @@ if ($containerExists) {
         }
     } finally {
         Remove-Item $indexPolicyFile -Force -ErrorAction SilentlyContinue
-        Remove-Item $vectorPolicyFile -Force -ErrorAction SilentlyContinue
+        if ($vectorPolicyFile) { Remove-Item $vectorPolicyFile -Force -ErrorAction SilentlyContinue }
         Remove-Item $fullTextPolicyFile -Force -ErrorAction SilentlyContinue
     }
 } else {
-    # Create container with vector + full-text indexing policy
+    # Create container with vector + full-text indexing when enabled; otherwise
+    # create a full-text-only container so deployment remains usable.
     $indexingPolicyJson = @{
         indexingMode = "consistent"
         automatic = $true
@@ -1183,43 +1270,46 @@ if ($containerExists) {
         excludedPaths = @(
             @{ path = '/"_etag"/?' }
         )
-        vectorIndexes = @(
-            @{
-                path = "/embedding"
-                type = "quantizedFlat"
-            }
-        )
         fullTextIndexes = @(
             @{ path = "/subject" }
             @{ path = "/bodyContent" }
         )
     } | ConvertTo-Json -Depth 10 -Compress
+    if ($vectorSearchEnabled) {
+        $indexingPolicy = $indexingPolicyJson | ConvertFrom-Json
+        $indexingPolicy | Add-Member -MemberType NoteProperty -Name vectorIndexes -Value @([pscustomobject]@{ path = "/embedding"; type = "quantizedFlat" })
+        $indexingPolicyJson = $indexingPolicy | ConvertTo-Json -Depth 10 -Compress
+    }
     
     $indexPolicyFile = [System.IO.Path]::GetTempFileName()
     Set-Content -Path $indexPolicyFile -Value $indexingPolicyJson -Encoding utf8
-    $vectorPolicyFile = [System.IO.Path]::GetTempFileName()
-    Set-Content -Path $vectorPolicyFile -Value $vectorEmbeddingPolicyJson -Encoding utf8
     $fullTextPolicyFile = [System.IO.Path]::GetTempFileName()
     Set-Content -Path $fullTextPolicyFile -Value $fullTextPolicyJson -Encoding utf8
     
     try {
-        $containerResult = Invoke-AzCli -Description "Creating container: $CosmosDbContainerName (partition key: /id, vector + full-text indexing)" `
-            -Arguments @('cosmosdb','sql','container','create',
+        $createArgs = @('cosmosdb','sql','container','create',
                          '--account-name',$CosmosDbAccountName,
                          '--resource-group',$ResourceGroupName,
                          '--database-name',$CosmosDbDatabaseName,
                          '--name',$CosmosDbContainerName,
                          '--partition-key-path','/id',
                          '--idx',"@$indexPolicyFile",
-                         '--vector-embeddings',"@$vectorPolicyFile",
-                         '--full-text-policy',"@$fullTextPolicyFile",
-                         '--output','table')
+                         '--full-text-policy',"@$fullTextPolicyFile")
+        if ($vectorSearchEnabled) {
+            $vectorPolicyFile = [System.IO.Path]::GetTempFileName()
+            Set-Content -Path $vectorPolicyFile -Value $vectorEmbeddingPolicyJson -Encoding utf8
+            $createArgs += @('--vector-embeddings', "@$vectorPolicyFile")
+        }
+        $createArgs += @('--output', 'table')
+        $containerDescription = if ($vectorSearchEnabled) { "vector + full-text indexing" } else { "full-text indexing; vector search unavailable" }
+        $containerResult = Invoke-AzCli -Description "Creating container: $CosmosDbContainerName (partition key: /id, $containerDescription)" `
+            -Arguments $createArgs
         if ($null -ne $containerResult) {
-            Write-Host "[SUCCESS] Container $CosmosDbContainerName created with vector + full-text indexing policy" -ForegroundColor Green
+            Write-Host "[SUCCESS] Container $CosmosDbContainerName created with $containerDescription policy" -ForegroundColor Green
         }
     } finally {
         Remove-Item $indexPolicyFile -Force -ErrorAction SilentlyContinue
-        Remove-Item $vectorPolicyFile -Force -ErrorAction SilentlyContinue
+        if ($vectorPolicyFile) { Remove-Item $vectorPolicyFile -Force -ErrorAction SilentlyContinue }
         Remove-Item $fullTextPolicyFile -Force -ErrorAction SilentlyContinue
     }
 }
@@ -1603,8 +1693,8 @@ function Invoke-FoundryModelDeployment {
     return $false
 }
 
-# Prompts the user to select a Content Understanding model from those available
-# and deployable (with remaining quota) in the chosen region.
+# Selects a Content Understanding model from those available and deployable
+# in the chosen region. Selection is non-interactive so deployment can continue.
 # Returns a hashtable: @{ Name; Version; SkuName }
 function Select-CuModel {
     param(
@@ -1612,14 +1702,15 @@ function Select-CuModel {
         [Parameter(Mandatory=$true)][string]$ModelType,          # 'completion' or 'embedding'
         [Parameter(Mandatory=$true)][string[]]$SupportedModels,  # ordered list of CU-supported model names
         [Parameter(Mandatory=$true)][string]$DefaultModelName,
-        [Parameter(Mandatory=$true)][string]$DefaultModelVersion,
+        [Parameter(Mandatory=$false)][AllowEmptyString()][string]$DefaultModelVersion = '',
         [string]$SkuName = 'GlobalStandard'
     )
 
     Write-Host ""
     Write-Host "[INFO] Fetching $ModelType model availability for Content Understanding in '$Location'..." -ForegroundColor Cyan
 
-    # Build preference-order lookup: lower index = more preferred
+    # Build preference-order lookup for embeddings: lower index = more preferred.
+    # Completion selection is version-driven below, not name-driven.
     $preferenceOrder = @{}
     for ($i = 0; $i -lt $SupportedModels.Count; $i++) { $preferenceOrder[$SupportedModels[$i]] = $i }
 
@@ -1633,11 +1724,18 @@ function Select-CuModel {
         if ($skuNames -notcontains $SkuName) { continue }
         [PSCustomObject]@{ Name = $name; Version = $version }
     })
-    $candidates = @($rawCandidates | Sort-Object @{ Expression = { $preferenceOrder[$_.Name] }; Ascending = $true },
-                                                  @{ Expression = 'Version'; Descending = $true })
+    if ($ModelType -eq 'completion') {
+        # Model versions are date-like strings for completion deployments, so
+        # descending lexical order selects the latest available catalog version.
+        $candidates = @($rawCandidates | Sort-Object @{ Expression = 'Version'; Descending = $true },
+                                                      @{ Expression = { $preferenceOrder[$_.Name] }; Ascending = $true })
+    } else {
+        # Embeddings use only the explicit small -> large -> ada-002 order.
+        $candidates = @($rawCandidates | Sort-Object @{ Expression = { $preferenceOrder[$_.Name] }; Ascending = $true })
+    }
 
     if ($candidates.Count -eq 0) {
-        Write-Host "[WARNING] No supported $ModelType models with '$SkuName' SKU found in '$Location'. Keeping hardcoded default: $DefaultModelName $DefaultModelVersion" -ForegroundColor Yellow
+        Write-Host "[WARNING] No supported $ModelType models with '$SkuName' SKU found in '$Location'. Keeping fallback: $DefaultModelName $DefaultModelVersion" -ForegroundColor Yellow
         return @{ Name = $DefaultModelName; Version = $DefaultModelVersion; SkuName = $SkuName }
     }
 
@@ -1659,34 +1757,21 @@ function Select-CuModel {
         Write-Host "[WARNING] Could not retrieve quota for '$Location' — proceeding without quota info" -ForegroundColor Yellow
     }
 
-    # Display numbered menu
-    Write-Host ("  {0,4}  {1,-32} {2,-18} {3}" -f "#", "Model", "Version", "K TPM used / limit") -ForegroundColor DarkCyan
-    $defaultIdx = 1
-    for ($i = 0; $i -lt $candidates.Count; $i++) {
-        $c        = $candidates[$i]
-        $q        = $usageMap[$c.Name.ToLower()]
-        $quotaStr = if ($q) { "$($q.Current) / $($q.Limit)" } else { "unknown" }
-        $tag      = if     ($q -and $q.Limit -eq 0)              { " [NOT AVAILABLE]" } `
-                    elseif ($q -and $q.Current -ge $q.Limit)     { " [NO CAPACITY]"   } `
-                    else                                           { "" }
-        if ($c.Name -eq $DefaultModelName -and $c.Version -eq $DefaultModelVersion) {
-            $defaultIdx  = $i + 1
-            $defaultMark = "  <-- default"
-        } else { $defaultMark = "" }
-        $color = if ($tag) { 'DarkGray' } else { 'Cyan' }
-        Write-Host ("  [{0,2}]  {1,-32} {2,-18} {3}{4}{5}" -f ($i+1), $c.Name, $c.Version, $quotaStr, $tag, $defaultMark) -ForegroundColor $color
+    # Candidates are already ordered by the selection policy above. Keep the
+    # first candidate with remaining quota; if none have quota, use the top
+    # candidate and let deployment produce the authoritative capacity error.
+    $sel = $candidates | Where-Object {
+        $q = $usageMap[$_.Name.ToLower()]
+        $null -eq $q -or ($q.Limit -gt 0 -and $q.Current -lt $q.Limit)
+    } | Select-Object -First 1
+    if ($null -eq $sel) { $sel = $candidates | Select-Object -First 1 }
+
+    $q = $usageMap[$sel.Name.ToLower()]
+    if ($ModelType -eq 'completion') {
+        Write-Host "[INFO] Selected latest available completion model '$($sel.Name)' v$($sel.Version) in '$Location'." -ForegroundColor Green
+    } else {
+        Write-Host "[INFO] Selected embedding model '$($sel.Name)' v$($sel.Version) using preference order: small, large, ada-002." -ForegroundColor Green
     }
-
-    # Prompt user selection
-    do {
-        $userInput = Read-Host "Select $ModelType model [1-$($candidates.Count)] (default: $defaultIdx)"
-        if ([string]::IsNullOrWhiteSpace($userInput)) { $userInput = "$defaultIdx" }
-        $valid = $userInput -match '^\d+$' -and [int]$userInput -ge 1 -and [int]$userInput -le $candidates.Count
-        if (-not $valid) { Write-Host "[ERROR] Enter a number between 1 and $($candidates.Count)." -ForegroundColor Red }
-    } while (-not $valid)
-
-    $sel = $candidates[[int]$userInput - 1]
-    $q   = $usageMap[$sel.Name.ToLower()]
     if ($q -and ($q.Limit -eq 0 -or $q.Current -ge $q.Limit)) {
         Write-Host "[WARNING] '$($sel.Name)' has no remaining quota in '$Location'. Deployment may fail." -ForegroundColor Yellow
     }
@@ -1812,15 +1897,15 @@ if (-not (Test-Path $DeployModelsCsvPath)) {
     }
 }
 
-# Interactively select the completion and embedding models to deploy on the CU
-# resource, based on what is available and has quota in the chosen region.
+# Automatically select the preferred completion and embedding models to deploy
+# on the CU resource, falling back to an available regional model when needed.
 Write-Host ""
 Write-Host ">>> Selecting Content Understanding models for '$LocationContentUnderstanding'" -ForegroundColor White
 Write-Host "[INFO] Only models officially supported by Content Understanding are shown." -ForegroundColor DarkCyan
-Write-Host "[INFO] Supported completion models: gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, gpt-5.2" -ForegroundColor DarkCyan
+Write-Host "[INFO] Completion selection: latest available catalog version; embedding selection: small, large, ada-002 preference order." -ForegroundColor DarkCyan
 
-$cuCompletionModels = @('gpt-4.1','gpt-4.1-mini','gpt-4.1-nano','gpt-4o','gpt-4o-mini','gpt-5.2')
-$cuEmbeddingModels  = @('text-embedding-3-large','text-embedding-3-small','text-embedding-ada-002')
+$cuCompletionModels = @('gpt-5.2','gpt-4.1','gpt-4.1-mini','gpt-4.1-nano','gpt-4o','gpt-4o-mini')
+$cuEmbeddingModels  = @('text-embedding-3-small','text-embedding-3-large','text-embedding-ada-002')
 
 $selCompletion = Select-CuModel `
     -Location $LocationContentUnderstanding -ModelType 'completion' `
@@ -2264,24 +2349,16 @@ if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role 'Azure AI Developer
 Write-Host "[INFO] Azure AI Developer role for web app — project scope" -ForegroundColor Cyan
 if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role 'Azure AI Developer' -Scope $AiFoundryProjectId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 
-# EIA AI Foundry Agent Writer (custom): Azure AI Developer only covers OpenAI/* data actions;
-# the AIServices/* path (used by AI Foundry agents endpoint) is absent from that role definition.
-$EiaAgentWriterRole = 'EIA AI Foundry Agent Writer'
-Set-CustomRoleDefinition `
-    -RoleName         $EiaAgentWriterRole `
-    -Description      'Grants AIServices/* data-plane access needed for AI Foundry agents API (AIServices/* absent from Azure AI Developer role definition)' `
-    -DataActions      @('Microsoft.CognitiveServices/accounts/AIServices/*') `
-    -AssignableScopes @("/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName")
-# Resolve by ID — az CLI cannot resolve custom role names at deep sub-resource scopes
-$EiaAgentWriterRoleId = (Invoke-AzCliSilent -Arguments @('role','definition','list','--name',$EiaAgentWriterRole,'--query','[0].id','-o','tsv')).Output.Trim()
-if (-not $EiaAgentWriterRoleId) {
-    Write-Host "[ERROR] Could not resolve definition ID for custom role '$EiaAgentWriterRole'" -ForegroundColor Red
-    $script:DeploymentErrors.Add("Custom role ID lookup failed: '$EiaAgentWriterRole'")
-} else {
-    Write-Host "[INFO] $EiaAgentWriterRole (custom) for web app — account scope" -ForegroundColor Cyan
-    if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role $EiaAgentWriterRoleId -Scope $AiFoundryId        -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
-    Write-Host "[INFO] $EiaAgentWriterRole (custom) for web app — project scope" -ForegroundColor Cyan
+# The Responses API for project-scoped Prompt Agents also requires the AIServices
+# data-plane permission supplied by the custom role created by 3.deploy-agents.ps1.
+$EiaAgentWriterRoleName = "EIA AI Foundry Agent Writer $Environment $Suffix"
+$EiaAgentWriterRoleId = (Invoke-AzCliSilent -Arguments @('role','definition','list','--name',$EiaAgentWriterRoleName,'--query','[0].id','-o','tsv')).Output
+if ($EiaAgentWriterRoleId) {
+    Write-Host "[INFO] Custom Foundry agent writer role for web app — account and project scope" -ForegroundColor Cyan
+    if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role $EiaAgentWriterRoleId -Scope $AiFoundryId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
     if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role $EiaAgentWriterRoleId -Scope $AiFoundryProjectId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+} else {
+    Write-Host "[WARNING] Custom Foundry agent writer role '$EiaAgentWriterRoleName' is not present; run 3.deploy-agents.ps1 before deploying the UI." -ForegroundColor Yellow
 }
 
 if ($newAssignments -gt 0) {
@@ -2313,7 +2390,22 @@ Write-Host "[INFO] Validating Key Vault write access..." -ForegroundColor Cyan
 $purgeResult = Invoke-AzCliSilent -Arguments @('keyvault','secret','recover','--vault-name',$KeyVaultName,'--name','deployment-test')
 if ($purgeResult.ExitCode -ne 0) {
     # Recovery failed (secret may not exist in deleted state) — try purge instead
-    Invoke-AzCliSilent -Arguments @('keyvault','secret','purge','--vault-name',$KeyVaultName,'--name','deployment-test') | Out-Null
+    $purgeResult = Invoke-AzCliSilent -Arguments @('keyvault','secret','purge','--vault-name',$KeyVaultName,'--name','deployment-test')
+}
+
+# Secret recovery and purge are asynchronous. Do not race the data plane with
+# secret set; wait until the previous deleted-state operation has settled.
+if ($purgeResult.ExitCode -eq 0) {
+    for ($recoveryAttempt = 1; $recoveryAttempt -le 12; $recoveryAttempt++) {
+        $secretState = Invoke-AzCliSilent -Arguments @('keyvault','secret','show',
+            '--vault-name',$KeyVaultName,'--name','deployment-test','--query','id','-o','tsv')
+        if ($secretState.ExitCode -eq 0 -and $secretState.Output) {
+            Write-Host "[INFO] Temporary Key Vault secret recovery completed." -ForegroundColor DarkCyan
+            break
+        }
+        Write-Host "[INFO] Waiting for Key Vault secret recovery/purge to settle ($recoveryAttempt/12)..." -ForegroundColor DarkCyan
+        Start-Sleep -Seconds 5
+    }
 }
 
 $maxRetries = 12
@@ -2406,14 +2498,26 @@ foreach ($entry in $kvSecrets.GetEnumerator()) {
         Write-Host "[WARNING] Skipping Key Vault secret '$($entry.Key)' - value is empty" -ForegroundColor Yellow
         continue
     }
-    $secretFile = [System.IO.Path]::GetTempFileName()
-    try {
-        Set-Content -Path $secretFile -Value $entry.Value -NoNewline -Encoding utf8
-        $r = Invoke-AzCliSilent -Arguments @('keyvault','secret','set','--vault-name',$KeyVaultName,'--name',$entry.Key,'--file',$secretFile,'--encoding','utf-8','--output','none')
-    } finally {
-        Remove-Item $secretFile -Force -ErrorAction SilentlyContinue
+    $secretRetries = 6
+    $secretSucceeded = $false
+    for ($secretAttempt = 1; $secretAttempt -le $secretRetries; $secretAttempt++) {
+        $secretFile = [System.IO.Path]::GetTempFileName()
+        try {
+            Set-Content -Path $secretFile -Value $entry.Value -NoNewline -Encoding utf8
+            $r = Invoke-AzCliSilent -Arguments @('keyvault','secret','set','--vault-name',$KeyVaultName,'--name',$entry.Key,'--file',$secretFile,'--encoding','utf-8','--output','none')
+        } finally {
+            Remove-Item $secretFile -Force -ErrorAction SilentlyContinue
+        }
+        if ($r.ExitCode -eq 0) {
+            $secretSucceeded = $true
+            break
+        }
+        if ($secretAttempt -lt $secretRetries) {
+            Write-Host "[INFO] Key Vault secret '$($entry.Key)' is not ready (attempt $secretAttempt/$secretRetries). Retrying in 5 seconds..." -ForegroundColor DarkCyan
+            Start-Sleep -Seconds 5
+        }
     }
-    if ($r.ExitCode -ne 0) {
+    if (-not $secretSucceeded) {
         Write-Host "[ERROR] Failed to set Key Vault secret: $($entry.Key)" -ForegroundColor Red
         if ($r.Error) { Write-Host "  $($r.Error)" -ForegroundColor Red }
         $script:DeploymentErrors.Add("Key Vault secret: $($entry.Key)")
@@ -2578,6 +2682,327 @@ if ($r3.ExitCode -ne 0) {
 }
 
 # =============================================================================
+# STEP 13: Multi-Agent Orchestrator Service (agent-service)
+# =============================================================================
+# Isolated VNet + Flex Consumption function app for the multi-agent framework's
+# orchestrator endpoint, kept separate from extract/functions/* per
+# MULTIAGENT_FRAMEWORK_DESIGN.md "Implementation & Deployment Plan" item 4.
+Write-Host ""
+Write-Host ">>> Step 13: Multi-Agent Orchestrator Service (agent-service)" -ForegroundColor White
+
+# Dedicated VNet + subnet (outbound VNet integration), isolated from other workloads
+if (Test-AzResource -Arguments @('network','vnet','show','--name',$AgentServiceVNetName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')) {
+    Write-Host "[WARNING] VNet $AgentServiceVNetName already exists, skipping" -ForegroundColor Yellow
+} else {
+    $result = Invoke-AzCli -Description "Creating VNet: $AgentServiceVNetName" `
+        -Arguments @('network','vnet','create','--name',$AgentServiceVNetName,
+                     '--resource-group',$ResourceGroupName,'--location',$LocationFunctionApp,
+                     '--address-prefix',$AgentServiceVNetAddressSpace,
+                     '--subnet-name',$AgentServiceSubnetName,'--subnet-prefix',$AgentServiceSubnetAddressSpace,
+                     '--tags',"project=$ProjectName","environment=$Environment","app=agent-service",$SecurityControlTag,
+                     '--output','table')
+    if ($null -ne $result) {
+        Write-Host "[SUCCESS] VNet $AgentServiceVNetName created" -ForegroundColor Green
+    }
+}
+
+# Delegate the subnet to Microsoft.Web/serverFarms so a function app can VNet-integrate into it
+Invoke-AzCliSilent -Arguments @('network','vnet','subnet','update','--name',$AgentServiceSubnetName,
+                     '--vnet-name',$AgentServiceVNetName,'--resource-group',$ResourceGroupName,
+                     '--delegations','Microsoft.Web/serverFarms','--output','none') | Out-Null
+
+# Flex Consumption function app — its own isolated compute (Flex Consumption is
+# per-app serverless, so no shared App Service Plan resource is needed for isolation)
+if (Test-AzResource -Arguments @('functionapp','show','--name',$FuncAgentServiceName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')) {
+    Write-Host "[WARNING] Function app $FuncAgentServiceName already exists, skipping" -ForegroundColor Yellow
+} else {
+    $result = Invoke-AzCli -Description "Creating function app: $FuncAgentServiceName" `
+        -Arguments (@('functionapp','create','--name',$FuncAgentServiceName) + $CommonFuncArgs + @(
+                     '--tags',"project=$ProjectName","environment=$Environment","app=agent-service",$SecurityControlTag,
+                     '--output','table'))
+    if ($null -ne $result) {
+        Write-Host "[SUCCESS] Function app $FuncAgentServiceName created" -ForegroundColor Green
+    }
+}
+
+# Attach outbound VNet integration to the dedicated subnet
+Invoke-AzCliSilent -Arguments @('functionapp','vnet-integration','add','--name',$FuncAgentServiceName,
+                     '--resource-group',$ResourceGroupName,
+                     '--vnet',$AgentServiceVNetName,'--subnet',$AgentServiceSubnetName,'--output','none') | Out-Null
+
+# Managed identity
+$AgentServiceIdentity = (Invoke-AzCliSilent -Arguments @('functionapp','identity','show','--name',$FuncAgentServiceName,'--resource-group',$ResourceGroupName,'--query','principalId','-o','tsv')).Output
+if ($AgentServiceIdentity) {
+    Write-Host "[OK] Managed identity already enabled for $FuncAgentServiceName" -ForegroundColor Green
+} else {
+    Write-Host "[INFO] Enabling managed identity for $FuncAgentServiceName" -ForegroundColor Cyan
+    Invoke-AzCliSilent -Arguments @('functionapp','identity','assign','--name',$FuncAgentServiceName,'--resource-group',$ResourceGroupName,'--output','none') | Out-Null
+    $AgentServiceIdentity = (Invoke-AzCliSilent -Arguments @('functionapp','identity','show','--name',$FuncAgentServiceName,'--resource-group',$ResourceGroupName,'--query','principalId','-o','tsv')).Output
+    Write-Host "[SUCCESS] Managed identity enabled for $FuncAgentServiceName" -ForegroundColor Green
+}
+
+if (-not $AgentServiceIdentity) {
+    Write-Host "[ERROR] Could not retrieve managed identity for $FuncAgentServiceName. Skipping its RBAC assignments." -ForegroundColor Red
+    $script:DeploymentErrors.Add("Managed identity: $FuncAgentServiceName")
+} else {
+    # Key Vault: read framework config/tunables
+    if ($KeyVaultId) {
+        Write-Host "[INFO] Key Vault Secrets User role for agent-service" -ForegroundColor Cyan
+        Set-RoleAssignment -Assignee $AgentServiceIdentity -Role 'Key Vault Secrets User' -Scope $KeyVaultId -PrincipalType 'ServicePrincipal' | Out-Null
+    }
+
+    # Storage: AgentCatalog / OrchestrationState / OrchestratorConversations tables
+    Write-Host "[INFO] Storage roles for agent-service" -ForegroundColor Cyan
+    foreach ($role in @('Storage Blob Data Owner','Storage Queue Data Contributor','Storage Table Data Contributor')) {
+        Set-RoleAssignment -Assignee $AgentServiceIdentity -Role $role -Scope $StorageAccountId -PrincipalType 'ServicePrincipal' | Out-Null
+    }
+
+    # AI Foundry: invoking the orchestrator/worker/jury prompt agents (Responses API)
+    Write-Host "[INFO] Cognitive Services OpenAI User role for agent-service" -ForegroundColor Cyan
+    Set-RoleAssignment -Assignee $AgentServiceIdentity -Role 'Cognitive Services OpenAI User' -Scope $AiFoundryId -PrincipalType 'ServicePrincipal' | Out-Null
+    Write-Host "[INFO] Azure AI Developer role for agent-service — account scope" -ForegroundColor Cyan
+    Set-RoleAssignment -Assignee $AgentServiceIdentity -Role 'Azure AI Developer' -Scope $AiFoundryId -PrincipalType 'ServicePrincipal' | Out-Null
+    Write-Host "[INFO] Azure AI Developer role for agent-service — project scope" -ForegroundColor Cyan
+    Set-RoleAssignment -Assignee $AgentServiceIdentity -Role 'Azure AI Developer' -Scope $AiFoundryProjectId -PrincipalType 'ServicePrincipal' | Out-Null
+}
+
+# Create the Entra application used as the agent-service API audience. The UI's
+# managed identity receives a token for this audience; Easy Auth below restricts
+# accepted callers to that identity.
+$AgentServiceApiClientId = (Invoke-AzCliSilent -Arguments @('ad','app','list','--display-name',$AgentServiceApiAppName,'--query','[0].appId','-o','tsv')).Output
+if (-not $AgentServiceApiClientId) {
+    $AgentServiceApiClientId = (Invoke-AzCliSilent -Arguments @('ad','app','create','--display-name',$AgentServiceApiAppName,'--sign-in-audience','AzureADMyOrg','--query','appId','-o','tsv')).Output
+    if (-not $AgentServiceApiClientId) {
+        Write-Host "[ERROR] Could not create Entra API application $AgentServiceApiAppName" -ForegroundColor Red
+        $script:DeploymentErrors.Add("Entra API application: $AgentServiceApiAppName")
+    }
+}
+if ($AgentServiceApiClientId) {
+    Invoke-AzCliSilent -Arguments @('ad','app','update','--id',$AgentServiceApiClientId,
+        '--identifier-uris',"api://$AgentServiceApiClientId") | Out-Null
+    $AgentServiceApiObjectId = (Invoke-AzCliSilent -Arguments @('ad','app','show','--id',$AgentServiceApiClientId,'--query','id','-o','tsv')).Output
+    $AgentServiceApiSpId = (Invoke-AzCliSilent -Arguments @('ad','sp','list','--filter',"appId eq '$AgentServiceApiClientId'",'--query','[0].id','-o','tsv')).Output
+    if (-not $AgentServiceApiSpId) {
+        $AgentServiceApiSpId = (Invoke-AzCliSilent -Arguments @('ad','sp','create','--id',$AgentServiceApiClientId,'--query','id','-o','tsv')).Output
+    }
+
+    # Add one application permission so the UI managed identity can request
+    # api://<client-id>/.default without a static secret.
+    $AgentServiceInvokeRoleId = '6f8f7d7e-0ef8-4f34-9ea4-6f0d0f2ab301'
+    if ($AgentServiceApiObjectId) {
+        $existingApp = Invoke-AzCliSilent -Arguments @('rest','--method','GET',
+            '--url',"https://graph.microsoft.com/v1.0/applications/$AgentServiceApiObjectId`?`$select=appRoles",'--output','json')
+        $existingRoles = @()
+        if ($existingApp.ExitCode -eq 0 -and $existingApp.Output) {
+            try { $existingRoles = @((($existingApp.Output | ConvertFrom-Json).appRoles)) } catch { $existingRoles = @() }
+        }
+        if (-not ($existingRoles | Where-Object { [string]$_.id -eq $AgentServiceInvokeRoleId })) {
+            $invokeRole = [pscustomobject]@{
+                allowedMemberTypes = @('Application')
+                description = 'Allows the EIA web app managed identity to invoke the multi-agent service.'
+                displayName = 'Invoke multi-agent service'
+                id = $AgentServiceInvokeRoleId
+                isEnabled = $true
+                value = 'agent.service.invoke'
+            }
+            $appRoleBody = @{ appRoles = @($existingRoles) + @($invokeRole) } | ConvertTo-Json -Depth 10 -Compress
+            $appRoleFile = [System.IO.Path]::GetTempFileName()
+            Set-Content -Path $appRoleFile -Value $appRoleBody -Encoding UTF8
+            $roleResult = Invoke-AzCliSilent -Arguments @('rest','--method','PATCH',
+                '--url',"https://graph.microsoft.com/v1.0/applications/$AgentServiceApiObjectId",
+                '--body',"@$appRoleFile",'--output','none')
+            Remove-Item $appRoleFile -Force -ErrorAction SilentlyContinue
+            if ($roleResult.ExitCode -ne 0) {
+                Write-Host "[ERROR] Failed to configure agent-service application role" -ForegroundColor Red
+                $script:DeploymentErrors.Add("Entra API application role: $AgentServiceApiAppName")
+            }
+        }
+    }
+}
+
+# Configure App Service Authentication (Easy Auth) on agent-service. The function
+# bindings remain anonymous because Easy Auth validates the bearer token first.
+$WebAppIdentityClientId = (Invoke-AzCliSilent -Arguments @('webapp','identity','show','--name',$WebAppName,'--resource-group',$ResourceGroupName,'--query','clientId','-o','tsv')).Output
+if ($AgentServiceApiClientId -and $WebAppIdentityClientId) {
+    if ($AgentServiceApiSpId -and $WebAppIdentity -and $AgentServiceInvokeRoleId) {
+        $assignmentBody = @{
+            principalId = $WebAppIdentity
+            resourceId = $AgentServiceApiSpId
+            appRoleId = $AgentServiceInvokeRoleId
+        } | ConvertTo-Json -Compress
+        $assignmentFile = [System.IO.Path]::GetTempFileName()
+        Set-Content -Path $assignmentFile -Value $assignmentBody -Encoding UTF8
+        $assignmentResult = Invoke-AzCliSilent -Arguments @('rest','--method','POST',
+            '--url',"https://graph.microsoft.com/v1.0/servicePrincipals/$AgentServiceApiSpId/appRoleAssignedTo",
+            '--body',"@$assignmentFile",'--output','none')
+        Remove-Item $assignmentFile -Force -ErrorAction SilentlyContinue
+        if ($assignmentResult.ExitCode -ne 0 -and $assignmentResult.Error -notmatch 'already exist|already assigned') {
+            Write-Host "[ERROR] Failed to assign agent-service application role to the UI identity" -ForegroundColor Red
+            $script:DeploymentErrors.Add("Entra API role assignment: UI -> agent-service")
+        }
+    }
+    $authPayload = @{
+        properties = @{
+            platform = @{ enabled = $true }
+            globalValidation = @{
+                unauthenticatedClientAction = 'Return401'
+                redirectToProvider = $null
+            }
+            identityProviders = @{
+                azureActiveDirectory = @{
+                    enabled = $true
+                    registration = @{
+                        clientId = $AgentServiceApiClientId
+                        openIdIssuer = "https://login.microsoftonline.com/$TenantId/v2.0"
+                    }
+                    validation = @{
+                        allowedAudiences = @("api://$AgentServiceApiClientId")
+                        allowedApplications = @($WebAppIdentityClientId)
+                    }
+                }
+            }
+            login = @{ tokenStore = @{ enabled = $false } }
+        }
+    } | ConvertTo-Json -Depth 20 -Compress
+    $authFile = [System.IO.Path]::GetTempFileName()
+    Set-Content -Path $authFile -Value $authPayload -Encoding UTF8
+    $authResult = Invoke-AzCliSilent -Arguments @('rest','--method','PUT',
+        '--url',"https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/$FuncAgentServiceName/config/authsettingsV2?api-version=2022-03-01",
+        '--body',"@$authFile",'--output','none')
+    Remove-Item $authFile -Force -ErrorAction SilentlyContinue
+    if ($authResult.ExitCode -ne 0) {
+        Write-Host "[ERROR] Failed to configure Entra authentication for $FuncAgentServiceName" -ForegroundColor Red
+        $script:DeploymentErrors.Add("Easy Auth: $FuncAgentServiceName")
+    } else {
+        Write-Host "[SUCCESS] Entra authentication configured for $FuncAgentServiceName" -ForegroundColor Green
+    }
+}
+
+# App settings: KeyVaultUrl (read by OrchestratorHolder.get() via System.getenv), plus
+# identity-based storage for the Functions host itself.
+$agentServiceSettings = @{
+    "AzureWebJobsStorage__accountName" = $StorageAccountName
+    "AzureWebJobsStorage__credential"  = "managedidentity"
+    "KeyVaultUrl"                      = $KvUrl
+}
+$rAgentSvc = Set-FunctionAppSettings -FunctionAppName $FuncAgentServiceName -ResourceGroup $ResourceGroupName -Settings $agentServiceSettings
+if ($rAgentSvc.ExitCode -ne 0) {
+    Write-Host "[ERROR] Failed to configure settings for $FuncAgentServiceName" -ForegroundColor Red
+    if ($rAgentSvc.Error) { Write-Host "  $($rAgentSvc.Error)" -ForegroundColor Red }
+    $script:DeploymentErrors.Add("Function app settings: $FuncAgentServiceName")
+} else {
+    Write-Host "[SUCCESS] agent-service settings configured" -ForegroundColor Green
+}
+
+# Multi-agent framework config/tunables (see MULTIAGENT_FRAMEWORK_DESIGN.md "Configuration (Key Vault)").
+# Seeded here so OrchestratorAgent.fromKeyVault() works even before 3.deploy-agents.ps1 runs;
+# agent name secrets are overwritten by createAgent() with the same default values.
+$multiAgentSecrets = @{
+    "MultiAgentOrchestratorAgentName" = $MultiAgentOrchestratorAgentName
+    "MultiAgentJuryAgentName"         = $MultiAgentJuryAgentName
+    "MultiAgentJuryTieMargin"         = $MultiAgentJuryTieMargin
+    "MultiAgentJuryMinDispatchScore"  = $MultiAgentJuryMinDispatchScore
+    "MultiAgentJuryMaxCandidates"     = $MultiAgentJuryMaxCandidates
+    "MultiAgentTaskMaxRetries"        = $MultiAgentTaskMaxRetries
+    "MultiAgentTaskMaxTotalCalls"     = $MultiAgentTaskMaxTotalCalls
+    "MultiAgentAsyncStateTtlDays"     = $MultiAgentAsyncStateTtlDays
+}
+foreach ($entry in $multiAgentSecrets.GetEnumerator()) {
+    $r = Invoke-AzCliSilent -Arguments @('keyvault','secret','set','--vault-name',$KeyVaultName,'--name',$entry.Key,'--value',$entry.Value,'--output','none')
+    if ($r.ExitCode -ne 0) {
+        Write-Host "[ERROR] Failed to set Key Vault secret: $($entry.Key)" -ForegroundColor Red
+        $script:DeploymentErrors.Add("Key Vault secret: $($entry.Key)")
+    }
+}
+Write-Host "[SUCCESS] Multi-agent framework config seeded in Key Vault" -ForegroundColor Green
+
+# The URL and API client ID are configuration, not credentials. The UI obtains
+# its bearer token through its own managed identity at request time.
+$agentServiceUrl = "https://$FuncAgentServiceName.azurewebsites.net/api/orchestrate"
+if ($AgentServiceApiClientId) {
+    $uiAgentSettings = @{
+        "MULTI_AGENT_SERVICE_URL" = $agentServiceUrl
+        "MULTI_AGENT_SERVICE_API_CLIENT_ID" = $AgentServiceApiClientId
+    }
+    $uiAgentSettingsResult = Invoke-AzCliSilent -Arguments @('webapp','config','appsettings','set',
+        '--name',$WebAppName,'--resource-group',$ResourceGroupName,
+        '--settings',"MULTI_AGENT_SERVICE_URL=$agentServiceUrl","MULTI_AGENT_SERVICE_API_CLIENT_ID=$AgentServiceApiClientId",
+        '--output','none')
+    if ($uiAgentSettingsResult.ExitCode -ne 0) {
+        Write-Host "[ERROR] Failed to configure UI multi-agent settings" -ForegroundColor Red
+        $script:DeploymentErrors.Add("UI multi-agent settings")
+    } else {
+        Write-Host "[SUCCESS] UI configured for Managed Identity access to agent-service" -ForegroundColor Green
+    }
+}
+
+# =============================================================================
+# Final Cosmos vector-search completion phase
+# =============================================================================
+# Cosmos vector capability propagation can take about 15 minutes. All other
+# infrastructure is provisioned before this blocking phase begins. If the
+# capability becomes ready, finish EmailExtracts with the vector policy/index.
+if (-not $vectorSearchEnabled) {
+    Write-Host ""
+    Write-Host ">>> Final phase: waiting for Cosmos vector search capability" -ForegroundColor White
+    Write-Host "[INFO] Other infrastructure is complete. Keeping this script running while Cosmos vector search propagates (up to 15 minutes)..." -ForegroundColor Cyan
+
+    for ($i = 1; $i -le 90 -and -not $vectorSearchEnabled; $i++) {
+        $check = (Invoke-AzCliSilent -Arguments @('cosmosdb','show','--name',$CosmosDbAccountName,
+            '--resource-group',$ResourceGroupName,
+            '--query',"capabilities[?name=='EnableNoSQLVectorSearch'].name",'-o','tsv')).Output
+        if ($check) {
+            $vectorSearchEnabled = $true
+            Write-Host "[SUCCESS] Cosmos vector search capability is ready." -ForegroundColor Green
+            break
+        }
+        Write-Host "[INFO] Vector capability not ready yet ($i/90). Checking again in 10 seconds..." -ForegroundColor DarkCyan
+        Start-Sleep -Seconds 10
+    }
+
+    if ($vectorSearchEnabled) {
+        $finalIndexingPolicyJson = @{
+            indexingMode = "consistent"
+            automatic = $true
+            includedPaths = @(@{ path = "/*" })
+            excludedPaths = @(@{ path = '/"_etag"/?' })
+            vectorIndexes = @(@{ path = "/embedding"; type = "quantizedFlat" })
+            fullTextIndexes = @(
+                @{ path = "/subject" }
+                @{ path = "/bodyContent" }
+            )
+        } | ConvertTo-Json -Depth 10 -Compress
+        $finalIndexPolicyFile = [System.IO.Path]::GetTempFileName()
+        $finalVectorPolicyFile = [System.IO.Path]::GetTempFileName()
+        $finalFullTextPolicyFile = [System.IO.Path]::GetTempFileName()
+        Set-Content -Path $finalIndexPolicyFile -Value $finalIndexingPolicyJson -Encoding utf8
+        Set-Content -Path $finalVectorPolicyFile -Value $vectorEmbeddingPolicyJson -Encoding utf8
+        Set-Content -Path $finalFullTextPolicyFile -Value $fullTextPolicyJson -Encoding utf8
+        try {
+            $finalVectorResult = Invoke-AzCliSilent -Arguments @('cosmosdb','sql','container','update',
+                '--account-name',$CosmosDbAccountName,
+                '--resource-group',$ResourceGroupName,
+                '--database-name',$CosmosDbDatabaseName,
+                '--name',$CosmosDbContainerName,
+                '--idx',"@$finalIndexPolicyFile",
+                '--vector-embeddings',"@$finalVectorPolicyFile",
+                '--full-text-policy',"@$finalFullTextPolicyFile",
+                '--output','none')
+            if ($finalVectorResult.ExitCode -eq 0) {
+                Write-Host "[SUCCESS] EmailExtracts vector embedding policy and index completed." -ForegroundColor Green
+            } else {
+                Write-Host "[ERROR] Cosmos vector capability is ready, but the EmailExtracts vector policy update failed: $($finalVectorResult.Error)" -ForegroundColor Red
+                $script:DeploymentErrors.Add("Cosmos vector policy finalization: $CosmosDbContainerName")
+            }
+        } finally {
+            Remove-Item $finalIndexPolicyFile, $finalVectorPolicyFile, $finalFullTextPolicyFile -Force -ErrorAction SilentlyContinue
+        }
+    } else {
+        Write-Host "[WARNING] Cosmos vector search was not ready after 15 minutes. EmailExtracts remains full-text-only; rerun this deployment later to complete vector indexing." -ForegroundColor Yellow
+    }
+}
+
+# =============================================================================
 # Cleanup: remove the temporary deployment-test secret used for KV access validation
 # =============================================================================
 Write-Host "[INFO] Cleaning up temporary Key Vault secrets..." -ForegroundColor Cyan
@@ -2615,6 +3040,7 @@ if ($script:DeploymentErrors.Count -gt 0) {
     Write-Host "  Function (Mailbox)  : $FuncMailboxName"
     Write-Host "  Function (Queue-DB) : $FuncQueueDbName"
     Write-Host "  Function (CU-Queue) : $FuncCuQueueDbName"
+    Write-Host "  Function (Agent Svc): $FuncAgentServiceName"
     Write-Host "  Graph API App ID    : $GraphClientId"
     Write-Host "  Content Understanding: $ContentUnderstandingName"
     Write-Host "  AI Foundry          : $AiFoundryName"
@@ -2640,6 +3066,7 @@ if ($script:DeploymentErrors.Count -gt 0) {
     Write-Host "  Function (Mailbox)  : $FuncMailboxName"
     Write-Host "  Function (Queue-DB) : $FuncQueueDbName"
     Write-Host "  Function (CU-Queue) : $FuncCuQueueDbName"
+    Write-Host "  Function (Agent Svc): $FuncAgentServiceName"
     Write-Host "  Graph API App ID    : $GraphClientId"
     Write-Host "  Content Understanding: $ContentUnderstandingName"
     Write-Host "  AI Foundry          : $AiFoundryName"

@@ -138,6 +138,38 @@ place between deployments.
 .\deployment\6.operation-dev.ps1 -Environment dev -Suffix 1
 ```
 
+### Adding a multi-agent worker
+
+Add a worker definition to `deployment/multiagent-workers.json`. The `agentType`
+must be the exact Foundry agent name. Capabilities are published to the catalog
+when the Function App starts:
+
+```json
+[
+   {
+      "agentType": "ClaimsReviewAgent",
+      "instructions": "Review insurance claims, identify missing information, and detect anomalies.",
+      "tasks": ["review claims", "detect claim anomalies"],
+      "knowledgeBases": ["claims records", "policy data"],
+      "tools": [],
+      "speed": "MEDIUM",
+      "version": "1.0.0"
+   }
+]
+```
+
+Run `3.deploy-agents.ps1` and select `3`. The script then:
+
+1. Provisions or updates the Foundry agent.
+2. Stores the manifest in Key Vault as `MultiAgentWorkerDefinitions`.
+3. Prompts `Restart Function App ...? [Y/n]`; press Enter or `Y` to restart it immediately, or `N` to skip.
+
+After the restart, the runtime constructs the worker, registers it as `live` in
+`AgentCatalog`, and makes it available to the orchestrator. A Function App
+restart is required after changing an existing manifest because configuration is
+loaded at cold start. If you skip the prompt, restart the Function App manually
+before using the new worker.
+
 ### Example (Bash)
 
 ```bash

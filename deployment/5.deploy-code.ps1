@@ -70,6 +70,7 @@ $ResourceGroupName = "rg-$ProjectName-$Environment-$Suffix"
 $FuncMailboxName   = "func-mailbox-$ProjectName-$Environment-$Suffix"
 $FuncQueueDbName   = "func-queuedb-$ProjectName-$Environment-$Suffix"
 $FuncCuQueueDbName = "func-cuqueuedb-$ProjectName-$Environment-$Suffix"
+$FuncAgentServiceName = "func-agentservice-$ProjectName-$Environment-$Suffix"
 $ProjClean         = $ProjectName -replace '-',''
 $StorageClean      = ($Suffix.ToLowerInvariant()) -replace '[^a-z0-9]',''
 $StorageAccountName = "st$ProjClean$Environment$StorageClean"
@@ -81,6 +82,8 @@ $FunctionsRoot   = Join-Path $RepoRoot "extract\functions"
 $UiRoot          = Join-Path $RepoRoot "insight\ui"
 $JavaCoreRoot      = Join-Path $RepoRoot "java-core"
 $EmailReviewerRoot = Join-Path $RepoRoot "insight\agents\eia-email-reviewer"
+$AgentServiceRoot  = Join-Path $RepoRoot "agent-service"
+$MultiAgentRoot    = Join-Path $RepoRoot "multiagent"
 
 # =============================================================================
 # PREREQUISITES
@@ -297,6 +300,35 @@ function Ensure-LibraryJars {
     Write-Host "[SUCCESS] Prerequisite library JARs are ready in project-lib/java" -ForegroundColor Green
 }
 
+function Ensure-MultiAgentLibrary {
+    param(
+        [Parameter(Mandatory=$true)][string]$JavaCoreRoot,
+        [Parameter(Mandatory=$true)][string]$MultiAgentRoot,
+        [Parameter(Mandatory=$true)][string]$MavenPath,
+        [Parameter(Mandatory=$true)][int]$TimeoutMinutes
+    )
+
+    foreach ($dir in @($JavaCoreRoot, $MultiAgentRoot)) {
+        if (-not (Test-Path (Join-Path $dir "pom.xml"))) {
+            throw "Required library project not found (pom.xml missing): $dir"
+        }
+    }
+
+    Write-Host "[INFO] Building prerequisite library JARs (java-core, multiagent)..." -ForegroundColor Cyan
+
+    # java-core: install to the local Maven repo so multiagent (and agent-service) can
+    # resolve it as a normal Maven dependency during a single-directory build.
+    Invoke-MavenPackage -SourceDir $JavaCoreRoot -FunctionLabel "java-core" -MavenPath $MavenPath -TimeoutMinutes $TimeoutMinutes `
+        -MavenArgs @('clean', 'install', '-DskipTests', '--no-transfer-progress')
+
+    # multiagent: install to the local Maven repo so agent-service can resolve it as a
+    # normal Maven dependency (agent-service bundles jars via copy-dependencies, not shading).
+    Invoke-MavenPackage -SourceDir $MultiAgentRoot -FunctionLabel "multiagent" -MavenPath $MavenPath -TimeoutMinutes $TimeoutMinutes `
+        -MavenArgs @('clean', 'install', '-DskipTests', '--no-transfer-progress')
+
+    Write-Host "[SUCCESS] Prerequisite library JARs are ready (java-core, multiagent installed to local repo)" -ForegroundColor Green
+}
+
 function Invoke-AzWebAppDeploy {
     param(
         [Parameter(Mandatory=$true)][string]$WebAppName,
@@ -506,24 +538,25 @@ Write-Host "  1. mailbox-to-queue"
 Write-Host "  2. queue-to-db"
 Write-Host "  3. cu-queue-to-db"
 Write-Host "  4. insight-ui web app"
-Write-Host "  5. All"
+Write-Host "  5. agent-service (multi-agent orchestrator)"
+Write-Host "  6. All"
 Write-Host ""
 Write-Host "  You can enter a single number or comma-separated list (e.g. 1,3)" -ForegroundColor DarkCyan
 Write-Host ""
 
-$validOptions = @('1','2','3','4','5')
+$validOptions = @('1','2','3','4','5','6')
 do {
     $rawInput = (Read-Host "Enter selection(s)").Trim()
     $selections = $rawInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
     $allValid = ($selections.Count -gt 0) -and ($selections | Where-Object { $_ -notin $validOptions }).Count -eq 0
     if (-not $allValid) {
-        Write-Host "[ERROR] Please enter 1, 2, 3, 4, 5, or a comma-separated list (e.g. 1,4)." -ForegroundColor Red
+        Write-Host "[ERROR] Please enter 1, 2, 3, 4, 5, 6, or a comma-separated list (e.g. 1,4)." -ForegroundColor Red
     }
 } while (-not $allValid)
 
-# Expand '5' (All) into individual selections, then deduplicate
-if ($selections -contains '5') {
-    $selections = @('1','2','3','4')
+# Expand '6' (All) into individual selections, then deduplicate
+if ($selections -contains '6') {
+    $selections = @('1','2','3','4','5')
 } else {
     $selections = $selections | Select-Object -Unique
 }
@@ -560,6 +593,14 @@ if ($selections -contains '4') {
         AppName         = $WebAppName
         SourceDir       = $UiRoot
         Kind            = "webapp"
+    })
+}
+if ($selections -contains '5') {
+    $targets.Add(@{
+        Label           = "agent-service"
+        AppName         = $FuncAgentServiceName
+        SourceDir       = $AgentServiceRoot
+        Kind            = "function"
     })
 }
 
@@ -648,6 +689,9 @@ foreach ($target in $targets) {
         # so the JARs exist before insight-ui is packaged.
         if ($TargetKind -eq 'webapp') {
             Ensure-LibraryJars -JavaCoreRoot $JavaCoreRoot -EmailReviewerRoot $EmailReviewerRoot -MavenPath $mvn.Source -TimeoutMinutes $MavenTimeoutMinutes
+        }
+        if ($FunctionLabel -eq 'agent-service') {
+            Ensure-MultiAgentLibrary -JavaCoreRoot $JavaCoreRoot -MultiAgentRoot $MultiAgentRoot -MavenPath $mvn.Source -TimeoutMinutes $MavenTimeoutMinutes
         }
 
         # Remove the previous build output first so Maven does not have to delete a locked target tree.
@@ -763,11 +807,11 @@ foreach ($target in $targets) {
 
                 $elapsed = [int]([DateTime]::UtcNow - $pollStart).TotalSeconds
                 if ($lastSmokeSummary) {
-                    Write-Host "[INFO] App not yet ready (${elapsed}s elapsed, checks: $lastSmokeSummary, stable passes: $stablePasses/$requiredStablePasses), retrying in ${pollInterval}s..." -ForegroundColor DarkCyan
+                    Write-Host ("[INFO] App not yet ready ({0}s elapsed, checks: {1}, stable passes: {2}/{3}), retrying in {4}s..." -f $elapsed, $lastSmokeSummary, $stablePasses, $requiredStablePasses, $pollInterval) -ForegroundColor DarkCyan
                 } elseif ($null -ne $lastObservedStatus) {
-                    Write-Host "[INFO] App not yet ready (${elapsed}s elapsed, last HTTP: $lastObservedStatus), retrying in ${pollInterval}s..." -ForegroundColor DarkCyan
+                    Write-Host ("[INFO] App not yet ready ({0}s elapsed, last HTTP: {1}), retrying in {2}s..." -f $elapsed, $lastObservedStatus, $pollInterval) -ForegroundColor DarkCyan
                 } else {
-                    Write-Host "[INFO] App not yet ready (${elapsed}s elapsed), retrying in ${pollInterval}s..." -ForegroundColor DarkCyan
+                    Write-Host ("[INFO] App not yet ready ({0}s elapsed), retrying in {1}s..." -f $elapsed, $pollInterval) -ForegroundColor DarkCyan
                 }
                 Start-Sleep -Seconds $pollInterval
             }

@@ -13,6 +13,7 @@ import com.azure.messaging.servicebus.ServiceBusReceiverClient;
 import com.azure.messaging.servicebus.models.ServiceBusReceiveMode;
 import com.azure.security.keyvault.secrets.SecretClient;
 import com.azure.security.keyvault.secrets.SecretClientBuilder;
+import com.azure.core.exception.ResourceNotFoundException;
 import com.azure.storage.blob.BlobContainerClient;
 import com.azure.storage.blob.BlobServiceClient;
 import com.azure.storage.blob.BlobServiceClientBuilder;
@@ -89,6 +90,9 @@ public class AzConnection implements AutoCloseable {
                 String value = secretClient.getSecret(name).getValue();
                 LOG.info("Secret '{}' retrieved successfully", name);
                 return value;
+            } catch (ResourceNotFoundException e) {
+                LOG.warn("Secret '{}' was not found in Key Vault", name);
+                throw e;
             } catch (Exception e) {
                 LOG.error("Failed to read secret '{}' from Key Vault", name, e);
                 throw e;

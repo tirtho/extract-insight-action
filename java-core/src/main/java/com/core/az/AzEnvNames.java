@@ -42,4 +42,15 @@ public class AzEnvNames {
     public static final String KV_STORAGE_QUEUE_NAME = "StorageQueueName";
     public static final String KV_STORAGE_QUEUE_POLLING_SCHEDULE = "StorageQueuePollingSchedule";
 
+    // Multi-agent orchestration framework tunables (see MULTIAGENT_FRAMEWORK_DESIGN.md)
+    public static final String KV_MULTIAGENT_ORCHESTRATOR_AGENT_NAME = "MultiAgentOrchestratorAgentName";
+    public static final String KV_MULTIAGENT_JURY_AGENT_NAME = "MultiAgentJuryAgentName";
+    public static final String KV_JURY_TIE_MARGIN = "MultiAgentJuryTieMargin";
+    public static final String KV_JURY_MIN_DISPATCH_SCORE = "MultiAgentJuryMinDispatchScore";
+    public static final String KV_JURY_MAX_CANDIDATES = "MultiAgentJuryMaxCandidates";
+    public static final String KV_TASK_MAX_RETRIES = "MultiAgentTaskMaxRetries";
+    public static final String KV_TASK_MAX_TOTAL_CALLS = "MultiAgentTaskMaxTotalCalls";
+    public static final String KV_ASYNC_STATE_TTL_DAYS = "MultiAgentAsyncStateTtlDays";
+    public static final String KV_MULTIAGENT_WORKER_DEFINITIONS = "MultiAgentWorkerDefinitions";
+
 }

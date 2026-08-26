@@ -8,6 +8,7 @@ import com.azure.ai.agents.models.AgentVersionDetails;
 import com.azure.ai.agents.models.AzureCreateResponseOptions;
 import com.azure.ai.agents.models.PromptAgentDefinition;
 import com.azure.core.exception.HttpResponseException;
+import com.azure.core.exception.ResourceNotFoundException;
 import com.azure.data.tables.TableClient;
 import com.azure.data.tables.TableClientBuilder;
 import com.azure.data.tables.models.ListEntitiesOptions;
@@ -638,12 +639,13 @@ public class EmailReviewAgent implements AutoCloseable {
             }
 
             if (deleteFirst) {
+                String storageTableEndpoint = connection.getSecret(AzEnvNames.KV_STORAGE_TABLE_ENDPOINT);
+                LOG.info("Cleaning up Table Storage sessions for agent '{}' before deletion", AGENT_NAME);
+                deleteAgentTableSessions(storageTableEndpoint);
+
                 LOG.info("Deleting existing agent '{}' and all its versions", AGENT_NAME);
                 agentsClient.deleteAgent(AGENT_NAME);
                 LOG.info("Agent '{}' deleted", AGENT_NAME);
-
-                String storageTableEndpoint = connection.getSecret(AzEnvNames.KV_STORAGE_TABLE_ENDPOINT);
-                deleteAgentTableSessions(storageTableEndpoint);
             }
 
             LOG.info("Creating prompt agent '{}' with model '{}'", AGENT_NAME, deploymentName);
@@ -676,8 +678,8 @@ public class EmailReviewAgent implements AutoCloseable {
         try {
             String existing = connection.getSecret(AzEnvNames.KV_AI_FOUNDRY_AGENTS);
             registered = parseJsonStringArray(existing);
-        } catch (Exception e) {
-            LOG.warn("'{}' secret not found or unreadable – initialising a new list.",
+        } catch (ResourceNotFoundException e) {
+                LOG.warn("'{}' secret not found – initialising a new list.",
                     AzEnvNames.KV_AI_FOUNDRY_AGENTS);
             registered = new ArrayList<>();
         }

@@ -1,0 +1,19 @@
+{
+  "scriptFile": "../agent-service-1.0.0.jar",
+  "entryPoint": "com.microsoft.azure.functions.agent.StatusFunction.run",
+  "bindings": [
+    {
+      "type": "httpTrigger",
+      "direction": "in",
+      "name": "req",
+      "authLevel": "anonymous",
+      "methods": ["get"],
+      "route": "status/{requestId}"
+    },
+    {
+      "type": "http",
+      "direction": "out",
+      "name": "$return"
+    }
+  ]
+}
