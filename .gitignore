@@ -40,6 +40,24 @@ target/
 .vscode/
 **/.vscode/
 
+# Node dependencies
+node_modules/
+**/node_modules/
+
+# Local Azure Functions settings
+local.settings.json
+**/local.settings.json
+
+# IDE and OS files
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+
 # Azurite local storage emulator artifacts
 __blobstorage__/
 **/__blobstorage__/
