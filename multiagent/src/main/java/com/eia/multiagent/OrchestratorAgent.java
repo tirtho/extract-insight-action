@@ -24,7 +24,7 @@ import java.util.stream.Collectors;
  * Entry-point agent that orchestrates a pool of {@link WorkerAgent}s to answer a user prompt.
  * See MULTIAGENT_FRAMEWORK_DESIGN.md for the full design and rationale.
  *
- * <p>Pipeline: Plan &rarr; Score &amp; Match (from {@code AgentCatalog}, no worker round-trip)
+ * <p>Pipeline: Plan &rarr; Score &amp; Match (from local worker capabilities, no worker round-trip)
  * &rarr; resolve ties via {@link JuryAgent} &rarr; Execute (wave-based, parallel, bounded
  * retries + total-call cap) &rarr; Aggregate (chained via Foundry {@code conversationId}).
  */
@@ -39,7 +39,6 @@ public class OrchestratorAgent implements AutoCloseable {
     private static final int ASYNC_TASK_THRESHOLD = 3;
 
     private final FoundryModelInvoker model;
-    private final AgentCatalogManager catalogManager;
     private final JuryAgent jury;
     private final MultiAgentConfig config;
     private final TableClient orchestrationTable;
@@ -51,7 +50,6 @@ public class OrchestratorAgent implements AutoCloseable {
                               String orchestratorAgentName, String juryAgentName,
                               MultiAgentConfig config) {
         this.model = new FoundryModelInvoker(foundryEndpoint, orchestratorAgentName);
-        this.catalogManager = new AgentCatalogManager(storageTableEndpoint);
         this.jury = new JuryAgent(foundryEndpoint, juryAgentName);
         this.config = config;
 
@@ -84,7 +82,7 @@ public class OrchestratorAgent implements AutoCloseable {
     /** Registers a local in-process worker with this orchestrator instance. */
     public void registerAgent(WorkerAgent agent) {
         registeredAgents.add(agent);
-        LOG.info("Registered local worker '{}' (instance '{}').", agent.getAgentType(), agent.getInstanceId());
+        LOG.info("Registered local worker '{}'.", agent.getAgentType());
     }
 
     public void deregisterAgent(WorkerAgent agent) {
@@ -113,13 +111,13 @@ public class OrchestratorAgent implements AutoCloseable {
             }
 
             MatchResult match = scoreAndMatch(graph);
-                persistOrchestrationState(requestId, OrchestrationResult.Status.EXECUTING,
+            persistOrchestrationState(requestId, OrchestrationResult.Status.EXECUTING,
                     request.prompt(), graph.toJson(), null);
             executeGraph(graph, match, null);
 
             FoundryModelInvoker.ModelResponse aggregated = callAggregator(graph, request.prompt(), plan.responseId());
             persistConversationId(request.domainKey(), aggregated.responseId());
-                persistOrchestrationState(requestId, OrchestrationResult.Status.COMPLETED,
+            persistOrchestrationState(requestId, OrchestrationResult.Status.COMPLETED,
                     request.prompt(), graph.toJson(), aggregated.text());
 
             return new OrchestrationResult(requestId)
@@ -129,6 +127,14 @@ public class OrchestratorAgent implements AutoCloseable {
                     .completed();
         } catch (Exception e) {
             LOG.error("Orchestration '{}' failed.", requestId, e);
+            try {
+                persistOrchestrationState(requestId, OrchestrationResult.Status.FAILED,
+                        request.prompt(), null, e.getMessage());
+            } catch (Exception persistError) {
+                LOG.error("Could not persist failed orchestration state for '{}'. "
+                        + "Check the Function App identity and Storage Table Data Contributor role.",
+                        requestId, persistError);
+            }
             return new OrchestrationResult(requestId).failed(e.getMessage());
         }
     }
@@ -299,18 +305,17 @@ public class OrchestratorAgent implements AutoCloseable {
                                 Map<String, List<WorkerAgent>> tiedAssignments) {}
 
     private MatchResult scoreAndMatch(TaskGraph graph) {
-        List<AgentCatalogManager.CatalogEntry> live = catalogManager.listLiveAgents();
         Map<String, WorkerAgent> byType = registeredAgents.stream()
                 .collect(Collectors.toMap(WorkerAgent::getAgentType, a -> a, (a, b) -> a));
 
         Map<String, WorkerAgent> direct = new LinkedHashMap<>();
         Map<String, List<WorkerAgent>> tied = new LinkedHashMap<>();
 
-        if (live.isEmpty()) {
+        if (registeredAgents.isEmpty()) {
             return new MatchResult(direct, tied);
         }
 
-        String raw = model.call(buildMatchingPrompt(graph, live));
+        String raw = model.call(buildMatchingPrompt(graph, registeredAgents));
         Map<String, List<ScoredCandidate>> scores = parseScores(raw, graph);
 
         double tieMargin = config.juryTieMargin();
@@ -339,15 +344,15 @@ public class OrchestratorAgent implements AutoCloseable {
         return new MatchResult(direct, tied);
     }
 
-    private static String buildMatchingPrompt(TaskGraph graph, List<AgentCatalogManager.CatalogEntry> live) {
+    private static String buildMatchingPrompt(TaskGraph graph, List<WorkerAgent> workers) {
         StringBuilder sb = new StringBuilder();
         sb.append("You are matching tasks to worker agents based strictly on their declared capabilities.\n\n");
         sb.append("Tasks:\n");
         graph.getNodes().forEach(n -> sb.append("  ").append(n.getTaskId()).append(": ").append(n.getDescription()).append('\n'));
         sb.append("\nCandidate agents:\n");
-        for (AgentCatalogManager.CatalogEntry entry : live) {
-            sb.append("--- ").append(entry.agentType()).append(" ---\n");
-            if (entry.capability() != null) sb.append(entry.capability().toPromptBlock()).append('\n');
+        for (WorkerAgent worker : workers) {
+            sb.append("--- ").append(worker.getAgentType()).append(" ---\n");
+            if (worker.getCapability() != null) sb.append(worker.getCapability().toPromptBlock()).append('\n');
         }
         sb.append("\nFor each task ID, score every candidate agent from 0.0-1.0 on fitness for that task. ");
         sb.append("Return ONLY JSON in this exact format:\n");
@@ -456,7 +461,7 @@ public class OrchestratorAgent implements AutoCloseable {
             }
             LOG.info("Task '{}' completed.", node.getTaskId());
         } catch (Exception e) {
-            node.setError(e.getMessage());
+            node.setError(formatTaskError(e));
             node.setStatus(TaskStatus.FAILED);
             LOG.error("Task '{}' failed: {}", node.getTaskId(), e.getMessage(), e);
         }
@@ -512,7 +517,15 @@ public class OrchestratorAgent implements AutoCloseable {
                 LOG.warn("Attempt {}/{} failed: {}", i + 1, attempts, e.getMessage());
             }
         }
-        throw new RuntimeException("Exceeded max attempts (" + attempts + ")", lastError);
+        throw new RuntimeException("Exceeded max attempts (" + attempts + "): "
+                + formatTaskError(lastError), lastError);
+    }
+
+    private static String formatTaskError(Throwable error) {
+        if (error == null) return "Unknown error";
+        String message = error.getMessage();
+        if (message == null || message.isBlank()) message = error.getClass().getSimpleName();
+        return error.getClass().getSimpleName() + ": " + message;
     }
 
     private String fallbackExecute(TaskNode node, Map<String, String> depResults) {
@@ -563,7 +576,15 @@ public class OrchestratorAgent implements AutoCloseable {
         if (graphJson != null) entity.addProperty("taskGraphJson", truncate(graphJson, 30_000));
         if (status == OrchestrationResult.Status.COMPLETED) entity.addProperty("response", responseOrError);
         else if (status == OrchestrationResult.Status.FAILED) entity.addProperty("error", responseOrError);
-        orchestrationTable.upsertEntity(entity);
+        try {
+            orchestrationTable.upsertEntity(entity);
+            LOG.info("Persisted orchestration '{}' as {}.", requestId, status);
+        } catch (RuntimeException e) {
+            LOG.error("Could not persist orchestration '{}' as {} to table '{}'. "
+                    + "Check StorageTableEndpoint and the Function App Table Storage role.",
+                    requestId, status, ORCHESTRATION_TABLE, e);
+            throw e;
+        }
     }
 
     /**

@@ -19,16 +19,16 @@ A **distributed multi-agent framework** that enables Azure AI Foundry prompt age
 ┌────────────▼──────────────────────────────┐
 │  OrchestratorAgent (Single instance)     │
 │  - Plans tasks → TaskGraph                │
-│  - Reads AgentCatalog → matches tasks    │
-│    to agent types directly (no round-trip)│
+│  - Matches tasks against local workers    │
+│    loaded from Key Vault at startup       │
 │  - Executes graph (sync/async/stream)    │
 │  - Aggregates results                     │
 └────────────┬──────────────────────────────┘
              │
 ┌────────────▼──────────────────────────────┐
 │  WorkerAgent Pool (Multiple instances)   │
-│  - Each registered in AgentCatalog       │
-│    (capabilities published at startup)   │
+│  - Loaded from Key Vault at startup       │
+│    and registered locally                 │
 │  - Executes assigned tasks via AI model  │
 └──────────────────────────────────────────┘
 ```
@@ -57,15 +57,12 @@ record AgentCapability(
     String version               // e.g. "1.0.0" — see Agent Versioning below
 )
 ```
-Includes `toPromptBlock()` method so the catalog entry can be rendered into the orchestrator's task-matching prompt.
+Includes `toPromptBlock()` so the local worker capability can be rendered into the orchestrator's task-matching prompt.
 
 **Used by:** 
-- Orchestrator reads all live `AgentCapability` entries from `AgentCatalog` and matches tasks to agent types directly — no round-trip call to the worker itself is needed
+- Orchestrator reads all registered local `AgentCapability` entries and matches tasks to agent types directly — no storage round-trip or call to the worker itself is needed
 
-**Agent Versioning:** `version` is a free-form string set by the worker at registration (e.g. semver, or a model/prompt revision tag). It travels through to `AgentCatalog` and is included in matching-prompt capability summaries and in traces, so:
-- Multiple versions of the same `agentType` can be live side-by-side in the catalog during a rollout (each with its own `instanceId`)
-- A/B comparisons can filter traces/eval results by `version` without any orchestrator code changes
-- The catalog's `CatalogEntry` and `listLiveAgentsOfType` already expose per-instance data, so no schema change is needed beyond adding the field
+**Agent Versioning:** `version` is an optional manifest value (for example, a model or prompt revision tag) included in local matching-prompt capability summaries and traces.
 
 ---
 
@@ -110,33 +107,6 @@ class TaskGraph {
 
 ---
 
-#### **AgentCatalogManager**
-Azure Table Storage interface for agent discovery:
-- **Table:** `AgentCatalog`
-- **PartitionKey:** `agentType` (e.g., "ClaimsReviewAgent")
-- **RowKey:** `instanceId` (UUID)
-
-```java
-public void register(String agentType, String instanceId, 
-                     AgentCapability capability, 
-                     String foundryEndpoint)
-
-public void markOffline(String agentType, String instanceId)
-
-public List<CatalogEntry> listLiveAgents()
-public List<CatalogEntry> listLiveAgentsOfType(String agentType)
-
-record CatalogEntry(String agentType, String instanceId, 
-                    AgentCapability capability, 
-                    String foundryEndpoint, String status)
-```
-
-**Lifecycle:**
-- Worker constructor calls `register()` → immediately discoverable
-- Worker `close()` calls `markOffline()` → graceful shutdown
-
----
-
 #### **WorkerAgent** (concrete, data-driven)
 Generic worker implementation for expert agents whose behavior is model-driven. A worker is
 created by supplying an agent type and its capability declaration; a Java subclass is optional
@@ -144,8 +114,8 @@ only when custom non-model execution is needed:
 
 ```java
 class WorkerAgent {
-    WorkerAgent(String foundryEndpoint, String storageTableEndpoint,
-                String agentType, AgentCapability capability)
+    WorkerAgent(String foundryEndpoint, String agentType,
+                AgentCapability capability)
 
     String getAgentType()
     
@@ -159,9 +129,9 @@ class WorkerAgent {
 ```
 
 **Responsibilities:**
-1. Register self + `AgentCapability` in `AgentCatalog` on construct
+1. Expose its `AgentCapability` to the in-process orchestrator
 2. Execute assigned tasks using the Foundry agent named by `agentType` — the orchestrator decides assignment; the worker is never asked to self-evaluate
-3. Mark offline on `close()`
+3. Release local resources on `close()`
 4. Provision the Foundry definition through the generic static `WorkerAgent.createAgent(String[])` entry point
 
 **Configuration-driven workers:** `deployment/multiagent-workers.json` contains one record per
@@ -200,7 +170,7 @@ class OrchestratorAgent {
 
 **Execution Pipeline:**
 1. **Plan** — Uses orchestrator's own Foundry model to decompose prompt into `TaskGraph`
-2. **Score & Match** — Reads live entries from `AgentCatalog` and scores every candidate agent type per task from its published `AgentCapability` (no call to the worker itself); clear winners are assigned directly, ties trigger step 3
+2. **Score & Match** — Scores every locally registered worker type per task from its `AgentCapability` (no call to the worker itself); clear winners are assigned directly, ties trigger step 3
 3. **Resolve ties (Jury)** — Tasks with two or more comparably-scored candidates are dispatched to all of them in parallel; a `JuryAgent` adjudicates the competing outputs into one final result
 4. **Execute** — Traverses graph in dependency order; parallel where possible
 5. **Aggregate** — Synthesizes final response from all task results
@@ -236,19 +206,7 @@ class OrchestrationResult {
 
 ## Persistence Strategy
 
-### **Table 1: AgentCatalog**
-```
-PartitionKey: agentType
-RowKey:       instanceId
-Properties:
-  - capabilityJson (serialized AgentCapability — includes speed; not duplicated as its own column)
-  - foundryEndpoint
-  - status ("live" | "offline")
-  - registeredAt, updatedAt (epoch millis)
-```
-**Purpose:** Enable discovery of available workers at any time. `speed` (and any other `AgentCapability` field) is read by deserializing `capabilityJson`, not stored redundantly as a separate column.
-
-### **Table 2: OrchestrationState** (Async only)
+### **Table 1: OrchestrationState** (Async only)
 ```
 PartitionKey: "Orchestration"
 RowKey:       requestId
@@ -263,7 +221,7 @@ Properties:
 ```
 **Purpose:** Enable polling and result retrieval for async orchestrations. Rows past `expiresAt` are purged by a periodic cleanup sweep (same pattern as `AzAIAgent.cleanupExpired()`), keyed off `KV_ASYNC_STATE_TTL_DAYS` in Key Vault (default `3` days).
 
-### **Table 3: OrchestratorConversations**
+### **Table 2: OrchestratorConversations**
 ```
 PartitionKey: "Conversation"
 RowKey:       URLEncode(domainKey)
@@ -316,9 +274,9 @@ Adding these alongside the existing `KV_*` constants in `AzEnvNames` keeps all t
 
 ## Task Matching Algorithm
 
-Workers are never queried live for task suitability — their `AgentCapability` was already published to `AgentCatalog` at startup, so the orchestrator can match entirely from catalog data on every incoming request:
+Workers are never queried live for task suitability — their `AgentCapability` is already available on the local worker instances, so the orchestrator can match entirely from in-process configuration on every incoming request:
 
-1. **Fetch catalog snapshot** — `AgentCatalogManager.listLiveAgents()` returns every currently-live `(agentType, AgentCapability)` pair. This is a single Table Storage query, not a fan-out call to each agent.
+1. **Read local worker snapshot** — `OrchestratorAgent.registeredAgents` supplies every configured `(agentType, AgentCapability)` pair loaded during Function App startup.
 
 2. **Build one matching prompt** containing:
    - The full `TaskGraph` (pending task IDs + descriptions)
@@ -334,8 +292,8 @@ Workers are never queried live for task suitability — their `AgentCapability` 
 
 **Why this is better than asking each worker:**
 - **O(1) round-trips** instead of O(number of workers) — one planning call instead of N evaluation calls
-- Catalog data is already the source of truth for capability; no need to re-derive it live
-- Removes a class of failure mode where a worker is live in the catalog but unreachable/slow when asked to self-evaluate
+- Local worker definitions are already the source of truth for capability; no need to re-derive it live
+- Removes a class of failure mode where a worker is registered locally but unreachable/slow when asked to self-evaluate
 - Simpler worker contract — `WorkerAgent` no longer needs an `evaluateTasks` method at all
 - Confidence lives entirely in the orchestrator's scoring, not in each worker's self-assessment — workers stay simple; only the orchestrator needs to reason about ambiguity
 
@@ -458,10 +416,10 @@ This replaces the earlier design's separate text-history cache (`OrchestratorCon
 
 | Decision | Rationale |
 |----------|-----------|
-| Table Storage for agent catalog | Durable, discoverable at runtime; no code deployment required |
+| Key Vault worker definitions | Centralized configuration loaded once at Function App startup |
 | JSON-based TaskGraph serialization | Human-readable; easy to persist and inspect progress |
 | Wave-based parallelism | Simpler than full DAG scheduling; respects dependency order |
-| Match from catalog, not live worker query | Capabilities are already known at registration time; one planning call replaces N worker round-trips and removes a worker-availability failure mode |
+| Match from local workers, not live worker query | Capabilities are loaded at Function App startup; one planning call replaces N worker round-trips and removes a worker-availability failure mode |
 | Jury resolution instead of confidence self-reporting | Confidence lives in the orchestrator's own scoring, not each worker's opinion of itself; ties are resolved by evidence (actual outputs) rather than a guess |
 | Single shared JuryAgent | Simplicity first — one Foundry prompt agent for the whole framework; revisit per-domain juries only if evidence shows one-size-fits-all adjudication is insufficient |
 | Bounded automatic task retry (`KV_TASK_MAX_RETRIES`, default 3) + total-call cap (`KV_TASK_MAX_TOTAL_CALLS`, default 6) | Transient model/tool failures shouldn't fail an entire orchestration, but jury fan-out × per-candidate retries must not multiply unbounded — the total-call cap keeps per-task cost predictable regardless of how the two are tuned |
@@ -477,10 +435,10 @@ This replaces the earlier design's separate text-history cache (`OrchestratorCon
 ```java
 // Setup
 OrchestratorAgent orchestrator = new OrchestratorAgent(
-    foundryEndpoint, storageTableEndpoint, "MainOrchestrator");
+    foundryEndpoint, storageTableEndpoint, "MainOrchestrator", "MainJury", config);
 
-WorkerAgent emailReviewer = new EmailReviewerAgent(
-    foundryEndpoint, storageTableEndpoint);
+WorkerAgent emailReviewer = new WorkerAgent(
+    foundryEndpoint, "EmailReviewerAgent", emailCapability);
 
 orchestrator.registerAgent(emailReviewer);
 
@@ -513,7 +471,7 @@ orchestrator.orchestrateStream(
 ## Testing Strategy
 
 - **Unit tests** for TaskGraph DAG logic
-- **Integration tests** for AgentCatalogManager ↔ Table Storage
+- **Integration tests** for Function App startup loading and local worker registration
 - **Mock workers** for orchestrator tests (don't call real Foundry)
 - **End-to-end tests** with real orchestrator + real workers (slow, optional)
 
@@ -539,7 +497,7 @@ orchestrator.orchestrateStream(
 
 9. **Redundancy review (pre-implementation):** identified and fixed four overlaps before coding —
    - `AgentCapability` had drifted from the original tasks/knowledgeBases/tools/speed contract into an overlapping `domains`/`description` shape; reverted to the original four-part contract.
-   - `AgentCatalog` stored `speed` both as its own column and inside `capabilityJson`; now derived from `capabilityJson` only.
+    - Worker capability metadata is configured once in Key Vault and reused directly by local matching.
    - Two overlapping conversation-continuity mechanisms existed (custom text-history cache vs. Foundry-native `conversationId`); kept Foundry-native chaining only, matching `AzAIAgent`'s existing pattern.
    - Jury fan-out × per-candidate retries had no combined ceiling; added `KV_TASK_MAX_TOTAL_CALLS` to cap total model calls per task regardless of how fan-out and retry counts are tuned.
 
@@ -551,7 +509,7 @@ Guidelines for how this framework fits into the existing repo layout and deploym
 
 ### 1. Standalone Maven module (peer of `java-core`)
 
-The framework is its own top-level module — e.g. `multiagent/` — added to the root `pom.xml` `<modules>` list alongside `java-core`. It depends on `java-core` (for `AzConnection`, `AzEnvNames`, `AzAIAgent`-style plumbing) rather than duplicating Azure wiring. Houses all classes from this design: `ProcessingSpeed`, `AgentCapability`, `TaskStatus`/`TaskNode`, `TaskGraph`, `AgentCatalogManager`, `WorkerAgent`, `JuryAgent`, `OrchestratorAgent`, `OrchestrationRequest`/`OrchestrationResult`.
+The framework is its own top-level module — e.g. `multiagent/` — added to the root `pom.xml` `<modules>` list alongside `java-core`. It depends on `java-core` (for `AzConnection`, `AzEnvNames`, `AzAIAgent`-style plumbing) rather than duplicating Azure wiring. Houses all classes from this design: `ProcessingSpeed`, `AgentCapability`, `TaskStatus`/`TaskNode`, `TaskGraph`, `WorkerAgent`, `JuryAgent`, `OrchestratorAgent`, `OrchestrationRequest`/`OrchestrationResult`.
 
 ### 2. `agent-service` — the deployable endpoint
 
@@ -564,10 +522,10 @@ The framework is its own top-level module — e.g. `multiagent/` — added to th
 
 ### 3. Agent provisioning via `3.deploy-agents.ps1`
 
-Extend the existing agent-selection menu in `deployment/3.deploy-agents.ps1` (currently iterating `insight/agents/*`) with a **"Multi-Agent System"** option that provisions every agent in the framework — orchestrator, each worker type, and the jury agent — in Azure AI Foundry:
+The agent-selection menu in `deployment/3.deploy-agents.ps1` provisions the framework agents and configured generic workers in Azure AI Foundry:
 
 - `OrchestratorAgent` and `JuryAgent` expose static `createAgent(String[] args)` entry points. Generic expert workers use the concrete `WorkerAgent.createAgent(String[])` entry point with `agentType` supplied as data — no worker-specific Java class is required.
-- Worker definitions are stored in `deployment/multiagent-workers.json` as `{ "agentType": "...", "instructions": "..." }` records. `3.deploy-agents.ps1` provisions every record when `Configured generic worker agents` is selected.
+- Worker definitions are stored in `deployment/multiagent-workers.json` as `{ "agentType": "...", "instructions": "..." }` records. `3.deploy-agents.ps1` provisions every record when `Configured generic worker agents` is selected. Existing agents use their latest Foundry instruction and MCP configuration as the starting point; new agents use the local JSON values.
 - Knowledge base binding is **out of scope for now**: `createAgent()` provisions the model + prompt-agent definition (instructions, tools) only. Any AI Search index / knowledge base binding is done manually in the Azure AI Foundry portal later, if and when a given worker actually needs retrieval.
 - The script builds the `multiagent` module JAR with Maven and invokes each agent type's `createAgent()` in turn, the same way it currently builds and provisions `eia-email-reviewer`.
 - Provisioning is idempotent per agent (create-or-update), consistent with the existing script's version-management behavior.

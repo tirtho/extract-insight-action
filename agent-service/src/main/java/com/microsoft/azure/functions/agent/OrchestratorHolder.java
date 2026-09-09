@@ -13,8 +13,7 @@ import java.util.List;
  * Lazily builds one {@link OrchestratorAgent} per Function App instance (JVM), reused across
  * invocations per the standard Azure Functions Java cold-start/warm-instance model.
  *
- * <p>Register domain-specific {@code WorkerAgent} implementations here at startup, e.g.:
- * {@code instance.registerAgent(new ClaimsReviewAgent(foundryEndpoint, storageTableEndpoint));}
+ * <p>Worker definitions are loaded from Key Vault and registered as local instances at startup.
  */
 final class OrchestratorHolder {
 
@@ -42,14 +41,21 @@ final class OrchestratorHolder {
     private static void registerConfiguredWorkers(OrchestratorAgent orchestrator, String keyVaultUrl) {
         try (AzConnection connection = new AzConnection(keyVaultUrl)) {
             String foundryEndpoint = connection.getSecret(AzEnvNames.KV_AI_FOUNDRY_PROJECT_ENDPOINT);
-            String storageEndpoint = connection.getSecret(AzEnvNames.KV_STORAGE_TABLE_ENDPOINT);
             String definitionsJson = connection.getSecret(AzEnvNames.KV_MULTIAGENT_WORKER_DEFINITIONS);
-            for (WorkerDefinition definition : WorkerDefinition.parseList(definitionsJson)) {
-                WorkerAgent worker = new WorkerAgent(foundryEndpoint, storageEndpoint,
+                List<WorkerDefinition> definitions = WorkerDefinition.parseList(definitionsJson);
+                if (definitions.isEmpty()) {
+                System.getLogger(OrchestratorHolder.class.getName()).log(System.Logger.Level.WARNING,
+                    "No configured multi-agent workers were loaded from Key Vault secret '"
+                        + AzEnvNames.KV_MULTIAGENT_WORKER_DEFINITIONS + "'.");
+                }
+                for (WorkerDefinition definition : definitions) {
+                WorkerAgent worker = new WorkerAgent(foundryEndpoint,
                         definition.agentType(), definition.capability());
                 workers.add(worker);
                 orchestrator.registerAgent(worker);
             }
+                System.getLogger(OrchestratorHolder.class.getName()).log(System.Logger.Level.INFO,
+                    "Loaded " + definitions.size() + " configured multi-agent worker(s) from Key Vault.");
             Runtime.getRuntime().addShutdownHook(new Thread(() -> workers.forEach(WorkerAgent::close),
                     "multiagent-worker-shutdown"));
         } catch (Exception e) {

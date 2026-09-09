@@ -84,8 +84,12 @@ Run in order:
 	to restart immediately; choose `N` to restart manually later.
 
 The script provisions the Foundry agent and publishes the manifest to Key Vault.
-On Function App cold start, each configured worker is instantiated, registered
-as `live` in the `AgentCatalog` table, and made available to the orchestrator.
+For an existing Foundry agent, its latest instruction and MCP configuration are
+shown as the current values before any replacement is accepted; the script
+warns that edits can overwrite the existing setup. For a new agent, the local
+JSON definition is used as the starting point.
+On Function App cold start, each configured worker is instantiated and registered
+in the local orchestrator, where it is available for capability matching and execution.
 
 ## 6. Build And Deploy Application Code
 

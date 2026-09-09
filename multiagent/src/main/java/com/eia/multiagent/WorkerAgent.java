@@ -1,7 +1,8 @@
 package com.eia.multiagent;
 
 import java.util.Map;
-import java.util.UUID;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,10 +10,8 @@ import org.slf4j.LoggerFactory;
 /**
  * Abstract base class for all domain-specific worker agents.
  *
- * <p>On construction, registers itself (and its {@link AgentCapability}) in {@code AgentCatalog}
- * so the orchestrator can discover and score it on the very next request — the orchestrator
- * never asks a worker to self-evaluate; matching happens entirely from catalog data
- * (see MULTIAGENT_FRAMEWORK_DESIGN.md "Task Matching Algorithm").
+ * <p>Worker instances are created from the Key Vault worker manifest when the Function App
+ * starts. The orchestrator keeps those local instances and uses their capabilities for matching.
  *
  * <p>Concrete subclasses should also expose a <b>static</b> provisioning entry point,
  * {@code public static void createAgent(String[] args)}, delegating to
@@ -25,30 +24,24 @@ public class WorkerAgent implements AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(WorkerAgent.class);
 
-    private final String instanceId;
     private final String agentType;
     private final AgentCapability capability;
-    private final AgentCatalogManager catalog;
     private final FoundryModelInvoker model;
 
-    public WorkerAgent(String foundryEndpoint, String storageTableEndpoint, String agentType,
+    public WorkerAgent(String foundryEndpoint, String agentType,
                        AgentCapability capability) {
-        this.instanceId = UUID.randomUUID().toString();
         if (agentType == null || agentType.isBlank()) {
             throw new IllegalArgumentException("agentType must not be blank");
         }
         this.agentType = agentType;
         this.capability = capability;
         this.model = new FoundryModelInvoker(foundryEndpoint, agentType);
-        this.catalog = new AgentCatalogManager(storageTableEndpoint);
-        this.catalog.register(agentType, instanceId, capability, foundryEndpoint);
-        LOG.info("WorkerAgent '{}' instance '{}' started.", agentType, instanceId);
+        LOG.info("WorkerAgent '{}' started.", agentType);
     }
 
     /** Logical worker type and the name of its pre-provisioned Foundry prompt agent. */
     public String getAgentType() { return agentType; }
 
-    public String getInstanceId() { return instanceId; }
     public AgentCapability getCapability() { return capability; }
 
     /**
@@ -83,20 +76,30 @@ public class WorkerAgent implements AutoCloseable {
 
     @Override
     public void close() {
-        catalog.markOffline(getAgentType(), instanceId);
-        LOG.info("WorkerAgent '{}' instance '{}' marked offline.", getAgentType(), instanceId);
+        LOG.info("WorkerAgent '{}' stopped.", getAgentType());
     }
 
-    /** Provisions a generic worker: WorkerAgent <keyVaultUrl> <agentType> <instructions...>. */
+    /** Provisions a generic worker, optionally binding an existing Foundry MCP connection. */
     public static void createAgent(String[] args) {
         if (args.length < 3) {
-            throw new IllegalArgumentException(
-                    "Usage: WorkerAgent <keyVaultUrl> <agentType> <instructions>");
+            throw new IllegalArgumentException("Usage: WorkerAgent <keyVaultUrl> <agentType> "
+                    + "[--foundry-tool <reference> <name> <description> ...] <instructions>");
         }
         String keyVaultUrl = args[0];
         String agentType = args[1];
-        String instructions = String.join(" ", java.util.Arrays.copyOfRange(args, 2, args.length));
-        AgentProvisioning.createAgent(agentType, keyVaultUrl, instructions);
+        int instructionsStart = 2;
+        List<AgentProvisioning.ToolBinding> bindings = new ArrayList<>();
+        while (instructionsStart < args.length && "--foundry-tool".equals(args[instructionsStart])) {
+            if (instructionsStart + 4 >= args.length) {
+                throw new IllegalArgumentException("Incomplete --foundry-tool arguments");
+            }
+            bindings.add(new AgentProvisioning.ToolBinding(args[instructionsStart + 1],
+                    args[instructionsStart + 2], args[instructionsStart + 3], args[instructionsStart + 4]));
+            instructionsStart += 5;
+        }
+        if (instructionsStart >= args.length) throw new IllegalArgumentException("Instructions are required");
+        String instructions = String.join(" ", java.util.Arrays.copyOfRange(args, instructionsStart, args.length));
+        AgentProvisioning.createAgent(agentType, keyVaultUrl, instructions, bindings);
     }
 
     public static void main(String[] args) { createAgent(args); }

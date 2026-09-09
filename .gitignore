@@ -57,6 +57,7 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+*.mmd
 
 # Azurite local storage emulator artifacts
 __blobstorage__/

@@ -71,6 +71,7 @@ $AiFoundryProjectName = "proj-$ProjectName-$Environment-$Suffix"
 $ScriptRoot  = $PSScriptRoot
 $RepoRoot    = Split-Path $ScriptRoot -Parent
 $AgentsRoot  = Join-Path $RepoRoot "insight\agents"
+$JavaCoreRoot = Join-Path $RepoRoot "java-core"
 $MultiAgentRoot = Join-Path $RepoRoot "multiagent"
 $DefaultWorkerDefinitionsPath = Join-Path $ScriptRoot "multiagent-workers.json"
 if ([string]::IsNullOrWhiteSpace($WorkerDefinitionsPath)) {
@@ -219,6 +220,101 @@ function Get-LatestProjectInputTime {
     return ($inputs | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).LastWriteTimeUtc
 }
 
+function Get-ExistingFoundryConnections {
+    $subscriptionId = (az account show --query id -o tsv 2>$null).Trim()
+    if ([string]::IsNullOrWhiteSpace($subscriptionId)) {
+        throw "Could not resolve the active Azure subscription."
+    }
+
+    $url = "https://management.azure.com/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.CognitiveServices/accounts/$AiFoundryName/projects/$AiFoundryProjectName/connections?api-version=2025-06-01"
+    $json = az rest --method get --url $url 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) {
+        throw "Could not list existing Foundry project connections. No resources were created."
+    }
+
+    $response = $json | ConvertFrom-Json
+    return @($response.value | ForEach-Object {
+        [pscustomobject]@{
+            Name      = [string]$_.name
+            Reference = [string]$_.name
+            ResourceId = [string]$_.id
+            Category  = [string]$_.properties.category
+            Target    = [string]$_.properties.target
+        }
+    } | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Reference) })
+}
+
+function Get-ExistingFoundryAgent {
+    param([Parameter(Mandatory=$true)][string]$AgentName)
+
+    $projectEndpoint = az keyvault secret show `
+        --vault-name $KeyVaultName `
+        --name 'AiFoundryProjectEndpoint' `
+        --query value -o tsv 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($projectEndpoint)) {
+        throw "Could not resolve the Foundry project endpoint from Key Vault."
+    }
+
+    $encodedAgentName = [Uri]::EscapeDataString($AgentName)
+    $url = "$($projectEndpoint.TrimEnd('/'))/agents/$encodedAgentName`?api-version=v1"
+    $accessToken = az account get-access-token `
+        --resource 'https://ai.azure.com' `
+        --query accessToken -o tsv 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($accessToken)) {
+        throw "Could not acquire an Azure AI access token to read Foundry agents."
+    }
+
+    try {
+        $response = Invoke-RestMethod `
+            -Method Get `
+            -Uri $url `
+            -Headers @{ Authorization = "Bearer $($accessToken.Trim())" } `
+            -ErrorAction Stop
+    } catch {
+        if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
+            return $null
+        }
+        throw "Could not read Foundry agent '$AgentName': $($_.Exception.Message)"
+    }
+
+    $definition = $response.versions.latest.definition
+    if ($null -eq $definition) {
+        return $null
+    }
+
+    $tools = @($definition.tools | ForEach-Object {
+        if ([string]$_.type -eq 'mcp') {
+            New-ToolCatalogEntry `
+                -Name ([string]$_.server_label) `
+                -Description ([string]$_.server_description) `
+                -Reference ([string]$_.project_connection_id) `
+                -ServerUrl ([string]$_.server_url)
+        }
+    })
+
+    return [pscustomobject]@{
+        Instructions = [string]$definition.instructions
+        Tools = $tools
+    }
+}
+
+function New-ToolCatalogEntry {
+    param(
+        [Parameter(Mandatory=$true)][string]$Name,
+        [Parameter(Mandatory=$true)][string]$Description,
+        [string]$Reference,
+        [string]$ServerUrl
+    )
+    return [ordered]@{
+        name = $Name
+        description = $Description
+        toolBinding = [ordered]@{
+            reference = $Reference
+            serverUrl = $ServerUrl
+        }
+    }
+}
+
 # =============================================================================
 # STEP 1: Select which agent(s) to provision
 # =============================================================================
@@ -284,6 +380,7 @@ if ($selections -contains '3') {
             MainClass    = "com.eia.multiagent.WorkerAgent"
             AgentType    = [string]$worker.agentType
             Instructions = [string]$worker.instructions
+            Tools        = @($worker.tools)
             IsConfigured = $true
         })
     }
@@ -292,11 +389,114 @@ if ($selections -contains '3') {
     }
 }
 
+# Confirm the resource group before querying existing project connections.
+$confirmRg = Read-Host "Press [Enter] to accept Resource Group '$ResourceGroupName', or type a new name to override"
+$confirmRg = $confirmRg.Trim()
+if ($confirmRg -ne '') {
+    $ResourceGroupName = $confirmRg
+    Write-Host "[INFO] Using overridden Resource Group: $ResourceGroupName" -ForegroundColor Cyan
+}
+
 # =============================================================================
-# STEP 2: Gather agent instructions
+# STEP 2: Configure worker instructions and Foundry tool bindings
+# =============================================================================
+if ($selections -contains '3' -and $workerDefinitions.Count -gt 0) {
+    Write-Host ""
+    Write-Host ">>> Step 2: Configure worker instructions and tools" -ForegroundColor White
+    Write-Host "[INFO] Existing project connections are listed as available Foundry tools." -ForegroundColor DarkCyan
+    $existingConnections = @(Get-ExistingFoundryConnections)
+    foreach ($worker in $workerDefinitions) {
+        $target = $targets | Where-Object { $_.AgentType -eq [string]$worker.agentType } | Select-Object -First 1
+        $existingAgent = Get-ExistingFoundryAgent -AgentName ([string]$worker.agentType)
+        if ($existingAgent) {
+            $worker.instructions = $existingAgent.Instructions
+            $worker.tools = @($existingAgent.Tools)
+            $target.Instructions = $existingAgent.Instructions
+            $target.Tools = @($existingAgent.Tools)
+            $target.FoundryExists = $true
+        }
+        Write-Host ""
+        Write-Host "Worker '$($worker.agentType)'" -ForegroundColor White
+        if ($existingAgent) {
+            Write-Host "[WARNING] This agent already exists in Foundry. Any replacement input or tool changes will overwrite its existing setup." -ForegroundColor Yellow
+        }
+        $instructionSource = if ($existingAgent) {
+            'Current instruction for this existing Agent from Foundry (ignoring instructions in local JSON file)'
+        } else {
+            'Current instruction from local JSON file (new Foundry agent)'
+        }
+        Write-Host "$instructionSource`:" -ForegroundColor DarkCyan
+        Write-Host "  $($worker.instructions)" -ForegroundColor Gray
+        $editedInstructions = (Read-Host "Press [Enter] to keep instructions, or enter replacement text").Trim()
+        if ($editedInstructions) {
+            $worker.instructions = $editedInstructions
+            $target.Instructions = $editedInstructions
+        }
+
+        Write-Host "Current configuration:" -ForegroundColor DarkCyan
+        if ($existingAgent) {
+            Write-Host "  Loaded from the existing Foundry agent definition." -ForegroundColor Gray
+        } else {
+            Write-Host "  Loaded from the local JSON worker definition." -ForegroundColor Gray
+        }
+
+        $configuredTools = [System.Collections.Generic.List[object]]::new()
+        foreach ($tool in @($worker.tools)) {
+            $toolName = [string]$tool.name
+            $toolDescription = [string]$tool.description
+            $currentReference = if ($tool.toolBinding) { [string]$tool.toolBinding.reference } else { '' }
+            $matchingConnection = $existingConnections |
+                Where-Object { $_.Reference -eq $currentReference -or $_.ResourceId -eq $currentReference } |
+                Select-Object -First 1
+            if ($matchingConnection) {
+                $currentReference = $matchingConnection.Reference
+            }
+            $currentServerUrl = if ($tool.toolBinding) { [string]$tool.toolBinding.serverUrl } else { '' }
+            if ($matchingConnection -and -not [string]::IsNullOrWhiteSpace($matchingConnection.Target)) {
+                $currentServerUrl = $matchingConnection.Target
+            }
+            Write-Host ""
+            Write-Host "Tool '$toolName'" -ForegroundColor White
+            $nameInput = (Read-Host "Tool name [$toolName]").Trim()
+            if ($nameInput) { $toolName = $nameInput }
+            $descriptionInput = (Read-Host "Tool description [$toolDescription]").Trim()
+            if ($descriptionInput) { $toolDescription = $descriptionInput }
+
+            Write-Host "Already bound: $(if ($currentReference) { $currentReference } else { '[none]' })" -ForegroundColor DarkCyan
+            Write-Host "Available project tools:" -ForegroundColor DarkCyan
+            for ($connectionIndex = 0; $connectionIndex -lt $existingConnections.Count; $connectionIndex++) {
+                $connection = $existingConnections[$connectionIndex]
+                $boundMarker = if ($connection.Reference -eq $currentReference) { ' [currently bound]' } else { '' }
+                Write-Host "  $($connectionIndex + 1). $($connection.Name) [$($connection.Category)] $($connection.Target)$boundMarker" -ForegroundColor Gray
+            }
+            Write-Host "  0. Keep current binding, or leave unbound" -ForegroundColor Gray
+            do {
+                $choice = (Read-Host "Select the tool to bind to '$toolName' [0]").Trim()
+                if ([string]::IsNullOrWhiteSpace($choice)) { $choice = '0' }
+                $validChoice = $choice -match '^\d+$' -and [int]$choice -le $existingConnections.Count
+                if (-not $validChoice) {
+                    Write-Host "[ERROR] Enter 0 or a listed tool number." -ForegroundColor Red
+                }
+            } while (-not $validChoice)
+            if ([int]$choice -gt 0) { $currentReference = $existingConnections[[int]$choice - 1].Reference }
+            if ([string]::IsNullOrWhiteSpace($currentReference)) {
+                Write-Host "[INFO] Leaving '$toolName' unbound" -ForegroundColor DarkCyan
+            } else {
+                Write-Host "[INFO] Binding '$toolName' to project connection '$currentReference'" -ForegroundColor DarkCyan
+            }
+            $configuredTools.Add((New-ToolCatalogEntry -Name $toolName -Description $toolDescription `
+                -Reference $currentReference -ServerUrl $currentServerUrl))
+        }
+        $worker.tools = @($configuredTools.ToArray())
+        $target.Tools = @($configuredTools.ToArray())
+    }
+}
+
+# =============================================================================
+# STEP 3: Gather agent instructions
 # =============================================================================
 Write-Host ""
-Write-Host ">>> Step 2: Agent instructions" -ForegroundColor White
+Write-Host ">>> Step 3: Agent instructions" -ForegroundColor White
 Write-Host "[INFO] Instructions become the system prompt registered with the agent in Azure AI Foundry." -ForegroundColor DarkCyan
 Write-Host ""
 
@@ -309,7 +509,7 @@ $defaultInstructionsByAgent = @{
 
 foreach ($target in $targets) {
     if ($target.IsConfigured) {
-        Write-Host "[INFO] '$($target.Label)' loaded from worker manifest." -ForegroundColor DarkCyan
+        Write-Host "[INFO] '$($target.Label)' loaded from worker manifest; instructions were configured in Step 2." -ForegroundColor DarkCyan
         continue
     }
 
@@ -337,21 +537,17 @@ foreach ($target in $targets) {
 }
 
 # =============================================================================
-# STEP 3: Confirm
+# STEP 4: Confirm
 # =============================================================================
-$confirmRg = Read-Host "Press [Enter] to accept Resource Group '$ResourceGroupName', or type a new name to override"
-$confirmRg = $confirmRg.Trim()
-if ($confirmRg -ne '') {
-    $ResourceGroupName = $confirmRg
-    Write-Host "[INFO] Using overridden Resource Group: $ResourceGroupName" -ForegroundColor Cyan
-}
-
 Write-Host ""
 Write-Host "[INFO] ============================================================" -ForegroundColor Cyan
 Write-Host "[INFO] About to provision:"                                            -ForegroundColor Cyan
 foreach ($t in $targets) {
     Write-Host "  $($t.Label)" -ForegroundColor Cyan
     Write-Host "    Instructions: $($t.Instructions)" -ForegroundColor DarkCyan
+    foreach ($tool in @($t.Tools)) {
+        Write-Host "    Tool: $($tool.name) [$($tool.toolBinding.reference)]" -ForegroundColor DarkCyan
+    }
 }
 Write-Host "  Resource Group : $ResourceGroupName"                                -ForegroundColor Cyan
 Write-Host "  Key Vault      : $KeyVaultName"                                     -ForegroundColor Cyan
@@ -365,7 +561,7 @@ if ($go.Trim() -match '^[Nn]') {
 }
 
 # =============================================================================
-# STEP 4: Resolve Key Vault URL
+# STEP 5: Resolve Key Vault URL
 # =============================================================================
 Write-Host ""
 Write-Host ">>> Step 4: Resolving Key Vault URL" -ForegroundColor White
@@ -490,7 +686,7 @@ if ($StorageAccountId) {
 }
 
 # =============================================================================
-# STEP 5: Build and provision each agent
+# STEP 6: Build and provision each agent
 # =============================================================================
 Write-Host ""
 Write-Host ">>> Step 5: Build and provision agents" -ForegroundColor White
@@ -607,7 +803,22 @@ foreach ($target in $targets) {
     # Run provisioning — main(keyVaultUrl, instructions...)
     Write-Host "[INFO] Registering agent in Azure AI Foundry..." -ForegroundColor Cyan
     if ($target.MainClass -eq "com.eia.multiagent.WorkerAgent") {
-        & $javaExe -cp $jarFile.FullName $target.MainClass $kvUrl $target.AgentType $Instructions
+        $workerArgs = @($kvUrl, $target.AgentType)
+        foreach ($tool in @($target.Tools)) {
+            $reference = [string]$tool.toolBinding.reference
+            if ([string]::IsNullOrWhiteSpace($reference)) {
+                Write-Host "[INFO] Provisioning '$($target.AgentType)' without MCP binding for '$($tool.name)'" -ForegroundColor DarkCyan
+                continue
+            }
+            $serverUrl = [string]$tool.toolBinding.serverUrl
+            if ([string]::IsNullOrWhiteSpace($serverUrl)) {
+                throw "MCP connection '$reference' for worker '$($target.AgentType)' has no server URL. Re-run this step and select the connection again."
+            }
+            Write-Host "[INFO] Provisioning '$($target.AgentType)' with MCP connection '$reference'" -ForegroundColor DarkCyan
+            $workerArgs += @('--foundry-tool', $reference, [string]$tool.name, [string]$tool.description, $serverUrl)
+        }
+        $workerArgs += $Instructions
+        & $javaExe -cp $jarFile.FullName $target.MainClass $workerArgs
     } elseif ($target.MainClass) {
         # Multi-agent system JAR has no single Main-Class (two agents share one module);
         # invoke the specific agent's static main() explicitly via -cp.
@@ -623,7 +834,7 @@ foreach ($target in $targets) {
 }
 
 if ($selections -contains '3') {
-    $workerManifest = Get-Content -Path $WorkerDefinitionsPath -Raw
+    $workerManifest = $workerDefinitions | ConvertTo-Json -Depth 10
     $manifestTempFile = [System.IO.Path]::GetTempFileName()
     try {
         Set-Content -Path $manifestTempFile -Value $workerManifest -Encoding UTF8 -NoNewline

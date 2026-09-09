@@ -2751,7 +2751,7 @@ if (-not $AgentServiceIdentity) {
         Set-RoleAssignment -Assignee $AgentServiceIdentity -Role 'Key Vault Secrets User' -Scope $KeyVaultId -PrincipalType 'ServicePrincipal' | Out-Null
     }
 
-    # Storage: AgentCatalog / OrchestrationState / OrchestratorConversations tables
+    # Storage: OrchestrationState / OrchestratorConversations tables
     Write-Host "[INFO] Storage roles for agent-service" -ForegroundColor Cyan
     foreach ($role in @('Storage Blob Data Owner','Storage Queue Data Contributor','Storage Table Data Contributor')) {
         Set-RoleAssignment -Assignee $AgentServiceIdentity -Role $role -Scope $StorageAccountId -PrincipalType 'ServicePrincipal' | Out-Null

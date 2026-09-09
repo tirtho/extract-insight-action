@@ -141,8 +141,8 @@ place between deployments.
 ### Adding a multi-agent worker
 
 Add a worker definition to `deployment/multiagent-workers.json`. The `agentType`
-must be the exact Foundry agent name. Capabilities are published to the catalog
-when the Function App starts:
+must be the exact Foundry agent name. Capabilities are loaded into the local
+worker registry when the Function App starts:
 
 ```json
 [
@@ -151,21 +151,54 @@ when the Function App starts:
       "instructions": "Review insurance claims, identify missing information, and detect anomalies.",
       "tasks": ["review claims", "detect claim anomalies"],
       "knowledgeBases": ["claims records", "policy data"],
-      "tools": [],
+      "tools": [
+         {
+            "name": "Claims search",
+            "description": "Searches claims records.",
+            "toolBinding": {
+               "reference": "claims-search"
+            }
+         }
+      ],
       "speed": "MEDIUM",
       "version": "1.0.0"
    }
 ]
 ```
 
-Run `3.deploy-agents.ps1` and select `3`. The script then:
+Run `3.deploy-agents.ps1` and select `3`. For each manifest worker, the script
+loads the latest Foundry instruction and MCP tool configuration when an agent
+with the same `agentType` already exists. It warns before edits can overwrite
+that existing setup. For a new agent, it uses the local JSON values. In both
+cases, the script lets you keep the current instruction or replace it, edit
+each tool's name and description, and keep the current binding or select a
+different Foundry project connection. Repeat this for every tool entry. The
+script then:
 
 1. Provisions or updates the Foundry agent.
 2. Stores the manifest in Key Vault as `MultiAgentWorkerDefinitions`.
 3. Prompts `Restart Function App ...? [Y/n]`; press Enter or `Y` to restart it immediately, or `N` to skip.
 
-After the restart, the runtime constructs the worker, registers it as `live` in
-`AgentCatalog`, and makes it available to the orchestrator. A Function App
+Tool names in the manifest are display names. During provisioning, spaces and other
+characters not accepted by Foundry MCP `server_label` are normalized automatically;
+for example, `Claims search` is registered as `Claims-search`. For a bound project
+connection, the deployment also supplies the connection target as `server_url`;
+this is required by the current Foundry MCP schema in addition to the project
+connection name.
+
+When an agent already exists, provisioning starts from its latest Foundry
+definition and applies the instruction and selected MCP project connection
+changes. Existing unrelated tools and knowledge-base configuration managed in
+the Foundry portal are preserved. The `knowledgeBases` field in the local
+manifest describes worker capability metadata; it does not bind an AI Search
+index or knowledge base automatically. Perform that binding manually in the
+Foundry portal when required. A selected connection is added as a new MCP tool
+when it is not already bound; when it is already bound, its configured name and
+description are updated if either value changed. This flow uses existing
+Foundry project connections; it does not create project connections.
+
+After the restart, the runtime loads the worker manifest from Key Vault, constructs
+the workers, and registers them in the local orchestrator. A Function App
 restart is required after changing an existing manifest because configuration is
 loaded at cold start. If you skip the prompt, restart the Function App manually
 before using the new worker.
@@ -324,6 +357,7 @@ For issues with the deployment script:
 
 For Azure service-specific issues, consult the official Azure documentation.
 
-## TODO
+## Known limitations
 
-- While the PowerShell scripts are tested, the Bash shell scripts (for installing from a Linux OS) are not tested yet.
+- The PowerShell deployment scripts are the tested path. The Bash scripts for
+   installing from a Linux OS have not been validated in this repository.

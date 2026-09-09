@@ -1,0 +1,40 @@
+[
+  {
+    "agentType": "ClaimsReviewAgent",
+    "instructions": "Current provisioning instructions...",
+    "tasks": [
+      "Review insurance claims",
+      "Detect missing information and anomalies"
+    ],
+    "knowledgeBases": [
+      "Claims policy documents",
+      "Customer claim history"
+    ],
+    "tools": [
+      "Claims search",
+      "Policy lookup"
+    ],
+    "speed": "NORMAL",
+    "version": "2026-09-04"
+  },
+  {
+    "agentType": "CommercialInsuranceUnderwriterAgent",
+    "instructions": "You connect to knowledge sources, review insurance applications, assess risk and eligibility, and determine coverage and pricing for commercial business insurance, identify missing information, detect anomalies, and recommend next actions.",
+    "tasks": [
+      "Review commercial insurance applications",
+      "Assess risk and eligibility",
+      "Determine coverage and pricing",
+      "Detect missing information and anomalies"
+    ],
+    "knowledgeBases": [
+      "Commercial insurance policy documents",
+      "Customer application history"
+    ],
+    "tools": [
+      "Application search",
+      "Policy lookup"
+    ],
+    "speed": "NORMAL",
+    "version": "2026-09-04"
+  }
+]

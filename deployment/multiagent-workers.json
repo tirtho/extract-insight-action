@@ -1,10 +1,49 @@
 [
   {
     "agentType": "ClaimsReviewAgent",
-    "instructions": "You connect to knowledge sources, review insurance claims, identify missing information, detect anomalies, and recommend next actions."
+    "instructions": "You are an insurance claims review agent. Based on the user prompt you :\n1. Search for relevant claims emails with attached document items using the Cosmos DB MCP tool\n2. Use the search data to respond back to the user\n3. Provide the blobUrl field for these documents and attachments in CosmosDB\n4. Include the name of the container and database in the response.\nNote: Never invent database or container names. Explain which database and container you used, and ask the user to clarify when they are ambiguous.",
+    "tasks": [
+      "Review insurance claims",
+      "Detect missing information and anomalies"
+    ],
+    "tools": [
+      {
+        "name": "Claims search",
+        "description": "Searches claims emails and attached document items.",
+        "toolBinding": {
+          "reference": ""
+        }
+      }
+    ],
+    "speed": "MEDIUM",
+    "version": "2026-09-04"
   },
   {
     "agentType": "CommercialInsuranceUnderwriterAgent",
-    "instructions": "You connect to knowledge sources, review insurance applications, assess risk and eligibility, and determine coverage and pricing for commercial business insurance, identify missing information, detect anomalies, and recommend next actions."
+    "instructions": "You connect to knowledge sources, review insurance applications, assess risk and eligibility, and determine coverage and pricing for commercial business insurance, identify missing information, detect anomalies, and recommend next actions.",
+    "tasks": [
+      "Review commercial insurance applications",
+      "Assess risk and eligibility",
+      "Determine coverage and pricing",
+      "Detect missing information and anomalies"
+    ],
+    "tools": [
+      {
+        "name": "Commercial Insurance Application search",
+        "description": "Searches commercial insurance applications.",
+        "toolBinding": {
+          "reference": ""
+        }
+      },
+      {
+        "name": "Policy lookup",
+        "description": "Looks up commercial insurance policy information.",
+        "toolBinding": {
+          "reference": ""
+        }
+      }
+    ],
+    "speed": "MEDIUM",
+    "version": "2026-09-04"
   }
 ]
