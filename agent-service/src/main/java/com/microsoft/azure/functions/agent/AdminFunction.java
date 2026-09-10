@@ -112,12 +112,33 @@ public class AdminFunction {
                     }
                 }
             }
-            List<String> rows = counts.entrySet().stream().map(entry ->
+                Map<String, PerformanceMetric> metrics = new LinkedHashMap<>();
+                for (TableEntity call : calls) {
+                for (String invocation : telemetryInvocations(call)) {
+                    String agent = telemetryString(invocation, "agentType");
+                    String role = telemetryString(invocation, "role");
+                    PerformanceMetric metric = metrics.computeIfAbsent(role + "\u0000" + agent,
+                        ignored -> new PerformanceMetric(role, agent));
+                    metric.add(telemetryNumber(invocation, "durationMs"),
+                        telemetryNumber(invocation, "inputTokens"),
+                        telemetryNumber(invocation, "outputTokens"),
+                        telemetryNumber(invocation, "totalTokens"));
+                }
+                }
+                List<String> rows = metrics.isEmpty()
+                    ? counts.entrySet().stream().map(entry ->
                     "{\"agentType\":\"" + esc(entry.getKey()) + "\",\"category\":\"" +
                     category(entry.getKey(), orchestrator, jury) + "\",\"invocations\":" + entry.getValue() +
-                    ",\"percentOfOrchestratorCalls\":" + percent(entry.getValue(), calls.size()) + "}").toList();
+                    ",\"percentOfOrchestratorCalls\":" + percent(entry.getValue(), calls.size()) + "}").toList()
+                    : metrics.values().stream().map(metric -> metric.json(orchestrator, jury, calls.size())).toList();
+                long duration = calls.stream().mapToLong(call -> number(call, "telemetryDurationMs")).sum();
+                long inputTokens = calls.stream().mapToLong(call -> number(call, "telemetryInputTokens")).sum();
+                long outputTokens = calls.stream().mapToLong(call -> number(call, "telemetryOutputTokens")).sum();
+                long totalTokens = calls.stream().mapToLong(call -> number(call, "telemetryTotalTokens")).sum();
             return json(request, HttpStatus.OK, "{\"sinceDays\":" + sinceDays +
-                    ",\"orchestrationCalls\":" + calls.size() + ",\"agents\":[" +
+                    ",\"orchestrationCalls\":" + calls.size() + ",\"durationMs\":" + duration +
+                    ",\"inputTokens\":" + inputTokens + ",\"outputTokens\":" + outputTokens +
+                    ",\"totalTokens\":" + totalTokens + ",\"agents\":[" +
                     String.join(",", rows) + "]}");
         } catch (Exception e) {
             return error(request, e);
@@ -185,16 +206,18 @@ public class AdminFunction {
 
     private String graphJson(String requestId, TableEntity state) {
         List<TaskNode> tasks = graphNodes(state);
+        List<String> invocations = telemetryInvocations(state);
         List<String> nodes = new ArrayList<>();
         List<String> edges = new ArrayList<>();
         nodes.add("{\"id\":\"orchestrator\",\"label\":\"Orchestrator\",\"kind\":\"orchestrator\",\"status\":\"" +
-                esc(string(state, "status")) + "\"}");
+            esc(string(state, "status")) + "\"" + metricsJson(invocations, null, "orchestrator") + "}");
         for (TaskNode task : tasks) {
             String taskId = safe(task.getTaskId());
+            List<String> taskInvocations = invocationsForTask(invocations, task.getTaskId());
             nodes.add("{\"id\":\"task_" + taskId + "\",\"label\":\"" + esc(task.getTaskId()) +
                     "\",\"description\":\"" + esc(task.getDescription()) + "\",\"kind\":\"task\",\"status\":\"" +
                     esc(String.valueOf(task.getStatus())) + "\",\"hasResult\":" +
-                    (task.getResult() != null && !task.getResult().isBlank()) + "}");
+                (task.getResult() != null && !task.getResult().isBlank()) + metricsJson(taskInvocations, null, null) + "}");
             if (task.getDependsOn().isEmpty()) edges.add(edge("orchestrator", "task_" + taskId, "dispatches"));
             for (String dependency : task.getDependsOn()) {
                 edges.add(edge("task_" + safe(dependency), "task_" + taskId, "depends on"));
@@ -203,11 +226,48 @@ public class AdminFunction {
             for (String agent : task.getCalledAgentTypes()) {
                 String agentId = "agent_" + taskId + "_" + safe(agent) + "_" + index++;
                 nodes.add("{\"id\":\"" + agentId + "\",\"label\":\"" + esc(agent) +
-                        "\",\"kind\":\"agent\",\"status\":\"invoked\"}");
+                        "\",\"kind\":\"agent\",\"status\":\"invoked\"" +
+                    metricsJson(invocationsForTaskAndAgent(invocations, task.getTaskId(), agent)) + "}");
                 edges.add(edge("task_" + taskId, agentId, "invokes"));
             }
         }
         return "\"nodes\":[" + String.join(",", nodes) + "],\"edges\":[" + String.join(",", edges) + "]}";
+    }
+
+    private String metricsJson(List<String> invocations, String agentType, String role) {
+        List<String> selected = agentType == null
+                ? (role == null ? invocations : invocations.stream()
+                .filter(invocation -> role.equals(telemetryString(invocation, "role"))).toList())
+                : invocationsForAgent(invocations, agentType);
+        return metricsJson(selected);
+        }
+
+        private String metricsJson(List<String> selected) {
+        long duration = selected.stream().mapToLong(invocation -> telemetryNumber(invocation, "durationMs")).sum();
+        long input = selected.stream().mapToLong(invocation -> telemetryNumber(invocation, "inputTokens")).sum();
+        long output = selected.stream().mapToLong(invocation -> telemetryNumber(invocation, "outputTokens")).sum();
+        long total = selected.stream().mapToLong(invocation -> telemetryNumber(invocation, "totalTokens")).sum();
+        return ",\"invocations\":" + selected.size() + ",\"durationMs\":" + duration +
+                ",\"inputTokens\":" + input + ",\"outputTokens\":" + output +
+                ",\"totalTokens\":" + total;
+    }
+
+    private static List<String> invocationsForAgent(List<String> invocations, String agentType) {
+        return invocations.stream()
+                .filter(invocation -> agentType.equals(telemetryString(invocation, "agentType")))
+                .toList();
+    }
+
+    private static List<String> invocationsForTask(List<String> invocations, String taskId) {
+        return invocations.stream()
+                .filter(invocation -> telemetryString(invocation, "operation").endsWith(":" + taskId))
+                .toList();
+    }
+
+    private static List<String> invocationsForTaskAndAgent(List<String> invocations, String taskId, String agentType) {
+        return invocationsForTask(invocations, taskId).stream()
+                .filter(invocation -> agentType.equals(telemetryString(invocation, "agentType")))
+                .toList();
     }
 
     private static String edge(String source, String target, String label) {
@@ -236,7 +296,92 @@ public class AdminFunction {
     private String callJson(TableEntity entity) {
         return "{\"requestId\":\"" + esc(entity.getRowKey()) + "\",\"status\":\"" +
                 esc(string(entity, "status")) + "\",\"prompt\":\"" + esc(string(entity, "prompt")) +
-                "\",\"updatedAt\":" + updatedAt(entity) + "}";
+                "\",\"updatedAt\":" + updatedAt(entity) + ",\"durationMs\":" +
+                number(entity, "telemetryDurationMs") + ",\"inputTokens\":" +
+                number(entity, "telemetryInputTokens") + ",\"outputTokens\":" +
+                number(entity, "telemetryOutputTokens") + ",\"totalTokens\":" +
+                number(entity, "telemetryTotalTokens") + ",\"telemetry\":" +
+                (string(entity, "telemetryJson").isBlank() ? "null" : string(entity, "telemetryJson")) + "}";
+    }
+
+    private List<String> telemetryInvocations(TableEntity entity) {
+        String telemetry = string(entity, "telemetryJson");
+        int start = telemetry.indexOf("\"invocations\":[");
+        int end = telemetry.lastIndexOf(']');
+        if (start < 0 || end <= start) return List.of();
+        String body = telemetry.substring(start + 15, end).trim();
+        if (body.isBlank()) return List.of();
+        return List.of(body.split("(?<=\\}),(?=\\{)"));
+    }
+
+    private static long number(TableEntity entity, String property) {
+        Object value = entity.getProperty(property);
+        if (value instanceof Number number) return number.longValue();
+        try { return value == null ? 0 : Long.parseLong(String.valueOf(value)); }
+        catch (NumberFormatException ignored) { return 0; }
+    }
+
+    private static long telemetryNumber(String json, String property) {
+        String value = telemetryValue(json, property);
+        try { return Long.parseLong(value); }
+        catch (NumberFormatException ignored) { return 0; }
+    }
+
+    private static String telemetryString(String json, String property) {
+        String value = telemetryValue(json, property);
+        return value.replace("\\\"", "\"").replace("\\\\", "\\");
+    }
+
+    private static String telemetryValue(String json, String property) {
+        String marker = "\"" + property + "\":";
+        int start = json.indexOf(marker);
+        if (start < 0) return "";
+        start += marker.length();
+        if (start < json.length() && json.charAt(start) == '\"') {
+            int end = start + 1;
+            while (end < json.length() && json.charAt(end) != '\"') end++;
+            return json.substring(start + 1, end);
+        }
+        int end = start;
+        while (end < json.length() && json.charAt(end) != ',' && json.charAt(end) != '}') end++;
+        return json.substring(start, end);
+    }
+
+    private static final class PerformanceMetric {
+        private final String role;
+        private final String agentType;
+        private int invocations;
+        private long durationMs;
+        private long inputTokens;
+        private long outputTokens;
+        private long totalTokens;
+
+        private PerformanceMetric(String role, String agentType) {
+            this.role = role;
+            this.agentType = agentType;
+        }
+
+        private void add(long duration, long input, long output, long total) {
+            invocations++;
+            durationMs += duration;
+            inputTokens += input;
+            outputTokens += output;
+            totalTokens += total;
+        }
+
+        private String json(String orchestrator, String jury, int orchestrationCalls) {
+            return "{\"agentType\":\"" + esc(agentType) + "\",\"role\":\"" + esc(role) +
+                    "\",\"category\":\"" + category(agentType, orchestrator, jury) +
+                    "\",\"invocations\":" + invocations + ",\"durationMs\":" + durationMs +
+                    ",\"averageDurationMs\":" + percentLong(durationMs, invocations) +
+                    ",\"inputTokens\":" + inputTokens + ",\"outputTokens\":" + outputTokens +
+                    ",\"totalTokens\":" + totalTokens +
+                    ",\"percentOfOrchestratorCalls\":" + percent(invocations, orchestrationCalls) + "}";
+        }
+    }
+
+    private static long percentLong(long total, int count) {
+        return count == 0 ? 0 : total / count;
     }
 
     private static String category(String agent, String orchestrator, String jury) {

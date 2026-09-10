@@ -35,7 +35,7 @@ public class WorkerAgent implements AutoCloseable {
         }
         this.agentType = agentType;
         this.capability = capability;
-        this.model = new FoundryModelInvoker(foundryEndpoint, agentType);
+        this.model = new FoundryModelInvoker(foundryEndpoint, agentType, null, "worker");
         LOG.info("WorkerAgent '{}' started.", agentType);
     }
 
@@ -50,13 +50,13 @@ public class WorkerAgent implements AutoCloseable {
      */
     public String executeTask(TaskNode task, Map<String, String> dependencyResults) {
         LOG.info("Agent '{}' executing task '{}'.", getAgentType(), task.getTaskId());
-        return model.call(buildExecutionPrompt(task, dependencyResults));
+        return model.call(buildExecutionPrompt(task, dependencyResults), "worker-execution:" + task.getTaskId());
     }
 
     /** Streaming variant of {@link #executeTask}; invokes {@code onDelta} per token. */
     public String executeTaskStream(TaskNode task, Map<String, String> dependencyResults, Consumer<String> onDelta) {
         LOG.info("Agent '{}' streaming task '{}'.", getAgentType(), task.getTaskId());
-        return model.callStream(buildExecutionPrompt(task, dependencyResults), onDelta);
+        return model.callStream(buildExecutionPrompt(task, dependencyResults), onDelta, "worker-stream:" + task.getTaskId());
     }
 
     private String buildExecutionPrompt(TaskNode task, Map<String, String> depResults) {

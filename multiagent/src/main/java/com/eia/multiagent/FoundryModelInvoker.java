@@ -19,28 +19,38 @@ import java.util.stream.Collectors;
 final class FoundryModelInvoker {
 
     /** A model response paired with its response id, used for {@code previousResponseId} chaining. */
-    record ModelResponse(String responseId, String text) {}
+    record ModelResponse(String responseId, String text, long inputTokens, long outputTokens, long totalTokens) {}
 
     private final ResponsesClient responsesClient;
     private final String agentName;
     private final String agentVersion;
+    private final String role;
 
     FoundryModelInvoker(String foundryEndpoint, String agentName) {
-        this(foundryEndpoint, agentName, null);
+        this(foundryEndpoint, agentName, null, "agent");
     }
 
     FoundryModelInvoker(String foundryEndpoint, String agentName, String agentVersion) {
+        this(foundryEndpoint, agentName, agentVersion, "agent");
+    }
+
+    FoundryModelInvoker(String foundryEndpoint, String agentName, String agentVersion, String role) {
         this.responsesClient = new AgentsClientBuilder()
                 .credential(new DefaultAzureCredentialBuilder().build())
                 .endpoint(foundryEndpoint)
                 .buildResponsesClient();
         this.agentName = agentName;
         this.agentVersion = agentVersion;
+        this.role = role;
     }
 
     /** Stateless call: no conversation chaining. */
     String call(String prompt) {
-        return callChained(prompt, null).text();
+        return call(prompt, "call");
+    }
+
+    String call(String prompt, String operation) {
+        return callChained(prompt, null, operation).text();
     }
 
     /**
@@ -48,33 +58,69 @@ final class FoundryModelInvoker {
      * maintains the full turn history server-side (no manual history re-injection).
      */
     ModelResponse callChained(String prompt, String previousResponseId) {
+        return callChained(prompt, previousResponseId, "call");
+    }
+
+    ModelResponse callChained(String prompt, String previousResponseId, String operation) {
+        long started = System.nanoTime();
         AgentReference agentRef = agentReference();
         ResponseCreateParams.Builder builder = ResponseCreateParams.builder().input(prompt);
         if (previousResponseId != null && !previousResponseId.isBlank()) {
             builder = builder.previousResponseId(previousResponseId);
         }
-        Response response = responsesClient.createAzureResponse(
+        try {
+            Response response = responsesClient.createAzureResponse(
                 new AzureCreateResponseOptions().setAgentReference(agentRef), builder);
-        return new ModelResponse(response.id(), extractText(response));
+            long input = response.usage().map(usage -> usage.inputTokens()).orElse(0L);
+            long output = response.usage().map(usage -> usage.outputTokens()).orElse(0L);
+            long total = response.usage().map(usage -> usage.totalTokens()).orElse(0L);
+            record(operation, elapsedMs(started), input, output, total, response.id(), true);
+            return new ModelResponse(response.id(), extractText(response), input, output, total);
+        } catch (RuntimeException e) {
+            record(operation, elapsedMs(started), 0, 0, 0, "", false);
+            throw e;
+        }
     }
 
     /** Streaming variant; invokes {@code onDelta} per token and returns the full concatenated text. */
     String callStream(String prompt, Consumer<String> onDelta) {
+        return callStream(prompt, onDelta, "stream");
+    }
+
+    String callStream(String prompt, Consumer<String> onDelta, String operation) {
+        long started = System.nanoTime();
         AgentReference agentRef = agentReference();
         ResponseCreateParams.Builder builder = ResponseCreateParams.builder().input(prompt);
         StringBuilder full = new StringBuilder();
         var stream = responsesClient.createStreamingAzureResponse(
                 new AzureCreateResponseOptions().setAgentReference(agentRef), builder);
-        for (var event : stream) {
-            event.outputTextDelta().ifPresent(delta -> {
-                String chunk = delta.delta();
-                if (chunk != null && !chunk.isEmpty()) {
-                    full.append(chunk);
-                    onDelta.accept(chunk);
-                }
-            });
+        try {
+            for (var event : stream) {
+                event.outputTextDelta().ifPresent(delta -> {
+                    String chunk = delta.delta();
+                    if (chunk != null && !chunk.isEmpty()) {
+                        full.append(chunk);
+                        onDelta.accept(chunk);
+                    }
+                });
+            }
+            record(operation, elapsedMs(started), 0, 0, 0, "", true);
+            return full.toString();
+        } catch (RuntimeException e) {
+            record(operation, elapsedMs(started), 0, 0, 0, "", false);
+            throw e;
         }
-        return full.toString();
+    }
+
+    private void record(String operation, long durationMs, long input, long output, long total,
+                        String responseId, boolean success) {
+        OrchestrationTelemetry telemetry = TelemetryContext.current();
+        if (telemetry != null) telemetry.record(role, agentName, operation, durationMs,
+                input, output, total, responseId, success);
+    }
+
+    private static long elapsedMs(long started) {
+        return (System.nanoTime() - started) / 1_000_000L;
     }
 
     private static String extractText(Response response) {

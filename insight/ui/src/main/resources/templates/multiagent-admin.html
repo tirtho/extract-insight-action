@@ -43,7 +43,7 @@
         </div>
         <div class="admin-table-wrap">
             <table class="admin-table">
-                <thead><tr><th>Agent</th><th>Role</th><th>Invocations</th><th>Share</th></tr></thead>
+                <thead><tr><th>Agent</th><th>Role</th><th>Invocations</th><th>Duration</th><th>Input</th><th>Output</th><th>Total</th><th>Share</th></tr></thead>
                 <tbody id="performanceRows"></tbody>
             </table>
         </div>
@@ -56,7 +56,7 @@
         </div>
         <div class="admin-table-wrap">
             <table class="admin-table">
-                <thead><tr><th>Request</th><th>Status</th><th>Prompt</th><th>Updated</th><th></th></tr></thead>
+                <thead><tr><th>Request</th><th>Status</th><th>Prompt</th><th>Duration</th><th>Tokens</th><th>Updated</th><th></th></tr></thead>
                 <tbody id="callRows"></tbody>
             </table>
         </div>
@@ -174,12 +174,15 @@
     });
 
     function renderPerformance(data) {
-        document.getElementById('orchestrationCount').textContent = (data.orchestrationCalls || 0) + ' orchestration calls';
+        document.getElementById('orchestrationCount').textContent = (data.orchestrationCalls || 0) + ' calls · '
+            + formatDuration(data.durationMs) + ' · ' + formatTokens(data.totalTokens) + ' tokens';
         document.getElementById('performanceRows').innerHTML = (data.agents || []).map(function (agent) {
             return '<tr><td><strong>' + escapeHtml(agent.agentType) + '</strong></td>'
                 + '<td>' + escapeHtml(agent.category) + '</td>'
-                + '<td>' + agent.invocations + '</td><td>' + agent.percentOfOrchestratorCalls + '%</td></tr>';
-        }).join('') || '<tr><td colspan="4" class="admin-empty">No performance data found.</td></tr>';
+                + '<td>' + agent.invocations + '</td><td>' + formatDuration(agent.durationMs) + '</td>'
+                + '<td>' + formatTokens(agent.inputTokens) + '</td><td>' + formatTokens(agent.outputTokens) + '</td>'
+                + '<td>' + formatTokens(agent.totalTokens) + '</td><td>' + agent.percentOfOrchestratorCalls + '%</td></tr>';
+        }).join('') || '<tr><td colspan="8" class="admin-empty">No performance data found.</td></tr>';
     }
 
     function renderCalls(calls) {
@@ -187,10 +190,21 @@
             return '<tr><td><code>' + escapeHtml(call.requestId) + '</code></td>'
                 + '<td>' + escapeHtml(call.status) + '</td>'
                 + '<td>' + escapeHtml(call.prompt || '') + '</td>'
+                + '<td>' + formatDuration(call.durationMs) + '</td>'
+                + '<td>' + formatTokens(call.totalTokens) + '</td>'
                 + '<td>' + formatDate(call.updatedAt) + '</td>'
                 + '<td><button class="admin-table-action" type="button" onclick="showGraph(\''
                 + escapeJs(call.requestId) + '\')">View graph</button></td></tr>';
-        }).join('') || '<tr><td colspan="5" class="admin-empty">No orchestration calls found.</td></tr>';
+        }).join('') || '<tr><td colspan="7" class="admin-empty">No orchestration calls found.</td></tr>';
+    }
+
+    function formatDuration(value) {
+        var milliseconds = Number(value || 0);
+        return milliseconds < 1000 ? Math.round(milliseconds) + ' ms' : (milliseconds / 1000).toFixed(1) + ' s';
+    }
+
+    function formatTokens(value) {
+        return Number(value || 0).toLocaleString();
     }
 
     async function showGraph(requestId) {
@@ -232,7 +246,7 @@
         var executionView = currentGraphView === 'execution';
         var width = executionView ? 1910 : 980;
         var nodeWidth = executionView ? 210 : 210;
-        var nodeHeight = 96;
+        var nodeHeight = 130;
         var gap = executionView ? 34 : 22;
         var maxRows = Math.max(columns.orchestrator.length, columns.task.length, columns.agent.length,
             columns.user.length, columns.aggregation.length, columns.response.length, 1);
@@ -277,11 +291,16 @@
             var position = positions[node.id];
             var label = svgTextLines(node.label || 'Unnamed', 24, 2);
             var detail = svgTextLines(node.description || node.status || '', 31, 1);
+            var metrics = node.invocations == null ? '' : node.invocations + ' calls  ' + formatDuration(node.durationMs);
+            var tokenMetrics = node.invocations == null ? '' : 'in ' + formatTokens(node.inputTokens)
+                + '  out ' + formatTokens(node.outputTokens) + '  total ' + formatTokens(node.totalTokens);
             return '<g class="graph-node graph-node-' + escapeHtml(node.kind) + '" transform="translate(' + position.x + ',' + position.y + ')" tabindex="0">'
                 + '<rect width="' + nodeWidth + '" height="' + nodeHeight + '" rx="12"></rect>'
                 + '<text class="graph-node-kind" x="14" y="19">' + escapeHtml(node.kind) + '</text>'
                 + '<text class="graph-node-label" x="14" y="41">' + label + '</text>'
-                + '<text class="graph-node-detail" x="14" y="82">' + detail + '</text></g>';
+                + '<text class="graph-node-detail" x="14" y="78">' + detail + '</text>'
+                + '<text class="graph-node-metrics" x="14" y="100">' + escapeHtml(metrics) + '</text>'
+                + '<text class="graph-node-metrics" x="14" y="114">' + escapeHtml(tokenMetrics) + '</text></g>';
         }).join('');
         document.getElementById('graphContent').innerHTML = '<svg class="admin-graph-svg' + (executionView ? ' admin-graph-svg-execution' : '') + '" viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="xMinYMin meet" aria-label="Task and agent orchestration graph">'
             + '<defs><marker id="graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>'

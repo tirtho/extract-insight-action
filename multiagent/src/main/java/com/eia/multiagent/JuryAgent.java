@@ -24,7 +24,7 @@ public class JuryAgent {
 
     public JuryAgent(String foundryEndpoint, String agentType, String agentVersion) {
         this.agentType = agentType;
-        this.model = new FoundryModelInvoker(foundryEndpoint, agentType, agentVersion);
+        this.model = new FoundryModelInvoker(foundryEndpoint, agentType, agentVersion, "jury");
     }
 
     public String getAgentType() { return agentType; }
@@ -33,7 +33,7 @@ public class JuryAgent {
     public JuryVerdict adjudicate(TaskNode task, Map<String, String> dependencyResults,
                                    List<CandidateOutput> candidates) {
         LOG.info("Jury adjudicating task '{}' among {} candidate(s).", task.getTaskId(), candidates.size());
-        String raw = model.call(buildPrompt(task, dependencyResults, candidates));
+        String raw = model.call(buildPrompt(task, dependencyResults, candidates), "jury-adjudication:" + task.getTaskId());
         return parseVerdict(raw, candidates);
     }
 

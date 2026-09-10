@@ -56,7 +56,7 @@ public class OrchestratorAgent implements AutoCloseable {
                               String orchestratorAgentName, String orchestratorAgentVersion,
                               String juryAgentName, String juryAgentVersion,
                               MultiAgentConfig config) {
-        this.model = new FoundryModelInvoker(foundryEndpoint, orchestratorAgentName, orchestratorAgentVersion);
+        this.model = new FoundryModelInvoker(foundryEndpoint, orchestratorAgentName, orchestratorAgentVersion, "orchestrator");
         this.jury = new JuryAgent(foundryEndpoint, juryAgentName, juryAgentVersion);
         this.config = config;
 
@@ -103,30 +103,33 @@ public class OrchestratorAgent implements AutoCloseable {
 
     public OrchestrationResult orchestrate(OrchestrationRequest request) {
         String requestId = UUID.randomUUID().toString();
+        OrchestrationTelemetry telemetry = new OrchestrationTelemetry();
+        TelemetryContext.set(telemetry);
         LOG.info("Orchestrating '{}': '{}'", requestId, truncate(request.prompt(), 80));
         try {
             String priorConversationId = loadConversationId(request.domainKey());
             persistOrchestrationState(requestId, OrchestrationResult.Status.PLANNING,
-                    request.prompt(), null, null);
+                    request.prompt(), null, null, telemetry);
             FoundryModelInvoker.ModelResponse plan = callPlanner(request.prompt(), priorConversationId);
             TaskGraph graph = parseGraphOrFallback(plan.text(), request.prompt());
             LOG.info("Planned {} task(s) for '{}'.", graph.getNodes().size(), requestId);
 
             if (request.preferAsync() && graph.getNodes().size() > ASYNC_TASK_THRESHOLD) {
-                persistOrchestrationState(requestId, OrchestrationResult.Status.EXECUTING, request.prompt(), graph.toJson(), null);
-                executor.submit(() -> runAsync(requestId, request, graph, plan.responseId()));
+                persistOrchestrationState(requestId, OrchestrationResult.Status.EXECUTING, request.prompt(), graph.toJson(), null, telemetry);
+                executor.submit(() -> runAsync(requestId, request, graph, plan.responseId(), telemetry));
+                TelemetryContext.clear();
                 return new OrchestrationResult(requestId).withStatus(OrchestrationResult.Status.PENDING);
             }
 
             MatchResult match = scoreAndMatch(graph);
             persistOrchestrationState(requestId, OrchestrationResult.Status.EXECUTING,
-                    request.prompt(), graph.toJson(), null);
+                    request.prompt(), graph.toJson(), null, telemetry);
             executeGraph(graph, match, null);
 
             FoundryModelInvoker.ModelResponse aggregated = callAggregator(graph, request.prompt(), plan.responseId());
             persistConversationId(request.domainKey(), aggregated.responseId());
             persistOrchestrationState(requestId, OrchestrationResult.Status.COMPLETED,
-                    request.prompt(), graph.toJson(), aggregated.text());
+                    request.prompt(), graph.toJson(), aggregated.text(), telemetry);
 
             return new OrchestrationResult(requestId)
                     .withTaskGraph(graph)
@@ -137,13 +140,15 @@ public class OrchestratorAgent implements AutoCloseable {
             LOG.error("Orchestration '{}' failed.", requestId, e);
             try {
                 persistOrchestrationState(requestId, OrchestrationResult.Status.FAILED,
-                        request.prompt(), null, e.getMessage());
+                        request.prompt(), null, e.getMessage(), telemetry);
             } catch (Exception persistError) {
                 LOG.error("Could not persist failed orchestration state for '{}'. "
                         + "Check the Function App identity and Storage Table Data Contributor role.",
                         requestId, persistError);
             }
             return new OrchestrationResult(requestId).failed(e.getMessage());
+        } finally {
+            if (TelemetryContext.current() == telemetry) TelemetryContext.clear();
         }
     }
 
@@ -153,17 +158,21 @@ public class OrchestratorAgent implements AutoCloseable {
 
     public String orchestrateAsync(OrchestrationRequest request) {
         String requestId = UUID.randomUUID().toString();
-        persistOrchestrationState(requestId, OrchestrationResult.Status.PENDING, request.prompt(), null, null);
+        OrchestrationTelemetry telemetry = new OrchestrationTelemetry();
+        persistOrchestrationState(requestId, OrchestrationResult.Status.PENDING, request.prompt(), null, null, telemetry);
         executor.submit(() -> {
+            TelemetryContext.set(telemetry);
             try {
                 String priorConversationId = loadConversationId(request.domainKey());
                 FoundryModelInvoker.ModelResponse plan = callPlanner(request.prompt(), priorConversationId);
                 TaskGraph graph = parseGraphOrFallback(plan.text(), request.prompt());
-                persistOrchestrationState(requestId, OrchestrationResult.Status.EXECUTING, request.prompt(), graph.toJson(), null);
-                runAsync(requestId, request, graph, plan.responseId());
+                persistOrchestrationState(requestId, OrchestrationResult.Status.EXECUTING, request.prompt(), graph.toJson(), null, telemetry);
+                runAsync(requestId, request, graph, plan.responseId(), telemetry);
             } catch (Exception e) {
                 LOG.error("Async planning '{}' failed.", requestId, e);
-                persistOrchestrationState(requestId, OrchestrationResult.Status.FAILED, request.prompt(), null, e.getMessage());
+                persistOrchestrationState(requestId, OrchestrationResult.Status.FAILED, request.prompt(), null, e.getMessage(), telemetry);
+            } finally {
+                TelemetryContext.clear();
             }
         });
         LOG.info("Async orchestration started, requestId='{}'.", requestId);
@@ -193,19 +202,23 @@ public class OrchestratorAgent implements AutoCloseable {
         }
     }
 
-    private void runAsync(String requestId, OrchestrationRequest request, TaskGraph graph, String planResponseId) {
+    private void runAsync(String requestId, OrchestrationRequest request, TaskGraph graph, String planResponseId,
+                          OrchestrationTelemetry telemetry) {
+        TelemetryContext.set(telemetry);
         try {
             MatchResult match = scoreAndMatch(graph);
             executeGraph(graph, match, updated ->
-                    persistOrchestrationState(requestId, OrchestrationResult.Status.EXECUTING, request.prompt(), updated.toJson(), null));
+                    persistOrchestrationState(requestId, OrchestrationResult.Status.EXECUTING, request.prompt(), updated.toJson(), null, telemetry));
 
             FoundryModelInvoker.ModelResponse aggregated = callAggregator(graph, request.prompt(), planResponseId);
             persistConversationId(request.domainKey(), aggregated.responseId());
-            persistOrchestrationState(requestId, OrchestrationResult.Status.COMPLETED, request.prompt(), graph.toJson(), aggregated.text());
+            persistOrchestrationState(requestId, OrchestrationResult.Status.COMPLETED, request.prompt(), graph.toJson(), aggregated.text(), telemetry);
             LOG.info("Async orchestration '{}' completed.", requestId);
         } catch (Exception e) {
             LOG.error("Async execution '{}' failed.", requestId, e);
-            persistOrchestrationState(requestId, OrchestrationResult.Status.FAILED, request.prompt(), null, e.getMessage());
+            persistOrchestrationState(requestId, OrchestrationResult.Status.FAILED, request.prompt(), null, e.getMessage(), telemetry);
+        } finally {
+            TelemetryContext.clear();
         }
     }
 
@@ -215,6 +228,8 @@ public class OrchestratorAgent implements AutoCloseable {
 
     public OrchestrationResult orchestrateStream(OrchestrationRequest request, Consumer<String> onDelta) {
         String requestId = UUID.randomUUID().toString();
+        OrchestrationTelemetry telemetry = new OrchestrationTelemetry();
+        TelemetryContext.set(telemetry);
         try {
             String priorConversationId = loadConversationId(request.domainKey());
             FoundryModelInvoker.ModelResponse plan = callPlanner(request.prompt(), priorConversationId);
@@ -223,7 +238,7 @@ public class OrchestratorAgent implements AutoCloseable {
             MatchResult match = scoreAndMatch(graph);
             executeGraph(graph, match, null);
 
-            String aggregatedText = model.callStream(buildAggregationPrompt(graph, request.prompt()), onDelta);
+            String aggregatedText = model.callStream(buildAggregationPrompt(graph, request.prompt()), onDelta, "aggregation-stream");
             // Streaming path doesn't expose a response id via the delta callback; re-chain a
             // lightweight follow-up isn't worth the extra call, so the conversation simply
             // continues from the plan response id for the next turn.
@@ -233,6 +248,8 @@ public class OrchestratorAgent implements AutoCloseable {
         } catch (Exception e) {
             LOG.error("Streaming orchestration '{}' failed.", requestId, e);
             return new OrchestrationResult(requestId).failed(e.getMessage());
+        } finally {
+            TelemetryContext.clear();
         }
     }
 
@@ -276,7 +293,7 @@ public class OrchestratorAgent implements AutoCloseable {
     // =========================================================================
 
     private FoundryModelInvoker.ModelResponse callPlanner(String prompt, String previousResponseId) {
-        return model.callChained(buildPlanningPrompt(prompt), previousResponseId);
+        return model.callChained(buildPlanningPrompt(prompt), previousResponseId, "planning");
     }
 
     private static String buildPlanningPrompt(String prompt) {
@@ -323,7 +340,7 @@ public class OrchestratorAgent implements AutoCloseable {
             return new MatchResult(direct, tied);
         }
 
-        String raw = model.call(buildMatchingPrompt(graph, registeredAgents));
+        String raw = model.call(buildMatchingPrompt(graph, registeredAgents), "matching");
         Map<String, List<ScoredCandidate>> scores = parseScores(raw, graph);
 
         double tieMargin = config.juryTieMargin();
@@ -438,7 +455,7 @@ public class OrchestratorAgent implements AutoCloseable {
             }
             List<Future<Void>> futures = runnable.stream().map(node -> {
                 node.setStatus(TaskStatus.IN_PROGRESS);
-                return executor.submit(() -> {
+                return submitWithTelemetry(() -> {
                     executeOneTask(node, graph, match);
                     return (Void) null;
                 });
@@ -482,7 +499,7 @@ public class OrchestratorAgent implements AutoCloseable {
 
         List<CandidateOutput> outputs = new ArrayList<>();
         List<Future<CandidateOutput>> futures = candidates.stream().map(agent ->
-                executor.submit(() -> {
+            submitWithTelemetry(() -> {
                     String out = executeWithRetry(() -> executeWorkerCall(node, agent, depResults), retries, retries);
                     return new CandidateOutput(agent.getAgentType(), out);
                 })).collect(Collectors.toList());
@@ -506,6 +523,18 @@ public class OrchestratorAgent implements AutoCloseable {
             node.setResult(verdict.finalResult());
         }
         node.setStatus(TaskStatus.COMPLETED);
+    }
+
+    private <T> Future<T> submitWithTelemetry(java.util.concurrent.Callable<T> task) {
+        OrchestrationTelemetry telemetry = TelemetryContext.current();
+        return executor.submit(() -> {
+            TelemetryContext.set(telemetry);
+            try {
+                return task.call();
+            } finally {
+                TelemetryContext.clear();
+            }
+        });
     }
 
     private static String executeWorkerCall(TaskNode node, WorkerAgent agent,
@@ -542,7 +571,7 @@ public class OrchestratorAgent implements AutoCloseable {
             prompt.append("\nContext from prerequisite tasks:\n");
             depResults.forEach((id, r) -> prompt.append("  [").append(id).append("]: ").append(r).append('\n'));
         }
-        return model.call(prompt.toString());
+        return model.call(prompt.toString(), "fallback-execution");
     }
 
     // =========================================================================
@@ -550,7 +579,7 @@ public class OrchestratorAgent implements AutoCloseable {
     // =========================================================================
 
     private FoundryModelInvoker.ModelResponse callAggregator(TaskGraph graph, String originalPrompt, String previousResponseId) {
-        return model.callChained(buildAggregationPrompt(graph, originalPrompt), previousResponseId);
+        return model.callChained(buildAggregationPrompt(graph, originalPrompt), previousResponseId, "aggregation");
     }
 
     private static String buildAggregationPrompt(TaskGraph graph, String originalPrompt) {
@@ -575,12 +604,20 @@ public class OrchestratorAgent implements AutoCloseable {
     // =========================================================================
 
     private void persistOrchestrationState(String requestId, OrchestrationResult.Status status,
-                                            String prompt, String graphJson, String responseOrError) {
+                                            String prompt, String graphJson, String responseOrError,
+                                            OrchestrationTelemetry telemetry) {
         TableEntity entity = new TableEntity("Orchestration", requestId);
         entity.addProperty("status", status.name());
         entity.addProperty("prompt", truncate(prompt, 1_000));
         entity.addProperty("updatedAt", Instant.now().toEpochMilli());
         entity.addProperty("expiresAt", Instant.now().plus(config.asyncStateTtlDays(), ChronoUnit.DAYS).toEpochMilli());
+        if (telemetry != null) {
+            entity.addProperty("telemetryDurationMs", telemetry.totalDurationMs());
+            entity.addProperty("telemetryInputTokens", telemetry.inputTokens());
+            entity.addProperty("telemetryOutputTokens", telemetry.outputTokens());
+            entity.addProperty("telemetryTotalTokens", telemetry.totalTokens());
+            entity.addProperty("telemetryJson", truncate(telemetry.toJson(), 30_000));
+        }
         if (graphJson != null) entity.addProperty("taskGraphJson", truncate(graphJson, 30_000));
         if (status == OrchestrationResult.Status.COMPLETED) entity.addProperty("response", responseOrError);
         else if (status == OrchestrationResult.Status.FAILED) entity.addProperty("error", responseOrError);
