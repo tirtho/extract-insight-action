@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Admin | Extract Insight Action</title>
+    <link rel="stylesheet" th:href="@{/app.css}">
+</head>
+<body>
+<main class="shell multiagent-admin-page">
+    <section class="top-banner admin-banner">
+        <div>
+            <div class="eyebrow">Extract Insight Action / Operations</div>
+            <h1>Agent Admin</h1>
+            <p>Live inventory, call activity, performance, and orchestration graphs.</p>
+        </div>
+        <div class="admin-toolbar">
+            <label for="sinceDays">Window</label>
+            <select id="sinceDays" class="admin-select">
+                <option value="7">7 days</option>
+                <option value="30" selected>30 days</option>
+                <option value="90">90 days</option>
+            </select>
+            <button class="admin-refresh" type="button" onclick="loadDashboard()">Refresh</button>
+            <button class="admin-close" type="button" onclick="window.close()">Close</button>
+        </div>
+    </section>
+
+    <p class="admin-status" id="adminStatus" role="status">Loading agent administration...</p>
+
+    <section class="admin-section" aria-labelledby="agentsHeading">
+        <div class="admin-section-heading">
+            <h2 id="agentsHeading">Configured agents</h2>
+            <p id="agentCount"></p>
+        </div>
+        <div class="admin-agent-grid" id="agentGrid"></div>
+    </section>
+
+    <section class="admin-section" aria-labelledby="performanceHeading">
+        <div class="admin-section-heading">
+            <h2 id="performanceHeading">Performance</h2>
+            <p id="orchestrationCount"></p>
+        </div>
+        <div class="admin-table-wrap">
+            <table class="admin-table">
+                <thead><tr><th>Agent</th><th>Role</th><th>Invocations</th><th>Share</th></tr></thead>
+                <tbody id="performanceRows"></tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="admin-section" aria-labelledby="callsHeading">
+        <div class="admin-section-heading">
+            <h2 id="callsHeading">Recent orchestration calls</h2>
+            <p>Choose a call to inspect its graph.</p>
+        </div>
+        <div class="admin-table-wrap">
+            <table class="admin-table">
+                <thead><tr><th>Request</th><th>Status</th><th>Prompt</th><th>Updated</th><th></th></tr></thead>
+                <tbody id="callRows"></tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="admin-graph-panel" id="graphPanel" aria-live="polite">
+        <div class="admin-graph-head">
+            <h3 id="graphTitle">Call graph</h3>
+            <button class="admin-close" type="button" onclick="closeGraph()">Hide</button>
+        </div>
+        <div class="admin-graph-toolbar">
+            <span><i class="graph-dot graph-dot-orchestrator"></i> Orchestrator</span>
+            <span><i class="graph-dot graph-dot-task"></i> Task</span>
+            <span><i class="graph-dot graph-dot-agent"></i> Agent</span>
+            <span><i class="graph-dot graph-dot-aggregation"></i> Aggregation</span>
+            <span><i class="graph-dot graph-dot-response"></i> Response / action</span>
+            <span class="admin-graph-summary" id="graphSummary"></span>
+        </div>
+        <div class="admin-graph-tabs" role="tablist" aria-label="Graph views">
+            <button class="admin-graph-tab is-active" id="dagTab" type="button" role="tab" aria-selected="true" onclick="selectGraphView('dag')">Task DAG</button>
+            <button class="admin-graph-tab" id="executionTab" type="button" role="tab" aria-selected="false" onclick="selectGraphView('execution')">Execution flow</button>
+        </div>
+        <div class="admin-graph" id="graphContent" role="img" aria-label="Orchestration call graph"></div>
+    </section>
+</main>
+<div class="admin-modal-backdrop" id="tasksModal" hidden onclick="closeTasksModal(event)">
+    <section class="admin-modal" role="dialog" aria-modal="true" aria-labelledby="tasksModalTitle" onclick="event.stopPropagation()">
+        <div class="admin-modal-head">
+            <div>
+                <span class="admin-agent-role">Worker tasks</span>
+                <h2 id="tasksModalTitle">Agent tasks</h2>
+            </div>
+            <button class="admin-close" type="button" onclick="closeTasksModal()" aria-label="Close tasks dialog">Close</button>
+        </div>
+        <div id="tasksModalContent"></div>
+    </section>
+</div>
+<script>
+    var agentTaskCatalog = [];
+    var currentGraphPayload = null;
+    var currentGraphView = 'dag';
+
+    async function loadDashboard() {
+        var sinceDays = document.getElementById('sinceDays').value;
+        setStatus('Refreshing agent administration...');
+        try {
+            var responses = await Promise.all([
+                fetch('/api/multiagent/admin/agents'),
+                fetch('/api/multiagent/admin/performance?sinceDays=' + sinceDays),
+                fetch('/api/multiagent/admin/calls?sinceDays=' + sinceDays)
+            ]);
+            var errors = [];
+            var agents = await readAdminResponse(responses[0], 'agents', errors);
+            var performance = await readAdminResponse(responses[1], 'performance', errors);
+            var calls = await readAdminResponse(responses[2], 'calls', errors);
+            if (agents) renderAgents(agents);
+            if (performance) renderPerformance(performance);
+            if (calls) renderCalls(calls.calls || []);
+            setStatus(errors.length ? errors.join(' ') : 'Updated just now.', errors.length > 0);
+        } catch (error) {
+            setStatus(error.message, true);
+        }
+    }
+
+    async function readAdminResponse(response, label, errors) {
+        var payload = await response.json().catch(function () { return {}; });
+        if (!response.ok) {
+            errors.push(label + ': ' + (payload.error || 'HTTP ' + response.status + '.'));
+            return null;
+        }
+        return payload;
+    }
+
+    function renderAgents(agents) {
+        document.getElementById('agentCount').textContent = agents.length + ' configured';
+        agentTaskCatalog = agents.map(function (agent) { return agent.tasks || []; });
+        document.getElementById('agentGrid').innerHTML = agents.map(function (agent) {
+            var chips = [];
+            if (agent.speed) chips.push(agent.speed);
+            if (agent.version) chips.push('v' + agent.version);
+            var agentIndex = agents.indexOf(agent);
+            var taskButton = agent.tasks ? '<button class="admin-chip admin-task-button" type="button" onclick="showAgentTasks(' + agentIndex + ')" aria-label="View tasks for ' + escapeHtml(agent.agentType || 'agent') + '">' + agent.tasks.length + ' task' + (agent.tasks.length === 1 ? '' : 's') + '</button>' : '';
+            return '<article class="admin-agent-card">'
+                + '<span class="admin-agent-role">' + escapeHtml(agent.role || 'Agent') + '</span>'
+                + '<h3>' + escapeHtml(agent.agentType || 'Unnamed agent') + '</h3>'
+                + '<p>' + escapeHtml(agent.description || '') + '</p>'
+                + '<div class="admin-agent-meta">' + chips.map(function (chip) {
+                    return '<span class="admin-chip">' + escapeHtml(chip) + '</span>';
+                }).join('') + taskButton + '</div></article>';
+        }).join('') || '<div class="admin-empty">No configured agents found.</div>';
+    }
+
+    function showAgentTasks(agentIndex) {
+        var agent = document.querySelectorAll('.admin-agent-card')[agentIndex];
+        var title = agent ? agent.querySelector('h3').textContent : 'Agent';
+        var tasks = agentTaskCatalog[agentIndex] || [];
+        document.getElementById('tasksModalTitle').textContent = title;
+        document.getElementById('tasksModalContent').innerHTML = tasks.length
+            ? '<ul class="admin-task-list">' + tasks.map(function (task) {
+                return '<li>' + escapeHtml(task) + '</li>';
+            }).join('') + '</ul>'
+            : '<div class="admin-empty">No tasks are configured for this worker.</div>';
+        document.getElementById('tasksModal').hidden = false;
+        document.body.classList.add('admin-modal-open');
+    }
+
+    function closeTasksModal(event) {
+        if (event && event.target !== event.currentTarget) return;
+        document.getElementById('tasksModal').hidden = true;
+        document.body.classList.remove('admin-modal-open');
+    }
+
+    document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') closeTasksModal();
+    });
+
+    function renderPerformance(data) {
+        document.getElementById('orchestrationCount').textContent = (data.orchestrationCalls || 0) + ' orchestration calls';
+        document.getElementById('performanceRows').innerHTML = (data.agents || []).map(function (agent) {
+            return '<tr><td><strong>' + escapeHtml(agent.agentType) + '</strong></td>'
+                + '<td>' + escapeHtml(agent.category) + '</td>'
+                + '<td>' + agent.invocations + '</td><td>' + agent.percentOfOrchestratorCalls + '%</td></tr>';
+        }).join('') || '<tr><td colspan="4" class="admin-empty">No performance data found.</td></tr>';
+    }
+
+    function renderCalls(calls) {
+        document.getElementById('callRows').innerHTML = calls.map(function (call) {
+            return '<tr><td><code>' + escapeHtml(call.requestId) + '</code></td>'
+                + '<td>' + escapeHtml(call.status) + '</td>'
+                + '<td>' + escapeHtml(call.prompt || '') + '</td>'
+                + '<td>' + formatDate(call.updatedAt) + '</td>'
+                + '<td><button class="admin-table-action" type="button" onclick="showGraph(\''
+                + escapeJs(call.requestId) + '\')">View graph</button></td></tr>';
+        }).join('') || '<tr><td colspan="5" class="admin-empty">No orchestration calls found.</td></tr>';
+    }
+
+    async function showGraph(requestId) {
+        setStatus('Loading graph...');
+        try {
+            var response = await fetch('/api/multiagent/admin/calls/' + encodeURIComponent(requestId) + '/graph');
+            var payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || 'Unable to load graph.');
+            document.getElementById('graphTitle').textContent = 'Call graph: ' + requestId;
+            currentGraphPayload = payload;
+            currentGraphView = 'dag';
+            updateGraphTabs();
+            renderGraph(payload);
+            document.getElementById('graphPanel').classList.add('is-visible');
+            setStatus('Graph loaded.');
+            document.getElementById('graphPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } catch (error) {
+            setStatus(error.message, true);
+        }
+    }
+
+    function closeGraph() {
+        document.getElementById('graphPanel').classList.remove('is-visible');
+    }
+
+    function renderGraph(payload) {
+        var graph = currentGraphView === 'execution' ? buildExecutionGraph(payload) : {
+            nodes: payload.nodes || [],
+            edges: payload.edges || []
+        };
+        var nodes = graph.nodes;
+        var edges = graph.edges;
+        if (!nodes.length) {
+            document.getElementById('graphContent').innerHTML = '<div class="admin-empty">No graph data available.</div>';
+            return;
+        }
+        var columns = {user: [], orchestrator: [], task: [], agent: [], aggregation: [], response: []};
+        nodes.forEach(function (node) { (columns[node.kind] || columns.agent).push(node); });
+        var executionView = currentGraphView === 'execution';
+        var width = executionView ? 1910 : 980;
+        var nodeWidth = executionView ? 210 : 210;
+        var nodeHeight = 96;
+        var gap = executionView ? 34 : 22;
+        var maxRows = Math.max(columns.orchestrator.length, columns.task.length, columns.agent.length,
+            columns.user.length, columns.aggregation.length, columns.response.length, 1);
+        var height = Math.max(executionView ? 260 : 230, 54 + maxRows * (nodeHeight + gap));
+        var positions = {};
+        var graphColumns = executionView
+            ? ['user', 'orchestrator', 'task', 'agent', 'aggregation', 'response']
+            : ['orchestrator', 'task', 'agent'];
+        var xPositions = executionView
+            ? [24, 354, 684, 1014, 1344, 1674]
+            : [24, 330, 710];
+        graphColumns.forEach(function (kind, column) {
+            var x = xPositions[column];
+            columns[kind].forEach(function (node, index) {
+                positions[node.id] = {x: x, y: 30 + index * (nodeHeight + gap)};
+            });
+        });
+        var edgeMarkup = edges.map(function (edge) {
+            var from = positions[edge.source], to = positions[edge.target];
+            if (!from || !to) return '';
+            var x1 = from.x + nodeWidth, y1 = from.y + nodeHeight / 2;
+            var x2 = to.x, y2 = to.y + nodeHeight / 2;
+            var reverse = x2 < x1;
+            var bend = Math.max(34, Math.abs(x2 - x1) * 0.42);
+            var path;
+            var labelX = (x1 + x2) / 2;
+            var labelY = (y1 + y2) / 2 - 18;
+            if (reverse) {
+                var loopY = Math.max(y1, y2) + nodeHeight / 2 + 28;
+                path = 'M ' + x1 + ' ' + y1 + ' C ' + (x1 + 28) + ' ' + y1 + ', ' + (x1 + 28) + ' ' + loopY + ', ' + ((x1 + x2) / 2) + ' ' + loopY
+                    + ' C ' + (x2 - 28) + ' ' + loopY + ', ' + (x2 - 28) + ' ' + y2 + ', ' + x2 + ' ' + y2;
+                labelY = loopY - 18;
+            } else {
+                path = 'M ' + x1 + ' ' + y1 + ' C ' + (x1 + bend) + ' ' + y1 + ', ' + (x2 - bend) + ' ' + y2 + ', ' + x2 + ' ' + y2;
+            }
+            var edgeLabel = String(edge.label || '');
+            var labelWidth = Math.max(48, edgeLabel.length * 6.8 + 20);
+            return '<path class="graph-edge' + (reverse ? ' graph-edge-reverse' : '') + '" d="' + path + '" marker-end="url(#graph-arrow)"></path>'
+                + (edgeLabel ? '<g class="graph-edge-label-group graph-edge-label-' + (executionView ? 'execution' : 'dag') + '" transform="translate(' + labelX + ',' + labelY + ')"><rect x="' + (-labelWidth / 2) + '" y="-10" width="' + labelWidth + '" height="20" rx="10"></rect><text class="graph-edge-label" x="0" y="0">' + escapeHtml(edgeLabel) + '</text></g>' : '');
+        }).join('');
+        var nodeMarkup = nodes.map(function (node) {
+            var position = positions[node.id];
+            var label = svgTextLines(node.label || 'Unnamed', 24, 2);
+            var detail = svgTextLines(node.description || node.status || '', 31, 1);
+            return '<g class="graph-node graph-node-' + escapeHtml(node.kind) + '" transform="translate(' + position.x + ',' + position.y + ')" tabindex="0">'
+                + '<rect width="' + nodeWidth + '" height="' + nodeHeight + '" rx="12"></rect>'
+                + '<text class="graph-node-kind" x="14" y="19">' + escapeHtml(node.kind) + '</text>'
+                + '<text class="graph-node-label" x="14" y="41">' + label + '</text>'
+                + '<text class="graph-node-detail" x="14" y="82">' + detail + '</text></g>';
+        }).join('');
+        document.getElementById('graphContent').innerHTML = '<svg class="admin-graph-svg' + (executionView ? ' admin-graph-svg-execution' : '') + '" viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="xMinYMin meet" aria-label="Task and agent orchestration graph">'
+            + '<defs><marker id="graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>'
+            + '<g class="graph-edge-paths">' + edgeMarkup.replace(/<g class="graph-edge-label[^>]*>[\s\S]*?<\/g>/g, '') + '</g><g>' + nodeMarkup + '</g><g class="graph-edge-labels">' + (edgeMarkup.match(/<g class="graph-edge-label[^>]*>[\s\S]*?<\/g>/g) || []).join('') + '</g></svg>';
+        document.getElementById('graphContent').scrollLeft = 0;
+        document.getElementById('graphSummary').textContent = nodes.length + ' nodes / ' + edges.length + ' edges';
+    }
+
+    function selectGraphView(view) {
+        if (!currentGraphPayload) return;
+        currentGraphView = view;
+        updateGraphTabs();
+        renderGraph(currentGraphPayload);
+    }
+
+    function updateGraphTabs() {
+        var dag = document.getElementById('dagTab');
+        var execution = document.getElementById('executionTab');
+        dag.classList.toggle('is-active', currentGraphView === 'dag');
+        execution.classList.toggle('is-active', currentGraphView === 'execution');
+        dag.setAttribute('aria-selected', currentGraphView === 'dag' ? 'true' : 'false');
+        execution.setAttribute('aria-selected', currentGraphView === 'execution' ? 'true' : 'false');
+    }
+
+    function buildExecutionGraph(payload) {
+        var sourceNodes = payload.nodes || [];
+        var sourceEdges = payload.edges || [];
+        var nodes = [
+            {id: 'caller', label: 'Calling user', kind: 'user', status: 'request'},
+            {id: 'aggregation', label: 'Aggregation', kind: 'aggregation', status: 'synthesises returned results'},
+            {id: 'response', label: 'Final response', kind: 'response', status: 'to calling user'}
+        ].concat(sourceNodes);
+        var edges = [
+            {source: 'caller', target: 'orchestrator', label: 'requests'},
+            {source: 'aggregation', target: 'response', label: 'returns'},
+            {source: 'orchestrator', target: 'aggregation', label: 'records outcomes'}
+        ];
+        var hasResult = sourceNodes.some(function (node) { return node.kind === 'task' && node.hasResult; });
+        if (hasResult) {
+            edges = edges.filter(function (edge) { return edge.source !== 'orchestrator' || edge.target !== 'aggregation'; });
+        }
+        sourceEdges.forEach(function (edge) {
+            if (edge.source === 'orchestrator' && edge.target.indexOf('task_') === 0) {
+                edges.push({source: edge.source, target: edge.target, label: 'dispatches'});
+            } else if (edge.source.indexOf('task_') === 0 && edge.target.indexOf('agent_') === 0) {
+                var task = sourceNodes.find(function (node) { return node.id === edge.source; });
+                edges.push({source: edge.source, target: edge.target, label: 'executes'});
+                if (task && task.hasResult) {
+                    edges.push({source: edge.target, target: 'aggregation', label: 'returns result'});
+                } else {
+                    edges.push({source: edge.target, target: 'response', label: 'side effect'});
+                }
+            }
+        });
+        return {nodes: nodes, edges: edges};
+    }
+
+    function svgTextLines(value, maxChars, maxLines) {
+        var words = String(value == null ? '' : value).trim().split(/\s+/).filter(Boolean);
+        if (!words.length) return '';
+        var lines = [];
+        var line = '';
+        words.forEach(function (word) {
+            while (word.length > maxChars) {
+                if (line) { lines.push(line); line = ''; }
+                lines.push(word.substring(0, maxChars));
+                word = word.substring(maxChars);
+            }
+            if (!word) return;
+            var candidate = line ? line + ' ' + word : word;
+            if (candidate.length > maxChars && line) {
+                lines.push(line);
+                line = word;
+            } else {
+                line = candidate;
+            }
+        });
+        if (line) lines.push(line);
+        var visible = lines.slice(0, maxLines);
+        if (lines.length > maxLines) {
+            visible[maxLines - 1] = visible[maxLines - 1].substring(0, Math.max(0, maxChars - 3)) + '...';
+        }
+        return visible.map(function (lineText, index) {
+            return '<tspan x="14" dy="' + (index === 0 ? 0 : 15) + '">' + escapeHtml(lineText) + '</tspan>';
+        }).join('');
+    }
+
+    function setStatus(message, isError) {
+        var status = document.getElementById('adminStatus');
+        status.textContent = message;
+        status.classList.toggle('admin-status-error', Boolean(isError));
+    }
+
+    function formatDate(value) {
+        return value ? new Date(Number(value)).toLocaleString() : 'Unknown';
+    }
+
+    function escapeHtml(value) {
+        return String(value == null ? '' : value).replace(/[&<>'"]/g, function (character) {
+            return {'&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'}[character];
+        });
+    }
+
+    function escapeJs(value) {
+        return String(value == null ? '' : value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    }
+
+    document.getElementById('sinceDays').addEventListener('change', loadDashboard);
+    loadDashboard();
+</script>
+</body>
+</html>

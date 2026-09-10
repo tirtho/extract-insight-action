@@ -23,13 +23,19 @@ final class FoundryModelInvoker {
 
     private final ResponsesClient responsesClient;
     private final String agentName;
+    private final String agentVersion;
 
     FoundryModelInvoker(String foundryEndpoint, String agentName) {
+        this(foundryEndpoint, agentName, null);
+    }
+
+    FoundryModelInvoker(String foundryEndpoint, String agentName, String agentVersion) {
         this.responsesClient = new AgentsClientBuilder()
                 .credential(new DefaultAzureCredentialBuilder().build())
                 .endpoint(foundryEndpoint)
                 .buildResponsesClient();
         this.agentName = agentName;
+        this.agentVersion = agentVersion;
     }
 
     /** Stateless call: no conversation chaining. */
@@ -42,7 +48,7 @@ final class FoundryModelInvoker {
      * maintains the full turn history server-side (no manual history re-injection).
      */
     ModelResponse callChained(String prompt, String previousResponseId) {
-        AgentReference agentRef = new AgentReference(agentName);
+        AgentReference agentRef = agentReference();
         ResponseCreateParams.Builder builder = ResponseCreateParams.builder().input(prompt);
         if (previousResponseId != null && !previousResponseId.isBlank()) {
             builder = builder.previousResponseId(previousResponseId);
@@ -54,7 +60,7 @@ final class FoundryModelInvoker {
 
     /** Streaming variant; invokes {@code onDelta} per token and returns the full concatenated text. */
     String callStream(String prompt, Consumer<String> onDelta) {
-        AgentReference agentRef = new AgentReference(agentName);
+        AgentReference agentRef = agentReference();
         ResponseCreateParams.Builder builder = ResponseCreateParams.builder().input(prompt);
         StringBuilder full = new StringBuilder();
         var stream = responsesClient.createStreamingAzureResponse(
@@ -79,5 +85,11 @@ final class FoundryModelInvoker {
                 .map(content -> content.outputText().map(t -> t.text()).orElse(""))
                 .filter(t -> !t.isBlank())
                 .collect(Collectors.joining("\n"));
+    }
+
+    private AgentReference agentReference() {
+        AgentReference reference = new AgentReference(agentName);
+        if (agentVersion != null && !agentVersion.isBlank()) reference.setVersion(agentVersion);
+        return reference;
     }
 }

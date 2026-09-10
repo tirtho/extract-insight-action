@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-agent Insight</title>
+    <link rel="stylesheet" th:href="@{/app.css}">
+    <meta name="_csrf" th:content="${_csrf.token}" th:if="${_csrf != null}"/>
+    <meta name="_csrf_header" th:content="${_csrf.headerName}" th:if="${_csrf != null}"/>
+</head>
+<body>
+<main class="shell multiagent-page">
+    <dialog class="body-dialog agent-chat-dialog" id="multiAgentChatDialog" open
+            th:attr="data-domain-key=${userLogin}">
+        <div class="body-dialog-head">
+            <div>
+                <h2>Multi-agent Insight</h2>
+                <p class="body-dialog-title">Ask the orchestrator to coordinate the expert agents.</p>
+            </div>
+            <button class="body-dialog-close" type="button" aria-label="Close multi-agent chat"
+                    onclick="window.close()">Close</button>
+        </div>
+        <div class="agent-chat-messages" id="multiAgentChatMessages"></div>
+        <div class="agent-chat-input-row">
+            <textarea id="multiAgentChatInput" class="agent-chat-input" rows="2"
+                      placeholder="Ask the multi-agent system... (Ctrl+Enter to send)"></textarea>
+            <button type="button" id="multiAgentChatSend" class="agent-chat-send"
+                    onclick="sendMultiAgentMessage()">Send</button>
+        </div>
+    </dialog>
+</main>
+<script>
+    var _multiAgentSending = false;
+
+    document.getElementById('multiAgentChatInput').addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+            sendMultiAgentMessage();
+        }
+    });
+
+    document.getElementById('multiAgentChatInput').focus();
+
+    async function sendMultiAgentMessage() {
+        if (_multiAgentSending) return;
+        var input = document.getElementById('multiAgentChatInput');
+        var send = document.getElementById('multiAgentChatSend');
+        var messages = document.getElementById('multiAgentChatMessages');
+        var prompt = input.value.trim();
+        if (!prompt) return;
+
+        _multiAgentSending = true;
+        send.disabled = true;
+        input.value = '';
+        appendMultiAgentMessage('user', prompt);
+        var thinking = appendMultiAgentThinking();
+        var csrfMeta = document.querySelector('meta[name="_csrf"]');
+        var csrfHeaderMeta = document.querySelector('meta[name="_csrf_header"]');
+        var headers = { 'Content-Type': 'application/json' };
+        if (csrfMeta && csrfHeaderMeta) {
+            headers[csrfHeaderMeta.getAttribute('content')] = csrfMeta.getAttribute('content');
+        }
+
+        try {
+            var dialog = document.getElementById('multiAgentChatDialog');
+            var response = await fetch('/api/multiagent/chat', {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify({
+                    prompt: prompt,
+                    domainKey: dialog.getAttribute('data-domain-key')
+                })
+            });
+            if (thinking) thinking.remove();
+            var payload = await response.json();
+            if (!response.ok) {
+                appendMultiAgentMessage('error', payload.error || ('Server error ' + response.status + '.'));
+            } else {
+                appendMultiAgentMessage('agent', payload.content || 'The orchestrator returned no content.');
+            }
+        } catch (error) {
+            if (thinking) thinking.remove();
+            appendMultiAgentMessage('error', 'Multi-agent request failed: ' + error.message);
+        } finally {
+            _multiAgentSending = false;
+            send.disabled = false;
+            input.focus();
+        }
+    }
+
+    function appendMultiAgentMessage(role, text) {
+        var messages = document.getElementById('multiAgentChatMessages');
+        var row = document.createElement('div');
+        row.className = 'chat-message ' + (role === 'user' ? 'chat-message-user' : 'chat-message-agent');
+        var bubble = document.createElement('div');
+        bubble.className = 'chat-bubble' + (role === 'error' ? ' chat-bubble-error' : '');
+        bubble.textContent = text;
+        row.appendChild(bubble);
+        messages.appendChild(row);
+        messages.scrollTop = messages.scrollHeight;
+    }
+
+    function appendMultiAgentThinking() {
+        var messages = document.getElementById('multiAgentChatMessages');
+        var row = document.createElement('div');
+        row.className = 'chat-message chat-message-agent';
+        row.innerHTML = '<div class="chat-bubble chat-thinking"><span class="chat-thinking-text">Coordinating</span>'
+            + '<span class="chat-thinking-dots"><span></span><span></span><span></span></span></div>';
+        messages.appendChild(row);
+        messages.scrollTop = messages.scrollHeight;
+        return row;
+    }
+</script>
+</body>
+</html>

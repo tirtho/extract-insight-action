@@ -155,6 +155,10 @@
                                         <include>Orchestrate/function.json</include>
                                         <include>Status/function.json</include>
                                         <include>ClearConversation/function.json</include>
+                                        <include>AdminAgents/function.json</include>
+                                        <include>AdminCalls/function.json</include>
+                                        <include>AdminPerformance/function.json</include>
+                                        <include>AdminCallGraph/function.json</include>
                                     </includes>
                                 </resource>
                             </resources>

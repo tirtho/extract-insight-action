@@ -69,6 +69,11 @@
                     <p th:if="${!isAuthenticated and !oidcEnabled}" class="profile-hint">Authentication is not configured for this environment.</p>
                 </div>
             </details>
+            <button class="agent-admin-btn" type="button" onclick="openMultiAgentAdmin()"
+                    aria-label="Open multi-agent administration" title="View agent administration">
+                <span aria-hidden="true">◈</span>
+                Agent Admin
+            </button>
         </div>
     </section>
 
@@ -1182,10 +1187,11 @@
     });
 
     function openMultiAgentChat() {
-        var dialog = document.getElementById('multiAgentChatDialog');
-        var input = document.getElementById('multiAgentChatInput');
-        if (dialog) dialog.showModal();
-        setTimeout(function () { if (input) input.focus(); }, 60);
+        window.open('/multiagent', '_blank', 'noopener,noreferrer');
+    }
+
+    function openMultiAgentAdmin() {
+        window.open('/multiagent/admin', '_blank', 'noopener,noreferrer');
     }
 
     async function sendMultiAgentMessage() {

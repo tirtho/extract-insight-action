@@ -94,7 +94,9 @@ strong, b {
 
 .banner-tools {
     display: flex;
+    flex-direction: column;
     align-items: center;
+    gap: 10px;
     flex-shrink: 0;
 }
 
@@ -1279,6 +1281,504 @@ strong, b {
     background: var(--accent-soft);
     border-color: rgba(11, 110, 79, 0.55);
     transform: translateY(-1px);
+}
+
+.agent-admin-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    width: 100%;
+    padding: 0.42rem 0.9rem;
+    border: 1px solid rgba(162, 74, 29, 0.32);
+    border-radius: 999px;
+    background: rgba(255, 252, 246, 0.82);
+    color: var(--warn);
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.agent-admin-btn:hover {
+    background: rgba(162, 74, 29, 0.1);
+    border-color: rgba(162, 74, 29, 0.55);
+    transform: translateY(-1px);
+}
+
+.multiagent-admin-page {
+    padding-top: 24px;
+}
+
+.admin-banner {
+    align-items: flex-end;
+}
+
+.admin-banner h1 {
+    margin-top: 6px;
+}
+
+.admin-banner p {
+    margin-top: 10px;
+    line-height: 1.35;
+}
+
+.admin-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.admin-select,
+.admin-refresh,
+.admin-close {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0.55rem 0.75rem;
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--ink);
+    font: inherit;
+    font-size: 0.82rem;
+}
+
+.admin-refresh,
+.admin-close {
+    cursor: pointer;
+    font-weight: 700;
+}
+
+.admin-refresh:hover,
+.admin-close:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.admin-status {
+    min-height: 1.25rem;
+    margin: 14px 2px 0;
+    color: var(--muted);
+    font-size: 0.84rem;
+}
+
+.admin-status-error {
+    color: var(--warn);
+}
+
+.admin-section {
+    margin-top: 22px;
+}
+
+.admin-section-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 14px;
+    margin-bottom: 10px;
+}
+
+.admin-section-heading h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.admin-section-heading p {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--muted);
+}
+
+.admin-agent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+}
+
+.admin-agent-card,
+.admin-table-wrap,
+.admin-graph-panel {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: rgba(255, 252, 246, 0.78);
+    box-shadow: 0 12px 28px rgba(28, 37, 35, 0.06);
+}
+
+.admin-agent-card {
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+}
+
+.admin-agent-card h3 {
+    margin: 0 0 4px;
+    font-size: 0.98rem;
+    overflow-wrap: anywhere;
+}
+
+.admin-agent-role {
+    display: inline-block;
+    margin-bottom: 10px;
+    color: var(--accent);
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.admin-agent-card p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.45;
+}
+
+.admin-agent-meta {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: auto;
+    padding-top: 14px;
+}
+
+.admin-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2rem;
+    padding: 0.25rem 0.45rem;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--muted);
+    font-size: 0.7rem;
+    line-height: 1.1;
+}
+
+.admin-task-button {
+    border-color: rgba(162, 74, 29, 0.35);
+    background: rgba(162, 74, 29, 0.06);
+    color: var(--accent);
+    font: inherit;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.admin-task-button:hover {
+    background: rgba(162, 74, 29, 0.12);
+    border-color: var(--accent);
+}
+
+.admin-modal-backdrop[hidden] {
+    display: none;
+}
+
+.admin-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    display: grid;
+    place-items: center;
+    padding: 20px;
+    background: rgba(24, 35, 31, 0.42);
+}
+
+.admin-modal-open {
+    overflow: hidden;
+}
+
+.admin-modal {
+    width: min(520px, 100%);
+    max-height: min(620px, 90vh);
+    overflow: auto;
+    padding: 20px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: #fffdf8;
+    box-shadow: 0 24px 60px rgba(28, 37, 35, 0.22);
+}
+
+.admin-modal-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+}
+
+.admin-modal-head .admin-agent-role {
+    margin-bottom: 4px;
+}
+
+.admin-modal-head h2 {
+    margin: 0;
+    font-size: 1.15rem;
+    overflow-wrap: anywhere;
+}
+
+.admin-task-list {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.admin-task-list li {
+    padding: 11px 13px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: rgba(244, 248, 245, 0.8);
+    color: var(--ink);
+    font-size: 0.84rem;
+    line-height: 1.4;
+}
+
+.admin-table-wrap {
+    overflow-x: auto;
+}
+
+.admin-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+}
+
+.admin-table th,
+.admin-table td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+    vertical-align: top;
+}
+
+.admin-table th {
+    color: var(--muted);
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.admin-table tr:last-child td {
+    border-bottom: 0;
+}
+
+.admin-table code {
+    color: var(--accent);
+    font-size: 0.76rem;
+}
+
+.admin-table-action {
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.admin-table-action:hover {
+    text-decoration: underline;
+}
+
+.admin-empty {
+    padding: 20px;
+    color: var(--muted);
+    font-size: 0.84rem;
+    text-align: center;
+}
+
+.admin-graph-panel {
+    display: none;
+    padding: 16px;
+}
+
+.admin-graph-panel.is-visible {
+    display: block;
+}
+
+.admin-graph-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.admin-graph-head h3 {
+    margin: 0;
+    font-size: 0.95rem;
+}
+
+.admin-graph {
+    margin: 0;
+    padding: 18px;
+    overflow: auto;
+    border: 1px solid #d8e3dc;
+    border-radius: 12px;
+    background: #f4f8f5;
+    min-height: 250px;
+}
+
+.admin-graph-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin: 0 0 10px;
+    color: var(--muted);
+    font-size: 0.72rem;
+}
+
+.admin-graph-toolbar span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.admin-graph-summary {
+    margin-left: auto;
+    font-weight: 700;
+}
+
+.admin-graph-tabs {
+    display: flex;
+    gap: 6px;
+    margin: 0 0 10px;
+    border-bottom: 1px solid var(--line);
+}
+
+.admin-graph-tab {
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 0.45rem 0.65rem;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.76rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.admin-graph-tab.is-active,
+.admin-graph-tab:hover {
+    border-bottom-color: var(--accent);
+    color: var(--accent);
+}
+
+.graph-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.graph-dot-orchestrator { background: #d97736; }
+.graph-dot-task { background: #287f70; }
+.graph-dot-agent { background: #5369a6; }
+.graph-dot-user { background: #7b8794; }
+.graph-dot-aggregation { background: #a24a1d; }
+.graph-dot-response { background: #0f7b4d; }
+
+.admin-graph-svg {
+    display: block;
+    width: 100%;
+    min-width: 760px;
+    height: auto;
+}
+
+.admin-graph-svg-execution {
+    min-width: 1850px;
+}
+
+.graph-edge {
+    fill: none;
+    stroke: #9bb3a9;
+    stroke-width: 1.8;
+}
+
+.graph-edge-reverse {
+    stroke: #6f8179;
+    stroke-dasharray: 5 4;
+}
+
+.graph-edge-label {
+    fill: #39584d;
+    font-size: 11px;
+    font-weight: 700;
+    dominant-baseline: middle;
+    text-anchor: middle;
+}
+
+.graph-edge-label-group rect {
+    fill: #f7faf8;
+    stroke: #c8d6cf;
+    stroke-width: 1;
+}
+
+.graph-edge-label-group {
+    pointer-events: none;
+}
+
+.graph-edge-label-dag rect {
+    fill: #ffffff;
+    stroke: #b9ccc3;
+}
+
+.graph-node rect {
+    stroke-width: 1.5;
+    filter: drop-shadow(0 4px 4px rgba(33, 55, 45, 0.08));
+}
+
+.graph-node-orchestrator rect { fill: #fff3e8; stroke: #d97736; }
+.graph-node-task rect { fill: #e8f5f0; stroke: #287f70; }
+.graph-node-agent rect { fill: #eef1fb; stroke: #5369a6; }
+.graph-node-user rect { fill: #f0f2f3; stroke: #7b8794; }
+.graph-node-aggregation rect { fill: #fff0e8; stroke: #a24a1d; }
+.graph-node-response rect { fill: #e9f6ee; stroke: #0f7b4d; }
+
+.graph-node-kind {
+    fill: #71817a;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+.graph-node-label {
+    fill: #21332d;
+    font-size: 13px;
+    font-weight: 700;
+    dominant-baseline: alphabetic;
+}
+
+.graph-node-detail {
+    fill: #71817a;
+    font-size: 10px;
+    dominant-baseline: alphabetic;
+}
+
+@media (max-width: 700px) {
+    .top-banner {
+        align-items: flex-start;
+    }
+
+    .banner-tools {
+        align-items: stretch;
+        min-width: 150px;
+    }
+
+    .admin-banner {
+        display: block;
+    }
+
+    .admin-toolbar {
+        justify-content: flex-start;
+        margin-top: 18px;
+    }
 }
 
 /* Override body-dialog defaults for the taller chat layout */

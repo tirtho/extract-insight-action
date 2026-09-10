@@ -45,18 +45,18 @@ public final class AgentProvisioning {
      * @param keyVaultUrl  Key Vault URL to read the Foundry project endpoint + model deployment from
      * @param instructions the prompt-agent instructions
      */
-    public static void createAgent(String agentName, String keyVaultUrl, String instructions) {
-        createAgent(agentName, keyVaultUrl, instructions, List.of());
+    public static String createAgent(String agentName, String keyVaultUrl, String instructions) {
+        return createAgent(agentName, keyVaultUrl, instructions, List.of());
     }
 
-    public static void createAgent(String agentName, String keyVaultUrl, String instructions,
+    public static String createAgent(String agentName, String keyVaultUrl, String instructions,
             String toolBindingReference, String toolBindingName, String toolDescription) {
         List<ToolBinding> bindings = toolBindingReference == null
             ? List.of() : List.of(new ToolBinding(toolBindingReference, toolBindingName, toolDescription, null));
-        createAgent(agentName, keyVaultUrl, instructions, bindings);
+        return createAgent(agentName, keyVaultUrl, instructions, bindings);
     }
 
-    public static void createAgent(String agentName, String keyVaultUrl, String instructions,
+    public static String createAgent(String agentName, String keyVaultUrl, String instructions,
             List<ToolBinding> toolBindings) {
         LOG.info("Starting '{}' agent provisioning", agentName);
         try (AzConnection connection = new AzConnection(keyVaultUrl)) {
@@ -105,6 +105,7 @@ public final class AgentProvisioning {
             AgentVersionDetails agentVersion = agentsClient.createAgentVersion(agentName, definition);
 
             LOG.info("Agent provisioned - name: {}, version: {}", agentVersion.getName(), agentVersion.getVersion());
+            return agentVersion.getVersion();
         } catch (Exception e) {
             LOG.error("Failed to provision agent '{}'", agentName, e);
             throw new RuntimeException("Failed to provision agent '" + agentName + "'", e);

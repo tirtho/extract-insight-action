@@ -62,6 +62,45 @@ public class MultiAgentChatService {
         }
     }
 
+    public String getAdmin(String path) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(adminEndpoint(path)))
+                    .timeout(Duration.ofSeconds(45))
+                    .header("Authorization", "Bearer " + getServiceToken())
+                    .GET()
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                String detail = response.body();
+                try {
+                    JsonNode payload = detail == null || detail.isBlank()
+                            ? objectMapper.createObjectNode() : objectMapper.readTree(detail);
+                    detail = payload.path("error").asText(detail);
+                } catch (Exception ignored) {
+                    // Keep the raw upstream body when it is not JSON.
+                }
+                throw new IllegalStateException("Multi-agent admin service returned HTTP "
+                        + response.statusCode() + (detail == null || detail.isBlank() ? "" : ": " + detail));
+            }
+            return response.body();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Multi-agent admin request was interrupted.", e);
+        } catch (Exception e) {
+            throw new IllegalStateException("Multi-agent admin request failed: " + e.getMessage(), e);
+        }
+    }
+
+    private String adminEndpoint(String path) {
+        String endpoint = requiredEnv("MULTI_AGENT_SERVICE_URL");
+        int apiIndex = endpoint.lastIndexOf("/api/");
+        if (apiIndex < 0) {
+            throw new IllegalStateException("MULTI_AGENT_SERVICE_URL must include the /api/ path.");
+        }
+        return endpoint.substring(0, apiIndex) + "/api/agent-admin/" + path;
+    }
+
     private String getServiceToken() {
         String clientId = requiredEnv("MULTI_AGENT_SERVICE_API_CLIENT_ID");
         AccessToken token = credential.getToken(new TokenRequestContext()

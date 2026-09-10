@@ -10,4 +10,9 @@ public class AppPageController {
     public String logoutSuccess() {
         return "logout-success";
     }
+
+    @GetMapping("/multiagent/admin")
+    public String multiagentAdmin() {
+        return "multiagent-admin";
+    }
 }

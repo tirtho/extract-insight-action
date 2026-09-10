@@ -19,8 +19,12 @@ public class JuryAgent {
     private final FoundryModelInvoker model;
 
     public JuryAgent(String foundryEndpoint, String agentType) {
+        this(foundryEndpoint, agentType, null);
+    }
+
+    public JuryAgent(String foundryEndpoint, String agentType, String agentVersion) {
         this.agentType = agentType;
-        this.model = new FoundryModelInvoker(foundryEndpoint, agentType);
+        this.model = new FoundryModelInvoker(foundryEndpoint, agentType, agentVersion);
     }
 
     public String getAgentType() { return agentType; }
@@ -121,9 +125,10 @@ public class JuryAgent {
         }
         String keyVaultUrl = args[0];
         String instructions = String.join(" ", java.util.Arrays.copyOfRange(args, 1, args.length));
-        AgentProvisioning.createAgent(DEFAULT_AGENT_NAME, keyVaultUrl, instructions);
+        String version = AgentProvisioning.createAgent(DEFAULT_AGENT_NAME, keyVaultUrl, instructions);
         try (com.core.az.AzConnection connection = new com.core.az.AzConnection(keyVaultUrl)) {
             connection.setSecret(com.core.az.AzEnvNames.KV_MULTIAGENT_JURY_AGENT_NAME, DEFAULT_AGENT_NAME);
+            connection.setSecret(com.core.az.AzEnvNames.KV_MULTIAGENT_JURY_AGENT_VERSION, version);
         }
     }
 

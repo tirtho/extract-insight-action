@@ -170,7 +170,9 @@ $AgentServiceSubnetAddressSpace = "10.100.0.0/24"
 # 3.deploy-agents.ps1 provisions the orchestrator/jury agents; matches MultiAgentConfig's
 # fallback values and AgentProvisioning's DEFAULT_AGENT_NAME constants.
 $MultiAgentOrchestratorAgentName = "MultiAgentOrchestrator"
+$MultiAgentOrchestratorAgentVersion = ""
 $MultiAgentJuryAgentName         = "MultiAgentJury"
+$MultiAgentJuryAgentVersion      = ""
 $MultiAgentJuryTieMargin         = "0.10"
 $MultiAgentJuryMinDispatchScore  = "0.6"
 $MultiAgentJuryMaxCandidates     = "3"
@@ -2899,7 +2901,9 @@ if ($rAgentSvc.ExitCode -ne 0) {
 # agent name secrets are overwritten by createAgent() with the same default values.
 $multiAgentSecrets = @{
     "MultiAgentOrchestratorAgentName" = $MultiAgentOrchestratorAgentName
+    "MultiAgentOrchestratorAgentVersion" = $MultiAgentOrchestratorAgentVersion
     "MultiAgentJuryAgentName"         = $MultiAgentJuryAgentName
+    "MultiAgentJuryAgentVersion"      = $MultiAgentJuryAgentVersion
     "MultiAgentJuryTieMargin"         = $MultiAgentJuryTieMargin
     "MultiAgentJuryMinDispatchScore"  = $MultiAgentJuryMinDispatchScore
     "MultiAgentJuryMaxCandidates"     = $MultiAgentJuryMaxCandidates

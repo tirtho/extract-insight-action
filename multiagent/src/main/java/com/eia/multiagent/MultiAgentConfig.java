@@ -2,6 +2,7 @@ package com.eia.multiagent;
 
 import com.core.az.AzConnection;
 import com.core.az.AzEnvNames;
+import com.azure.core.exception.ResourceNotFoundException;
 
 /**
  * Reads the framework's operational tunables from Key Vault once (via {@link AzConnection})
@@ -11,7 +12,9 @@ import com.core.az.AzEnvNames;
 public class MultiAgentConfig {
 
     private final String orchestratorAgentName;
+    private final String orchestratorAgentVersion;
     private final String juryAgentName;
+    private final String juryAgentVersion;
     private final double juryTieMargin;
     private final double juryMinDispatchScore;
     private final int juryMaxCandidates;
@@ -21,7 +24,9 @@ public class MultiAgentConfig {
 
     public MultiAgentConfig(AzConnection connection) {
         this.orchestratorAgentName = connection.getSecret(AzEnvNames.KV_MULTIAGENT_ORCHESTRATOR_AGENT_NAME);
+        this.orchestratorAgentVersion = optionalSecret(connection, AzEnvNames.KV_MULTIAGENT_ORCHESTRATOR_AGENT_VERSION);
         this.juryAgentName = connection.getSecret(AzEnvNames.KV_MULTIAGENT_JURY_AGENT_NAME);
+        this.juryAgentVersion = optionalSecret(connection, AzEnvNames.KV_MULTIAGENT_JURY_AGENT_VERSION);
         this.juryTieMargin = readDouble(connection, AzEnvNames.KV_JURY_TIE_MARGIN, 0.10);
         this.juryMinDispatchScore = readDouble(connection, AzEnvNames.KV_JURY_MIN_DISPATCH_SCORE, 0.6);
         this.juryMaxCandidates = readInt(connection, AzEnvNames.KV_JURY_MAX_CANDIDATES, 3);
@@ -31,7 +36,9 @@ public class MultiAgentConfig {
     }
 
     public String orchestratorAgentName() { return orchestratorAgentName; }
+    public String orchestratorAgentVersion() { return orchestratorAgentVersion; }
     public String juryAgentName() { return juryAgentName; }
+    public String juryAgentVersion() { return juryAgentVersion; }
     public double juryTieMargin() { return juryTieMargin; }
     public double juryMinDispatchScore() { return juryMinDispatchScore; }
     public int juryMaxCandidates() { return juryMaxCandidates; }
@@ -55,5 +62,10 @@ public class MultiAgentConfig {
         } catch (Exception e) {
             return fallback;
         }
+    }
+
+    private static String optionalSecret(AzConnection connection, String secretName) {
+        try { return connection.getSecret(secretName); }
+        catch (ResourceNotFoundException e) { return ""; }
     }
 }

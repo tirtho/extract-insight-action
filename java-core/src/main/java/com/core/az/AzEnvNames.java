@@ -44,7 +44,9 @@ public class AzEnvNames {
 
     // Multi-agent orchestration framework tunables (see MULTIAGENT_FRAMEWORK_DESIGN.md)
     public static final String KV_MULTIAGENT_ORCHESTRATOR_AGENT_NAME = "MultiAgentOrchestratorAgentName";
+    public static final String KV_MULTIAGENT_ORCHESTRATOR_AGENT_VERSION = "MultiAgentOrchestratorAgentVersion";
     public static final String KV_MULTIAGENT_JURY_AGENT_NAME = "MultiAgentJuryAgentName";
+    public static final String KV_MULTIAGENT_JURY_AGENT_VERSION = "MultiAgentJuryAgentVersion";
     public static final String KV_JURY_TIE_MARGIN = "MultiAgentJuryTieMargin";
     public static final String KV_JURY_MIN_DISPATCH_SCORE = "MultiAgentJuryMinDispatchScore";
     public static final String KV_JURY_MAX_CANDIDATES = "MultiAgentJuryMaxCandidates";

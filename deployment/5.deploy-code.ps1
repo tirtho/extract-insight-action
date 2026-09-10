@@ -1008,6 +1008,22 @@ foreach ($target in $targets) {
         --query "[].name" -o tsv 2>$null
     if ($funcList) {
         Write-Host "[SUCCESS] Discovered functions: $funcList" -ForegroundColor Green
+        if ($FunctionLabel -eq 'agent-service') {
+            $requiredAdminFunctions = @('AdminAgents', 'AdminCalls', 'AdminPerformance', 'AdminCallGraph')
+            $missingAdminFunctions = @($requiredAdminFunctions | Where-Object {
+                $functionName = $_
+                -not @($funcList | Where-Object {
+                    ([string]$_ -split '/')[-1] -eq $functionName
+                })
+            })
+            if ($missingAdminFunctions.Count -gt 0) {
+                Write-Host "[ERROR] Admin functions were not discovered: $($missingAdminFunctions -join ', ')" -ForegroundColor Red
+                Write-Host "[ERROR] The deployed package is missing admin metadata or the wrong Function App was targeted." -ForegroundColor Red
+                $deploymentErrors.Add($FunctionLabel)
+                continue
+            }
+            Write-Host "[SUCCESS] Admin functions discovered: $($requiredAdminFunctions -join ', ')" -ForegroundColor Green
+        }
     } else {
         Write-Host "[WARNING] No functions discovered yet. They may appear after the first cold start." -ForegroundColor Yellow
     }

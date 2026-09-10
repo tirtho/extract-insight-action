@@ -49,8 +49,15 @@ public class OrchestratorAgent implements AutoCloseable {
     public OrchestratorAgent(String foundryEndpoint, String storageTableEndpoint,
                               String orchestratorAgentName, String juryAgentName,
                               MultiAgentConfig config) {
-        this.model = new FoundryModelInvoker(foundryEndpoint, orchestratorAgentName);
-        this.jury = new JuryAgent(foundryEndpoint, juryAgentName);
+        this(foundryEndpoint, storageTableEndpoint, orchestratorAgentName, null, juryAgentName, null, config);
+    }
+
+    public OrchestratorAgent(String foundryEndpoint, String storageTableEndpoint,
+                              String orchestratorAgentName, String orchestratorAgentVersion,
+                              String juryAgentName, String juryAgentVersion,
+                              MultiAgentConfig config) {
+        this.model = new FoundryModelInvoker(foundryEndpoint, orchestratorAgentName, orchestratorAgentVersion);
+        this.jury = new JuryAgent(foundryEndpoint, juryAgentName, juryAgentVersion);
         this.config = config;
 
         TokenCredential credential = new DefaultAzureCredentialBuilder().build();
@@ -71,7 +78,8 @@ public class OrchestratorAgent implements AutoCloseable {
             String storageTableEndpoint = connection.getSecret(AzEnvNames.KV_STORAGE_TABLE_ENDPOINT);
             MultiAgentConfig config = new MultiAgentConfig(connection);
             return new OrchestratorAgent(foundryEndpoint, storageTableEndpoint,
-                    config.orchestratorAgentName(), config.juryAgentName(), config);
+                    config.orchestratorAgentName(), config.orchestratorAgentVersion(),
+                    config.juryAgentName(), config.juryAgentVersion(), config);
         }
     }
 
@@ -649,9 +657,10 @@ public class OrchestratorAgent implements AutoCloseable {
         }
         String keyVaultUrl = args[0];
         String instructions = String.join(" ", Arrays.copyOfRange(args, 1, args.length));
-        AgentProvisioning.createAgent(DEFAULT_AGENT_NAME, keyVaultUrl, instructions);
+        String version = AgentProvisioning.createAgent(DEFAULT_AGENT_NAME, keyVaultUrl, instructions);
         try (AzConnection connection = new AzConnection(keyVaultUrl)) {
             connection.setSecret(AzEnvNames.KV_MULTIAGENT_ORCHESTRATOR_AGENT_NAME, DEFAULT_AGENT_NAME);
+            connection.setSecret(AzEnvNames.KV_MULTIAGENT_ORCHESTRATOR_AGENT_VERSION, version);
         }
     }
 

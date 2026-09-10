@@ -98,6 +98,12 @@ public class EmailController {
         return "emails";
     }
 
+    @GetMapping("/multiagent")
+    public String multiagent(Authentication authentication, Model model) {
+        model.addAttribute("userLogin", resolveUserLogin(authentication));
+        return "multiagent";
+    }
+
     @PostMapping("/account/job-title")
     public String updateJobTitle(@RequestParam(value = "jobTitle", required = false) String jobTitle,
                                  Authentication authentication,
