@@ -55,7 +55,8 @@ $StorageAccountName = "st$ProjClean$Environment$Suffix"
 $FunctionApps = @(
     "func-mailbox-$ProjectName-$Environment-$Suffix",
     "func-queuedb-$ProjectName-$Environment-$Suffix",
-    "func-cuqueuedb-$ProjectName-$Environment-$Suffix"
+    "func-cuqueuedb-$ProjectName-$Environment-$Suffix",
+    "func-agentservice-$ProjectName-$Environment-$Suffix"
 )
 
 $DeployScriptPath = Join-Path $PSScriptRoot "5.deploy-code.ps1"

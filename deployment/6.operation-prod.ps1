@@ -288,6 +288,7 @@ $ServiceBusNamespace = "sb-$ProjectName-$Environment-$Suffix"
 $FuncMailboxName      = "func-mailbox-$ProjectName-$Environment-$Suffix"
 $FuncQueueDbName      = "func-queuedb-$ProjectName-$Environment-$Suffix"
 $FuncCuQueueDbName    = "func-cuqueuedb-$ProjectName-$Environment-$Suffix"
+$FuncAgentServiceName = "func-agentservice-$ProjectName-$Environment-$Suffix"
 $WebAppName           = "app-$ProjectName-$Environment-$Suffix"
 
 # --- Networking layout (single VNet, three subnets) ---
@@ -299,6 +300,8 @@ $SubnetAppService    = "snet-appservice"
 $SubnetAppServiceCidr = "10.0.2.0/24"
 $SubnetFunctions     = "snet-functions"
 $SubnetFunctionsCidr = "10.0.3.0/24"
+$AgentServiceVnetName = "vnet-agentservice-$ProjectName-$Environment-$Suffix"
+$AgentServiceSubnetName = "snet-agentservice"
 
 $FunctionApps = @($FuncMailboxName, $FuncQueueDbName, $FuncCuQueueDbName)
 
@@ -356,6 +359,9 @@ $KeyVaultId       = Get-AzValue @('keyvault','show','--name',$KeyVaultName,'--re
 $ContentUnderstandingId = Get-AzValue @('cognitiveservices','account','show','--name',$ContentUnderstandingName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')
 $AiFoundryId      = Get-AzValue @('cognitiveservices','account','show','--name',$AiFoundryName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')
 $ServiceBusId     = Get-AzValue @('servicebus','namespace','show','--name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')
+$AgentServiceId   = Get-AzValue @('functionapp','show','--name',$FuncAgentServiceName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')
+$AgentServiceVnetId = Get-AzValue @('network','vnet','show','--name',$AgentServiceVnetName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')
+$AgentServiceSubnetId = Get-AzValue @('network','vnet','subnet','show','--name',$AgentServiceSubnetName,'--vnet-name',$AgentServiceVnetName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')
 $TenantId         = Get-AzValue @('account','show','--query','tenantId','-o','tsv')
 
 foreach ($pair in @(
@@ -369,6 +375,12 @@ foreach ($pair in @(
     }
 }
 Write-Host "[OK] Core resources verified" -ForegroundColor Green
+
+if (-not $AgentServiceId -or -not $AgentServiceVnetId -or -not $AgentServiceSubnetId) {
+    Write-Host "[ERROR] Agent-service Function App/VNet/subnet not found. Run 1.deploy-infrastructure.ps1 first." -ForegroundColor Red
+    exit 1
+}
+Write-Host "[OK] Agent-service Function App and dedicated VNet verified" -ForegroundColor Green
 
 # Service Bus Premium is required for private endpoints / public-access lockdown.
 $ServiceBusSku = ''
@@ -420,12 +432,14 @@ if ($Rollback) {
     if ($AiFoundryId)          { $rbPeNames.Add("pe-foundry-$Environment-$Suffix") }
     if ($ContentUnderstandingId) { $rbPeNames.Add("pe-cu-$Environment-$Suffix") }
     if ($ServiceBusId -and $ServiceBusSupportsPrivate) { $rbPeNames.Add("pe-sb-$Environment-$Suffix") }
+    if ($AgentServiceId) { $rbPeNames.Add("pe-agentservice-$Environment-$Suffix") }
 
     $rbDnsZones = [System.Collections.Generic.List[string]]::new()
     foreach ($z in @('privatelink.blob.core.windows.net','privatelink.queue.core.windows.net',
         'privatelink.table.core.windows.net','privatelink.documents.azure.com',
         'privatelink.vaultcore.azure.net','privatelink.cognitiveservices.azure.com',
-        'privatelink.openai.azure.com','privatelink.services.ai.azure.com')) { $rbDnsZones.Add($z) }
+        'privatelink.openai.azure.com','privatelink.services.ai.azure.com',
+        'privatelink.azurewebsites.net')) { $rbDnsZones.Add($z) }
     if ($ServiceBusId -and $ServiceBusSupportsPrivate) { $rbDnsZones.Add('privatelink.servicebus.windows.net') }
 
     # --- R1: Re-enable public network access on backing resources ------------
@@ -473,6 +487,10 @@ if ($Rollback) {
         Invoke-AzCliSilent -Arguments @('functionapp','config','set','--name',$fa,'--resource-group',$ResourceGroupName,'--vnet-route-all-enabled','false','--output','none') | Out-Null
         Invoke-AzCliSilent -Arguments @('functionapp','vnet-integration','remove','--name',$fa,'--resource-group',$ResourceGroupName,'--output','none') | Out-Null
         Write-Host "  [SUCCESS] Function App '$fa' public inbound restored, VNet integration removed" -ForegroundColor Green
+    }
+    if ($AgentServiceId) {
+        Invoke-AzCliSilent -Arguments @('functionapp','update','--name',$FuncAgentServiceName,'--resource-group',$ResourceGroupName,'--set','publicNetworkAccess=Enabled','--output','none') | Out-Null
+        Write-Host "  [SUCCESS] Agent-service '$FuncAgentServiceName' public inbound restored" -ForegroundColor Green
     }
 
     $webAppExists = Get-AzValue @('webapp','show','--name',$WebAppName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
@@ -525,15 +543,20 @@ if ($Rollback) {
     # it still has a link), then wait for them to clear.
     $rbPendingLinks = [System.Collections.Generic.List[string]]::new()
     foreach ($zone in $rbExistingZones) {
-        $linkExists = Get-AzValue @('network','private-dns','link','vnet','show','--name',$linkName,'--zone-name',$zone,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
-        if ($linkExists) {
-            Invoke-AzCliSilent -Arguments @('network','private-dns','link','vnet','delete','--name',$linkName,'--zone-name',$zone,'--resource-group',$ResourceGroupName,'--yes','--no-wait','--output','none') | Out-Null
-            $rbPendingLinks.Add($zone)
+        foreach ($dnsLinkName in @($linkName, "link-$AgentServiceVnetName")) {
+            $linkExists = Get-AzValue @('network','private-dns','link','vnet','show','--name',$dnsLinkName,'--zone-name',$zone,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
+            if ($linkExists) {
+                Invoke-AzCliSilent -Arguments @('network','private-dns','link','vnet','delete','--name',$dnsLinkName,'--zone-name',$zone,'--resource-group',$ResourceGroupName,'--yes','--no-wait','--output','none') | Out-Null
+                $rbPendingLinks.Add("$dnsLinkName|$zone")
+            }
         }
     }
-    foreach ($zone in $rbPendingLinks) {
+    foreach ($pendingLink in $rbPendingLinks) {
+        $linkParts = $pendingLink -split '\|', 2
+        $dnsLinkName = $linkParts[0]
+        $zone = $linkParts[1]
         for ($attempt = 1; $attempt -le 20; $attempt++) {
-            $still = Get-AzValue @('network','private-dns','link','vnet','show','--name',$linkName,'--zone-name',$zone,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
+            $still = Get-AzValue @('network','private-dns','link','vnet','show','--name',$dnsLinkName,'--zone-name',$zone,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
             if (-not $still) { break }
             Start-Sleep -Seconds 5
         }
@@ -552,6 +575,13 @@ if ($Rollback) {
         Write-Host "  [SUCCESS] Deleted DNS zone '$zone' (and VNet link)" -ForegroundColor Green
     }
 
+    foreach ($peering in @(
+        @{ Vnet=$VnetName; Name="peer-$VnetName-to-$AgentServiceVnetName" },
+        @{ Vnet=$AgentServiceVnetName; Name="peer-$AgentServiceVnetName-to-$VnetName" })) {
+        Invoke-AzCliSilent -Arguments @('network','vnet','peering','delete','--name',$peering.Name,'--vnet-name',$peering.Vnet,'--resource-group',$ResourceGroupName,'--output','none') | Out-Null
+    }
+    Write-Host "  [SUCCESS] Removed main/agent-service VNet peering" -ForegroundColor Green
+
     # --- R5: Delete the VNet (removes all subnets) ---------------------------
     Write-Host ""
     Write-Host ">>> Rollback 5: Delete Virtual Network" -ForegroundColor White
@@ -563,6 +593,8 @@ if ($Rollback) {
     } else {
         Write-Host "  [OK] VNet '$VnetName' not present" -ForegroundColor Gray
     }
+
+    Write-Host "  [INFO] Preserved pre-existing agent-service VNet '$AgentServiceVnetName'" -ForegroundColor Cyan
 
     Write-Host ""
     Write-Host "[SUCCESS] Rollback complete. Platform restored to pre-hardening state." -ForegroundColor Green
@@ -728,6 +760,45 @@ if ($skipStep1) {
             '--delegations','Microsoft.App/environments','--output','none') | Out-Null
         $changes++
     }
+
+    $agentVnetExists = Get-AzValue @('network','vnet','show','--name',$AgentServiceVnetName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
+    $agentSubnetExists = Get-AzValue @('network','vnet','subnet','show','--name',$AgentServiceSubnetName,'--vnet-name',$AgentServiceVnetName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
+    if (-not $agentVnetExists -or -not $agentSubnetExists) {
+        Write-Host "  [ERROR] Existing agent-service VNet/subnet is missing; refusing to recreate or alter its delegated subnet." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  [OK] Agent-service VNet '$AgentServiceVnetName' and subnet '$AgentServiceSubnetName' already exist" -ForegroundColor Gray
+
+    foreach ($peering in @(
+        @{ Name="peer-$VnetName-to-$AgentServiceVnetName"; Vnet=$VnetName; Remote=$AgentServiceVnetId },
+        @{ Name="peer-$AgentServiceVnetName-to-$VnetName"; Vnet=$AgentServiceVnetName; Remote=(Get-AzValue @('network','vnet','show','--name',$VnetName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')) })) {
+        $existingPeering = Get-AzValue @('network','vnet','peering','show','--name',$peering.Name,'--vnet-name',$peering.Vnet,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
+        if ($existingPeering) {
+            Write-Host "  [OK] VNet peering '$($peering.Name)' already exists" -ForegroundColor Gray
+        } else {
+            Invoke-AzCliSilent -Arguments @('network','vnet','peering','create','--name',$peering.Name,'--vnet-name',$peering.Vnet,
+                '--resource-group',$ResourceGroupName,'--remote-vnet',$peering.Remote,'--allow-vnet-access','--output','none') | Out-Null
+            Write-Host "  [SUCCESS] Created VNet peering '$($peering.Name)'" -ForegroundColor Green
+            $changes++
+        }
+    }
+
+    $agentFaExists = Get-AzValue @('functionapp','show','--name',$FuncAgentServiceName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
+    if ($agentFaExists) {
+        $agentPeState = Get-AzValue @('network','private-endpoint','show','--name',"pe-agentservice-$Environment-$Suffix",'--resource-group',$ResourceGroupName,'--query','provisioningState','-o','tsv')
+        if ($agentPeState -ne 'Succeeded') {
+            Write-Host "  [ERROR] Agent-service private endpoint is not ready; leaving public inbound enabled." -ForegroundColor Red
+        } else {
+            $agentPublic = Get-AzValue @('functionapp','show','--name',$FuncAgentServiceName,'--resource-group',$ResourceGroupName,'--query','publicNetworkAccess','-o','tsv')
+            if ($agentPublic -eq 'Disabled') {
+                Write-Host "  [OK] Agent-service '$FuncAgentServiceName' public inbound already disabled" -ForegroundColor Gray
+            } else {
+                Invoke-AzCliSilent -Arguments @('functionapp','update','--name',$FuncAgentServiceName,'--resource-group',$ResourceGroupName,'--set','publicNetworkAccess=Disabled','--output','none') | Out-Null
+                Write-Host "  [SUCCESS] Agent-service '$FuncAgentServiceName' public inbound disabled" -ForegroundColor Green
+                $changes++
+            }
+        }
+    }
 }
 
 $PeSubnetId = Get-AzValue @('network','vnet','subnet','show','--name',$SubnetPe,'--vnet-name',$VnetName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')
@@ -745,7 +816,8 @@ $dnsZones = [System.Collections.Generic.List[string]]::new()
     'privatelink.vaultcore.azure.net',
     'privatelink.cognitiveservices.azure.com',
     'privatelink.openai.azure.com',
-    'privatelink.services.ai.azure.com'
+    'privatelink.services.ai.azure.com',
+    'privatelink.azurewebsites.net'
 ) | ForEach-Object { $dnsZones.Add($_) }
 if ($ServiceBusSupportsPrivate) { $dnsZones.Add('privatelink.servicebus.windows.net') }
 
@@ -758,6 +830,7 @@ if ($skipStep2) {
     Write-Host ">>> Step 2: Private DNS Zones + VNet links" -ForegroundColor White
 
     $linkName = "link-$VnetName"
+    $agentLinkName = "link-$AgentServiceVnetName"
 
     # --- Phase 1: ensure all DNS zones exist (fast control-plane metadata) ----
     foreach ($zone in $dnsZones) {
@@ -803,6 +876,18 @@ if ($skipStep2) {
             Write-Host "  [ERROR] VNet link for '$zone' did not provision" -ForegroundColor Red
         }
     }
+
+    foreach ($zone in $dnsZones) {
+        $existingAgentLink = Get-AzValue @('network','private-dns','link','vnet','show','--name',$agentLinkName,'--zone-name',$zone,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
+        if ($existingAgentLink) {
+            Write-Host "  [OK] Agent-service VNet link for '$zone' already exists" -ForegroundColor Gray
+        } else {
+            Invoke-AzCliSilent -Arguments @('network','private-dns','link','vnet','create','--name',$agentLinkName,'--zone-name',$zone,
+                '--resource-group',$ResourceGroupName,'--virtual-network',$AgentServiceVnetName,'--registration-enabled','false','--no-wait','--output','none') | Out-Null
+            Write-Host "  [SUCCESS] Submitted agent-service VNet link for '$zone'" -ForegroundColor Green
+            $changes++
+        }
+    }
 }
 
 # =============================================================================
@@ -825,6 +910,9 @@ if ($ContentUnderstandingId) {
 }
 if ($ServiceBusId -and $ServiceBusSupportsPrivate) {
     $peDefs.Add(@{ Name="pe-sb-$Environment-$Suffix"; ResourceId=$ServiceBusId; GroupId='namespace'; Zones=@('privatelink.servicebus.windows.net') })
+}
+if ($AgentServiceId) {
+    $peDefs.Add(@{ Name="pe-agentservice-$Environment-$Suffix"; ResourceId=$AgentServiceId; GroupId='sites'; Zones=@('privatelink.azurewebsites.net') })
 }
 
 if ($skipStep3) {

@@ -239,6 +239,7 @@ ServiceBusNamespace="sb-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}"
 FuncMailboxName="func-mailbox-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}"
 FuncQueueDbName="func-queuedb-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}"
 FuncCuQueueDbName="func-cuqueuedb-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}"
+FuncAgentServiceName="func-agentservice-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}"
 WebAppName="app-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}"
 
 # --- Networking layout (single VNet, three subnets) ---
@@ -250,6 +251,8 @@ SubnetAppService="snet-appservice"
 SubnetAppServiceCidr="10.0.2.0/24"
 SubnetFunctions="snet-functions"
 SubnetFunctionsCidr="10.0.3.0/24"
+AgentServiceVnetName="vnet-agentservice-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}"
+AgentServiceSubnetName="snet-agentservice"
 
 FUNCTION_APPS=("$FuncMailboxName" "$FuncQueueDbName" "$FuncCuQueueDbName")
 
@@ -309,6 +312,9 @@ KeyVaultId="$(az_value keyvault show --name "$KeyVaultName" --resource-group "$R
 ContentUnderstandingId="$(az_value cognitiveservices account show --name "$ContentUnderstandingName" --resource-group "$ResourceGroupName" --query id -o tsv)"
 AiFoundryId="$(az_value cognitiveservices account show --name "$AiFoundryName" --resource-group "$ResourceGroupName" --query id -o tsv)"
 ServiceBusId="$(az_value servicebus namespace show --name "$ServiceBusNamespace" --resource-group "$ResourceGroupName" --query id -o tsv)"
+AgentServiceId="$(az_value functionapp show --name "$FuncAgentServiceName" --resource-group "$ResourceGroupName" --query id -o tsv)"
+AgentServiceVnetId="$(az_value network vnet show --name "$AgentServiceVnetName" --resource-group "$ResourceGroupName" --query id -o tsv)"
+AgentServiceSubnetId="$(az_value network vnet subnet show --name "$AgentServiceSubnetName" --vnet-name "$AgentServiceVnetName" --resource-group "$ResourceGroupName" --query id -o tsv)"
 TenantId="$(az_value account show --query tenantId -o tsv)"
 
 for pair in "$StorageAccountName:$StorageAccountId" "$CosmosDbAccountName:$CosmosDbAccountId" "$KeyVaultName:$KeyVaultId"; do
@@ -320,6 +326,11 @@ for pair in "$StorageAccountName:$StorageAccountId" "$CosmosDbAccountName:$Cosmo
     fi
 done
 echo "[OK] Core resources verified"
+if [[ -z "$AgentServiceId" || -z "$AgentServiceVnetId" || -z "$AgentServiceSubnetId" ]]; then
+    echo "[ERROR] Agent-service Function App/VNet/subnet not found. Run 1.deploy-infrastructure.sh first." >&2
+    exit 1
+fi
+echo "[OK] Agent-service Function App and dedicated VNet verified"
 
 # Service Bus Premium is required for private endpoints / public-access lockdown.
 ServiceBusSku=""
@@ -373,6 +384,7 @@ if [[ $ROLLBACK -eq 1 ]]; then
     [[ -n "$AiFoundryId" ]]          && RB_PE_NAMES+=("pe-foundry-${ENVIRONMENT}-${SUFFIX}")
     [[ -n "$ContentUnderstandingId" ]] && RB_PE_NAMES+=("pe-cu-${ENVIRONMENT}-${SUFFIX}")
     [[ -n "$ServiceBusId" && $ServiceBusSupportsPrivate -eq 1 ]] && RB_PE_NAMES+=("pe-sb-${ENVIRONMENT}-${SUFFIX}")
+    [[ -n "$AgentServiceId" ]] && RB_PE_NAMES+=("pe-agentservice-${ENVIRONMENT}-${SUFFIX}")
 
     RB_DNS_ZONES=(
         'privatelink.blob.core.windows.net'
@@ -383,6 +395,7 @@ if [[ $ROLLBACK -eq 1 ]]; then
         'privatelink.cognitiveservices.azure.com'
         'privatelink.openai.azure.com'
         'privatelink.services.ai.azure.com'
+        'privatelink.azurewebsites.net'
     )
     [[ -n "$ServiceBusId" && $ServiceBusSupportsPrivate -eq 1 ]] && RB_DNS_ZONES+=('privatelink.servicebus.windows.net')
 
@@ -417,6 +430,10 @@ if [[ $ROLLBACK -eq 1 ]]; then
     if [[ -n "$ServiceBusId" && $ServiceBusSupportsPrivate -eq 1 ]]; then
         az servicebus namespace update --name "$ServiceBusNamespace" --resource-group "$ResourceGroupName" --public-network-access Enabled --output none 2>/dev/null || true
         echo "  [SUCCESS] Service Bus '$ServiceBusNamespace' public access restored"
+    fi
+    if [[ -n "$AgentServiceId" ]]; then
+        az functionapp update --name "$FuncAgentServiceName" --resource-group "$ResourceGroupName" --set publicNetworkAccess=Enabled --output none 2>/dev/null || true
+        echo "  [SUCCESS] Agent-service '$FuncAgentServiceName' public inbound restored"
     fi
 
     # --- R2: Restore Function inbound + remove VNet integration ---------------
@@ -469,6 +486,7 @@ if [[ $ROLLBACK -eq 1 ]]; then
     echo ">>> Rollback 4: Delete Private DNS Zones + Links"
 
     link_name="link-$VnetName"
+    agent_link_name="link-$AgentServiceVnetName"
 
     # Determine which zones actually exist, so we only act on those.
     RB_EXISTING_ZONES=()
@@ -485,19 +503,27 @@ if [[ $ROLLBACK -eq 1 ]]; then
     # it still has a link), then wait for them to clear.
     RB_PENDING_LINKS=()
     for zone in "${RB_EXISTING_ZONES[@]}"; do
-        link_exists="$(az_value network private-dns link vnet show --name "$link_name" --zone-name "$zone" --resource-group "$ResourceGroupName" --query name -o tsv)"
-        if [[ -n "$link_exists" ]]; then
-            az network private-dns link vnet delete --name "$link_name" --zone-name "$zone" --resource-group "$ResourceGroupName" --yes --no-wait --output none 2>/dev/null || true
-            RB_PENDING_LINKS+=("$zone")
-        fi
+        for dns_link_name in "$link_name" "$agent_link_name"; do
+            link_exists="$(az_value network private-dns link vnet show --name "$dns_link_name" --zone-name "$zone" --resource-group "$ResourceGroupName" --query name -o tsv)"
+            if [[ -n "$link_exists" ]]; then
+                az network private-dns link vnet delete --name "$dns_link_name" --zone-name "$zone" --resource-group "$ResourceGroupName" --yes --no-wait --output none 2>/dev/null || true
+                RB_PENDING_LINKS+=("$dns_link_name|$zone")
+            fi
+        done
     done
-    for zone in "${RB_PENDING_LINKS[@]}"; do
+    for pending_link in "${RB_PENDING_LINKS[@]}"; do
+        dns_link_name="${pending_link%%|*}"
+        zone="${pending_link#*|}"
         for ((attempt=1; attempt<=20; attempt++)); do
-            still="$(az_value network private-dns link vnet show --name "$link_name" --zone-name "$zone" --resource-group "$ResourceGroupName" --query name -o tsv)"
+            still="$(az_value network private-dns link vnet show --name "$dns_link_name" --zone-name "$zone" --resource-group "$ResourceGroupName" --query name -o tsv)"
             [[ -z "$still" ]] && break
             sleep 5
         done
     done
+
+    az network vnet peering delete --name "peer-$VnetName-to-$AgentServiceVnetName" --vnet-name "$VnetName" --resource-group "$ResourceGroupName" --output none 2>/dev/null || true
+    az network vnet peering delete --name "peer-$AgentServiceVnetName-to-$VnetName" --vnet-name "$AgentServiceVnetName" --resource-group "$ResourceGroupName" --output none 2>/dev/null || true
+    echo "  [SUCCESS] Removed main/agent-service VNet peering"
 
     # Phase 2: delete the now-unlinked zones in parallel, then wait.
     for zone in "${RB_EXISTING_ZONES[@]}"; do
@@ -523,6 +549,7 @@ if [[ $ROLLBACK -eq 1 ]]; then
     else
         echo "  [OK] VNet '$VnetName' not present"
     fi
+    echo "  [INFO] Preserved pre-existing agent-service VNet '$AgentServiceVnetName'"
 
     echo ""
     echo "[SUCCESS] Rollback complete. Platform restored to pre-hardening state."
@@ -696,6 +723,44 @@ else
             --delegations Microsoft.App/environments --output none 2>/dev/null || true
         ((CHANGES++)) || true
     fi
+
+    agent_vnet_exists="$(az_value network vnet show --name "$AgentServiceVnetName" --resource-group "$ResourceGroupName" --query name -o tsv)"
+    agent_subnet_exists="$(az_value network vnet subnet show --name "$AgentServiceSubnetName" --vnet-name "$AgentServiceVnetName" --resource-group "$ResourceGroupName" --query name -o tsv)"
+    if [[ -z "$agent_vnet_exists" || -z "$agent_subnet_exists" ]]; then
+        echo "[ERROR] Existing agent-service VNet/subnet is missing; refusing to recreate or alter its delegated subnet." >&2
+        exit 1
+    fi
+    main_vnet_id="$(az_value network vnet show --name "$VnetName" --resource-group "$ResourceGroupName" --query id -o tsv)"
+    for peering_name in "peer-$VnetName-to-$AgentServiceVnetName" "peer-$AgentServiceVnetName-to-$VnetName"; do
+        if [[ "$peering_name" == "peer-$VnetName-to-$AgentServiceVnetName" ]]; then
+            peering_vnet="$VnetName"; remote_vnet="$AgentServiceVnetId"
+        else
+            peering_vnet="$AgentServiceVnetName"; remote_vnet="$main_vnet_id"
+        fi
+        existing_peering="$(az_value network vnet peering show --name "$peering_name" --vnet-name "$peering_vnet" --resource-group "$ResourceGroupName" --query name -o tsv)"
+        if [[ -n "$existing_peering" ]]; then
+            echo "  [OK] VNet peering '$peering_name' already exists"
+        else
+            az network vnet peering create --name "$peering_name" --vnet-name "$peering_vnet" --resource-group "$ResourceGroupName" --remote-vnet "$remote_vnet" --allow-vnet-access --output none 2>/dev/null || true
+            echo "  [SUCCESS] Created VNet peering '$peering_name'"
+            ((CHANGES++)) || true
+        fi
+    done
+
+    agent_pe_name="pe-agentservice-${ENVIRONMENT}-${SUFFIX}"
+    agent_pe_state="$(az_value network private-endpoint show --name "$agent_pe_name" --resource-group "$ResourceGroupName" --query provisioningState -o tsv)"
+    if [[ "$agent_pe_state" == "Succeeded" ]]; then
+        agent_public="$(az_value functionapp show --name "$FuncAgentServiceName" --resource-group "$ResourceGroupName" --query publicNetworkAccess -o tsv)"
+        if [[ "$agent_public" == "Disabled" ]]; then
+            echo "  [OK] Agent-service '$FuncAgentServiceName' public inbound already disabled"
+        else
+            az functionapp update --name "$FuncAgentServiceName" --resource-group "$ResourceGroupName" --set publicNetworkAccess=Disabled --output none 2>/dev/null || true
+            echo "  [SUCCESS] Agent-service '$FuncAgentServiceName' public inbound disabled after PE succeeded"
+            ((CHANGES++)) || true
+        fi
+    else
+        echo "  [WARNING] Keeping agent-service '$FuncAgentServiceName' public inbound enabled because PE '$agent_pe_name' is not Succeeded (state='$agent_pe_state')"
+    fi
 fi
 
 PeSubnetId="$(az_value network vnet subnet show --name "$SubnetPe" --vnet-name "$VnetName" --resource-group "$ResourceGroupName" --query id -o tsv)"
@@ -712,6 +777,7 @@ DNS_ZONES=(
     'privatelink.cognitiveservices.azure.com'
     'privatelink.openai.azure.com'
     'privatelink.services.ai.azure.com'
+    'privatelink.azurewebsites.net'
 )
 [[ $ServiceBusSupportsPrivate -eq 1 ]] && DNS_ZONES+=('privatelink.servicebus.windows.net')
 
@@ -724,6 +790,7 @@ else
     echo ">>> Step 2: Private DNS Zones + VNet links"
 
     link_name="link-$VnetName"
+    agent_link_name="link-$AgentServiceVnetName"
 
     # --- Phase 1: ensure all DNS zones exist (fast control-plane metadata) ----
     for zone in "${DNS_ZONES[@]}"; do
@@ -769,6 +836,18 @@ else
             echo "  [ERROR] VNet link for '$zone' did not provision" >&2
         fi
     done
+
+    for zone in "${DNS_ZONES[@]}"; do
+        existing_agent_link="$(az_value network private-dns link vnet show --name "$agent_link_name" --zone-name "$zone" --resource-group "$ResourceGroupName" --query name -o tsv)"
+        if [[ -n "$existing_agent_link" ]]; then
+            echo "  [OK] Agent-service VNet link for '$zone' already exists"
+        else
+            az network private-dns link vnet create --name "$agent_link_name" --zone-name "$zone" \
+                --resource-group "$ResourceGroupName" --virtual-network "$AgentServiceVnetName" --registration-enabled false --no-wait --output none 2>/dev/null || true
+            echo "  [SUCCESS] Submitted agent-service VNet link for '$zone'"
+            ((CHANGES++)) || true
+        fi
+    done
 fi
 
 # =============================================================================
@@ -791,6 +870,9 @@ if [[ -n "$ContentUnderstandingId" ]]; then
 fi
 if [[ -n "$ServiceBusId" && $ServiceBusSupportsPrivate -eq 1 ]]; then
     add_pe "pe-sb-${ENVIRONMENT}-${SUFFIX}" "$ServiceBusId" "namespace" "privatelink.servicebus.windows.net"
+fi
+if [[ -n "$AgentServiceId" ]]; then
+    add_pe "pe-agentservice-${ENVIRONMENT}-${SUFFIX}" "$AgentServiceId" "sites" "privatelink.azurewebsites.net"
 fi
 
 # Names of PEs that have a backing resource id (for the readiness gate later).

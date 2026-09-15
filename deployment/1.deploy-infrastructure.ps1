@@ -2912,6 +2912,10 @@ $multiAgentSecrets = @{
     "MultiAgentAsyncStateTtlDays"     = $MultiAgentAsyncStateTtlDays
 }
 foreach ($entry in $multiAgentSecrets.GetEnumerator()) {
+    if ([string]::IsNullOrWhiteSpace([string]$entry.Value)) {
+        Write-Host "[INFO] Skipping empty optional Key Vault secret: $($entry.Key)" -ForegroundColor DarkCyan
+        continue
+    }
     $r = Invoke-AzCliSilent -Arguments @('keyvault','secret','set','--vault-name',$KeyVaultName,'--name',$entry.Key,'--value',$entry.Value,'--output','none')
     if ($r.ExitCode -ne 0) {
         Write-Host "[ERROR] Failed to set Key Vault secret: $($entry.Key)" -ForegroundColor Red

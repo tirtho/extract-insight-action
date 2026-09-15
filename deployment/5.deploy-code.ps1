@@ -42,9 +42,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
-$Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
-
 if ([string]::IsNullOrWhiteSpace($Environment)) {
     $EnvironmentInput = Read-Host "Enter environment [default: dev, example: dev]"
     $Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "dev" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
@@ -61,7 +58,7 @@ if ([string]::IsNullOrWhiteSpace($Suffix)) {
 
 $ProjectName = "eia"
 
-Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix" -ForegroundColor Cyan
 
 # =============================================================================
 # CONFIGURATION  (mirrors deploy-infrastructure.ps1 naming conventions)
