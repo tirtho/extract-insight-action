@@ -314,11 +314,11 @@ Write-Host "[OK] Resources verified" -ForegroundColor Green
 # =============================================================================
 if ($skipStep1) {
     Write-Host ""
-    Write-Host ">>> Step 1: Configure Network Access" -ForegroundColor White
+    Write-Host ">>> Step 1/4: Configure Network Access" -ForegroundColor White
     Write-Host "  [SKIPPED] Step 1 skipped by -SkipSteps" -ForegroundColor Yellow
 } else {
 Write-Host ""
-Write-Host ">>> Step 1: Configure Network Access" -ForegroundColor White
+Write-Host ">>> Step 1/4: Configure Network Access" -ForegroundColor White
 
 # Detect laptop public IP
 Write-Host "[INFO] Detecting your public IP address..." -ForegroundColor Cyan
@@ -444,11 +444,11 @@ if ($jobs.Count -gt 0) {
 # =============================================================================
 if ($skipStep2) {
 Write-Host ""
-Write-Host ">>> Step 2: Grant RBAC Roles to Current User" -ForegroundColor White
+Write-Host ">>> Step 2/4: Grant RBAC Roles to Current User" -ForegroundColor White
 Write-Host "  [SKIPPED] Step 2 skipped by -SkipSteps" -ForegroundColor Yellow
 } else {
 Write-Host ""
-Write-Host ">>> Step 2: Grant RBAC Roles to Current User" -ForegroundColor White
+Write-Host ">>> Step 2/4: Grant RBAC Roles to Current User" -ForegroundColor White
 
 # --- Gather resource IDs (quick reads) ---
 $StorageAccountId = (Invoke-AzCliSilent -Arguments @('storage','account','show','--name',$StorageAccountName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')).Output
@@ -568,11 +568,11 @@ foreach ($job in $rbacJobs) {
 # =============================================================================
 if ($skipStep3) {
 Write-Host ""
-Write-Host ">>> Step 3: Refresh Key Vault App Setting References" -ForegroundColor White
+Write-Host ">>> Step 3/4: Refresh Key Vault App Setting References" -ForegroundColor White
 Write-Host "  [SKIPPED] Step 3 skipped by -SkipSteps" -ForegroundColor Yellow
 } else {
 Write-Host ""
-Write-Host ">>> Step 3: Refresh Key Vault App Setting References" -ForegroundColor White
+Write-Host ">>> Step 3/4: Refresh Key Vault App Setting References" -ForegroundColor White
 
 $servicesWithKvRefs = @(
     @{ Type = 'functionapp'; Name = $FuncMailboxName },
@@ -596,11 +596,11 @@ foreach ($svc in $servicesWithKvRefs) {
 # =============================================================================
 if ($skipStep4) {
 Write-Host ""
-Write-Host ">>> Step 4: Ensure Graph Delegated Admin Consent (Web App)" -ForegroundColor White
+Write-Host ">>> Step 4/4: Ensure Graph Delegated Admin Consent (Web App)" -ForegroundColor White
 Write-Host "  [SKIPPED] Step 4 skipped by -SkipSteps" -ForegroundColor Yellow
 } else {
 Write-Host ""
-Write-Host ">>> Step 4: User Profile Storage (Key Vault)" -ForegroundColor White
+Write-Host ">>> Step 4/4: Ensure Graph Delegated Admin Consent (Web App)" -ForegroundColor White
 Write-Host "  [OK] User job titles are stored in Key Vault secret 'UserProfiles' as JSON keyed by email address." -ForegroundColor Green
 Write-Host "  [OK] No Entra custom role or Graph delegated consent is required for profile updates." -ForegroundColor Green
 }

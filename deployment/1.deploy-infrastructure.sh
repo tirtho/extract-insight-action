@@ -940,10 +940,17 @@ echo ""
 echo ">>> Step 5/12: Service Bus"
 if test_az_resource servicebus namespace show --name "$ServiceBusNamespace" \
         --resource-group "$ResourceGroupName" --query name -o tsv; then
-    echo "[WARNING] Service Bus namespace $ServiceBusNamespace already exists, skipping"
+    ExistingServiceBusSku=$(az servicebus namespace show --name "$ServiceBusNamespace" \
+        --resource-group "$ResourceGroupName" --query sku.name -o tsv 2>/dev/null || true)
+    if [[ "$ExistingServiceBusSku" == "Standard" ]]; then
+        echo "[WARNING] Service Bus namespace $ServiceBusNamespace is Standard and cannot be upgraded in place to Premium"
+        echo "          Create a new Premium namespace, migrate entities/messages, then update application configuration"
+    else
+        echo "[WARNING] Service Bus namespace $ServiceBusNamespace already exists with SKU '$ExistingServiceBusSku', skipping"
+    fi
 else
     if az servicebus namespace create --name "$ServiceBusNamespace" \
-            --resource-group "$ResourceGroupName" --location "$LocationServiceBus" --sku Standard \
+            --resource-group "$ResourceGroupName" --location "$LocationServiceBus" --sku Premium \
             --tags "project=$ProjectName" "environment=$Environment" "$SecurityControlTag" --output table; then
         echo "[SUCCESS] Service Bus namespace $ServiceBusNamespace created"
     else

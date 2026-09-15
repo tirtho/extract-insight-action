@@ -1057,12 +1057,18 @@ Write-Host ""
 Write-Host ">>> Step 5/12: Service Bus" -ForegroundColor White
 
 if (Test-AzResource -Arguments @('servicebus','namespace','show','--name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')) {
-    Write-Host "[WARNING] Service Bus namespace $ServiceBusNamespace already exists, skipping" -ForegroundColor Yellow
+    $existingServiceBusSku = (Invoke-AzCliSilent -Arguments @('servicebus','namespace','show','--name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','sku.name','-o','tsv')).Output
+    if ($existingServiceBusSku -eq 'Standard') {
+        Write-Host "[WARNING] Service Bus namespace $ServiceBusNamespace is Standard and cannot be upgraded in place to Premium." -ForegroundColor Yellow
+        Write-Host "          Create a new Premium namespace, migrate entities/messages, then update application configuration." -ForegroundColor Yellow
+    } else {
+        Write-Host "[WARNING] Service Bus namespace $ServiceBusNamespace already exists with SKU '$existingServiceBusSku', skipping" -ForegroundColor Yellow
+    }
 } else {
     $result = Invoke-AzCli -Description "Creating Service Bus namespace: $ServiceBusNamespace" `
         -Arguments @('servicebus','namespace','create','--name',$ServiceBusNamespace,
                      '--resource-group',$ResourceGroupName,'--location',$LocationServiceBus,
-                     '--sku','Standard',
+                     '--sku','Premium',
                      '--tags',"project=$ProjectName","environment=$Environment",$SecurityControlTag,'--output','table')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Service Bus namespace $ServiceBusNamespace created" -ForegroundColor Green

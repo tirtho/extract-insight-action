@@ -70,25 +70,30 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$LocationInput = Read-Host "Enter location [default: centralus, example: centralus]"
-$Location = if ([string]::IsNullOrWhiteSpace($LocationInput)) { "centralus" } else { $LocationInput.Trim().ToLowerInvariant() }
-
 if ([string]::IsNullOrWhiteSpace($Environment)) {
-    $EnvironmentInput = Read-Host "Enter environment [default: prod, example: prod]"
-    $Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "prod" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+    if (-not [string]::IsNullOrWhiteSpace($env:ENVIRONMENT)) {
+        $Environment = $env:ENVIRONMENT.Trim().ToLowerInvariant()
+    } else {
+        $EnvironmentInput = Read-Host "Enter environment [default: prod, example: prod]"
+        $Environment = if ([string]::IsNullOrWhiteSpace($EnvironmentInput)) { "prod" } else { $EnvironmentInput.Trim().ToLowerInvariant() }
+    }
 } else {
     $Environment = $Environment.Trim().ToLowerInvariant()
 }
 
 if ([string]::IsNullOrWhiteSpace($Suffix)) {
-    $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
-    $Suffix = if ([string]::IsNullOrWhiteSpace($SuffixInput)) { "1" } else { $SuffixInput.Trim() }
+    if (-not [string]::IsNullOrWhiteSpace($env:SUFFIX)) {
+        $Suffix = $env:SUFFIX.Trim()
+    } else {
+        $SuffixInput = Read-Host "Enter suffix [default: 1, example: 1]"
+        $Suffix = if ([string]::IsNullOrWhiteSpace($SuffixInput)) { "1" } else { $SuffixInput.Trim() }
+    }
 } else {
     $Suffix = $Suffix.Trim()
 }
 
 $ProjectNameForLog = if ($env:PROJECT_NAME) { $env:PROJECT_NAME } else { "eia" }
-Write-Host "[INFO] Deployment key: $ProjectNameForLog-$Environment-$Suffix (location: $Location)" -ForegroundColor Cyan
+Write-Host "[INFO] Deployment key: $ProjectNameForLog-$Environment-$Suffix" -ForegroundColor Cyan
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -279,12 +284,30 @@ $ProjectName        = if ($env:PROJECT_NAME) { $env:PROJECT_NAME } else { "eia" 
 $ProjClean          = $ProjectName -replace '-',''
 $StorageClean       = ($Suffix.ToLowerInvariant()) -replace '[^a-z0-9]',''
 $ResourceGroupName  = "rg-$ProjectName-$Environment-$Suffix"
+
+# Prefer the deployment environment's location. When this script is run in a
+# separate PowerShell process, discover it from the existing resource group.
+if (-not [string]::IsNullOrWhiteSpace($env:LOCATION)) {
+    $Location = $env:LOCATION.Trim().ToLowerInvariant()
+} else {
+    $discoveredLocation = ((& az group show --name $ResourceGroupName --query location --output tsv 2>$null) -join '').Trim()
+    $Location = $discoveredLocation.ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($Location)) {
+        throw "Could not determine the Azure location. Set LOCATION or verify that resource group '$ResourceGroupName' exists."
+    }
+}
+
+Write-Host "[INFO] Location: $Location" -ForegroundColor Cyan
 $StorageAccountName = "st$ProjClean$Environment$StorageClean"
 $CosmosDbAccountName = "cosmos-$ProjectName-$Environment-$Suffix"
 $ContentUnderstandingName = "cu-$ProjectName-$Environment-$Suffix"
 $AiFoundryName       = "oai-$ProjectName-$Environment-$Suffix"
 $KeyVaultName        = "kv-$ProjectName-$Environment-$Suffix"
-$ServiceBusNamespace = "sb-$ProjectName-$Environment-$Suffix"
+$ServiceBusNamespace = if (-not [string]::IsNullOrWhiteSpace($env:SERVICE_BUS_NAMESPACE)) {
+    $env:SERVICE_BUS_NAMESPACE.Trim()
+} else {
+    "sb-$ProjectName-$Environment-$Suffix"
+}
 $FuncMailboxName      = "func-mailbox-$ProjectName-$Environment-$Suffix"
 $FuncQueueDbName      = "func-queuedb-$ProjectName-$Environment-$Suffix"
 $FuncCuQueueDbName    = "func-cuqueuedb-$ProjectName-$Environment-$Suffix"
@@ -444,7 +467,7 @@ if ($Rollback) {
 
     # --- R1: Re-enable public network access on backing resources ------------
     Write-Host ""
-    Write-Host ">>> Rollback 1: Re-enable Public Network Access" -ForegroundColor White
+    Write-Host ">>> Rollback Step 1/5: Re-enable Public Network Access" -ForegroundColor White
 
     # Storage: drop the Content Understanding resource-instance rule, then open.
     if ($ContentUnderstandingId -and $TenantId) {
@@ -478,7 +501,7 @@ if ($Rollback) {
 
     # --- R2: Restore Function inbound + remove VNet integration ---------------
     Write-Host ""
-    Write-Host ">>> Rollback 2: Restore App Inbound + Remove VNet Integration" -ForegroundColor White
+    Write-Host ">>> Rollback Step 2/5: Restore App Inbound + Remove VNet Integration" -ForegroundColor White
 
     foreach ($fa in $FunctionApps) {
         $faExists = Get-AzValue @('functionapp','show','--name',$fa,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
@@ -502,7 +525,7 @@ if ($Rollback) {
 
     # --- R3: Delete private endpoints (also removes their DNS zone groups) ----
     Write-Host ""
-    Write-Host ">>> Rollback 3: Delete Private Endpoints" -ForegroundColor White
+    Write-Host ">>> Rollback Step 3/5: Delete Private Endpoints" -ForegroundColor White
 
     # Submit all PE deletes in parallel (--no-wait), then wait for them to clear.
     $rbPendingPe = [System.Collections.Generic.List[string]]::new()
@@ -527,7 +550,7 @@ if ($Rollback) {
 
     # --- R4: Delete private DNS VNet links + zones ----------------------------
     Write-Host ""
-    Write-Host ">>> Rollback 4: Delete Private DNS Zones + Links" -ForegroundColor White
+    Write-Host ">>> Rollback Step 4/5: Delete Private DNS Zones + Links" -ForegroundColor White
 
     $linkName = "link-$VnetName"
 
@@ -584,7 +607,7 @@ if ($Rollback) {
 
     # --- R5: Delete the VNet (removes all subnets) ---------------------------
     Write-Host ""
-    Write-Host ">>> Rollback 5: Delete Virtual Network" -ForegroundColor White
+    Write-Host ">>> Rollback Step 5/5: Delete Virtual Network" -ForegroundColor White
 
     $vnetExists = Get-AzValue @('network','vnet','show','--name',$VnetName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
     if ($vnetExists) {
@@ -708,11 +731,11 @@ if (-not $skipStep6) {
 # =============================================================================
 if ($skipStep1) {
     Write-Host ""
-    Write-Host ">>> Step 1: Virtual Network + Subnets" -ForegroundColor White
+    Write-Host ">>> Step 1/7: Virtual Network + Subnets" -ForegroundColor White
     Write-Host "  [SKIPPED] Step 1 skipped by -SkipSteps" -ForegroundColor Yellow
 } else {
     Write-Host ""
-    Write-Host ">>> Step 1: Virtual Network + Subnets" -ForegroundColor White
+    Write-Host ">>> Step 1/7: Virtual Network + Subnets" -ForegroundColor White
 
     # VNet
     $existingVnet = Get-AzValue @('network','vnet','show','--name',$VnetName,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')
@@ -823,11 +846,11 @@ if ($ServiceBusSupportsPrivate) { $dnsZones.Add('privatelink.servicebus.windows.
 
 if ($skipStep2) {
     Write-Host ""
-    Write-Host ">>> Step 2: Private DNS Zones + VNet links" -ForegroundColor White
+    Write-Host ">>> Step 2/7: Private DNS Zones + VNet links" -ForegroundColor White
     Write-Host "  [SKIPPED] Step 2 skipped by -SkipSteps" -ForegroundColor Yellow
 } else {
     Write-Host ""
-    Write-Host ">>> Step 2: Private DNS Zones + VNet links" -ForegroundColor White
+    Write-Host ">>> Step 2/7: Private DNS Zones + VNet links" -ForegroundColor White
 
     $linkName = "link-$VnetName"
     $agentLinkName = "link-$AgentServiceVnetName"
@@ -917,15 +940,15 @@ if ($AgentServiceId) {
 
 if ($skipStep3) {
     Write-Host ""
-    Write-Host ">>> Step 3: Private Endpoints" -ForegroundColor White
+    Write-Host ">>> Step 3/7: Private Endpoints" -ForegroundColor White
     Write-Host "  [SKIPPED] Step 3 skipped by -SkipSteps" -ForegroundColor Yellow
 } elseif (-not $PeSubnetId) {
     Write-Host ""
-    Write-Host ">>> Step 3: Private Endpoints" -ForegroundColor White
+    Write-Host ">>> Step 3/7: Private Endpoints" -ForegroundColor White
     Write-Host "  [ERROR] Private-endpoint subnet not found. Run Step 1 first." -ForegroundColor Red
 } else {
     Write-Host ""
-    Write-Host ">>> Step 3: Private Endpoints" -ForegroundColor White
+    Write-Host ">>> Step 3/7: Private Endpoints" -ForegroundColor White
 
     # --- Phase 1: submit all missing PE creates in parallel (--no-wait) -------
     # The private endpoints are independent, so we fire every create at once and
@@ -1017,11 +1040,11 @@ if ($skipStep3) {
 # =============================================================================
 if ($skipStep4) {
     Write-Host ""
-    Write-Host ">>> Step 4: VNet Integration + Functions Lockdown" -ForegroundColor White
+    Write-Host ">>> Step 4/7: VNet Integration + Functions Lockdown" -ForegroundColor White
     Write-Host "  [SKIPPED] Step 4 skipped by -SkipSteps" -ForegroundColor Yellow
 } else {
     Write-Host ""
-    Write-Host ">>> Step 4: VNet Integration + Functions Lockdown" -ForegroundColor White
+    Write-Host ">>> Step 4/7: VNet Integration + Functions Lockdown" -ForegroundColor White
 
     $AppSubnetId  = Get-AzValue @('network','vnet','subnet','show','--name',$SubnetAppService,'--vnet-name',$VnetName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')
     $FuncSubnetId = Get-AzValue @('network','vnet','subnet','show','--name',$SubnetFunctions,'--vnet-name',$VnetName,'--resource-group',$ResourceGroupName,'--query','id','-o','tsv')
@@ -1103,11 +1126,11 @@ if ($skipStep4) {
 # keep working once the public doors close. Step 6 can re-open a narrow hole.
 if ($skipStep5) {
     Write-Host ""
-    Write-Host ">>> Step 5: Disable Public Network Access" -ForegroundColor White
+    Write-Host ">>> Step 5/7: Disable Public Network Access" -ForegroundColor White
     Write-Host "  [SKIPPED] Step 5 skipped by -SkipSteps" -ForegroundColor Yellow
 } else {
     Write-Host ""
-    Write-Host ">>> Step 5: Disable Public Network Access" -ForegroundColor White
+    Write-Host ">>> Step 5/7: Disable Public Network Access" -ForegroundColor White
 
     # Storage
     # NOTE (Option A - trusted services): Content Understanding is a multi-tenant
@@ -1213,11 +1236,11 @@ if ($skipStep5) {
 # and then collect the background RBAC job.
 if ($skipStep6) {
     Write-Host ""
-    Write-Host ">>> Step 6: Local Testing Access" -ForegroundColor White
+    Write-Host ">>> Step 6/7: Local Testing Access" -ForegroundColor White
     Write-Host "  [SKIPPED] Step 6 skipped by -SkipSteps" -ForegroundColor Yellow
 } else {
     Write-Host ""
-    Write-Host ">>> Step 6: Local Testing Access (TESTING ONLY)" -ForegroundColor White
+    Write-Host ">>> Step 6/7: Local Testing Access (TESTING ONLY)" -ForegroundColor White
 
     if ($grantAccess) {
         Write-Host "  [INFO] GRANTING local testing access (IP: $MyPublicIp)" -ForegroundColor Cyan
@@ -1333,11 +1356,11 @@ if ($skipStep6) {
 # private endpoint. This kicks off that refresh and waits until they resolve.
 if ($skipStep7) {
     Write-Host ""
-    Write-Host ">>> Step 7: Refresh Key Vault App Setting References" -ForegroundColor White
+    Write-Host ">>> Step 7/7: Refresh Key Vault App Setting References" -ForegroundColor White
     Write-Host "  [SKIPPED] Step 7 skipped by -SkipSteps" -ForegroundColor Yellow
 } else {
     Write-Host ""
-    Write-Host ">>> Step 7: Refresh Key Vault App Setting References" -ForegroundColor White
+    Write-Host ">>> Step 7/7: Refresh Key Vault App Setting References" -ForegroundColor White
 
     # Readiness gate: ensure private endpoints are provisioned, approved, and the
     # Key Vault private DNS record exists before triggering the refresh. This
