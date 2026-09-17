@@ -70,8 +70,8 @@ if ($operation -eq '1') {
         if ([string]::IsNullOrWhiteSpace($AdminUsername)) { $AdminUsername = 'eiaadmin' }
     }
     if ([string]::IsNullOrWhiteSpace($AdminPassword)) {
-        $AdminPassword = Read-Host 'Enter the VM administrator password' -AsSecureString
-        $passwordBstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($AdminPassword)
+        $secureAdminPassword = Read-Host 'Enter the VM administrator password' -AsSecureString
+        $passwordBstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureAdminPassword)
         try { $AdminPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordBstr) }
         finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordBstr) }
     }
