@@ -26,6 +26,18 @@ public class AzEnvNames {
     public static final String KV_COSMOS_DB_ENDPOINT = "CosmosDbEndpoint";
     public static final String KV_COSMOS_DB_DATABASE_NAME = "CosmosDbDatabaseName";
     public static final String KV_COSMOS_DB_CONTAINER_NAME = "CosmosDbContainerName";
+    public static final String KV_COSMOS_DB_VECTOR_DIMENSIONS = "CosmosDbVectorDimensions";
+    public static final String KV_COSMOS_DB_LOCATION = "CosmosDbLocation";
+
+    // Multi-mailbox support (see MailboxRegistry / CosmosProvisioner)
+    public static final String KV_SUBSCRIPTION_ID = "SubscriptionId";
+    public static final String KV_RESOURCE_GROUP_NAME = "ResourceGroupName";
+    public static final String KV_PROJECT_NAME = "ProjectName";
+    public static final String KV_ENVIRONMENT_NAME = "EnvironmentName";
+    public static final String KV_RESOURCE_SUFFIX = "ResourceSuffix";
+    public static final String KV_MAILBOX_FUNCTION_PRINCIPAL_ID = "MailboxFunctionPrincipalId";
+    public static final String KV_QUEUE_DB_FUNCTION_PRINCIPAL_ID = "QueueDbFunctionPrincipalId";
+    public static final String KV_ADDITIONAL_MAILBOXES = "AdditionalMailboxes";
     public static final String KV_CONTENT_UNDERSTANDING_ENDPOINT = "ContentUnderstandingEndpoint";
     public static final String KV_CONTENT_UNDERSTANDING_COMPLETION_MODEL = "ContentUnderstandingCompletionModel";
     public static final String KV_CONTENT_UNDERSTANDING_ANALYZERS = "ContentUnderstandingAnalyzers";

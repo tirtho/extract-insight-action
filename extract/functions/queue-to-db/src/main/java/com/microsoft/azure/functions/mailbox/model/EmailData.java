@@ -9,6 +9,7 @@ import java.util.List;
 public class EmailData {
     private String graphMessageId;
     private String internetMessageId;
+    private String mailboxAddress;
     private String subject;
     private String fromAddress;
     private String fromName;
@@ -26,6 +27,9 @@ public class EmailData {
 
     public String getInternetMessageId() { return internetMessageId; }
     public void setInternetMessageId(String internetMessageId) { this.internetMessageId = internetMessageId; }
+
+    public String getMailboxAddress() { return mailboxAddress; }
+    public void setMailboxAddress(String mailboxAddress) { this.mailboxAddress = mailboxAddress; }
 
     public String getSubject() { return subject; }
     public void setSubject(String subject) { this.subject = subject; }

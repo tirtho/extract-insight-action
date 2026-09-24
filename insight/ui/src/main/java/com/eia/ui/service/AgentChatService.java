@@ -3,6 +3,7 @@ package com.eia.ui.service;
 import com.azure.identity.DefaultAzureCredentialBuilder;
 import com.azure.security.keyvault.secrets.SecretClientBuilder;
 import com.core.az.AzEnvNames;
+import com.core.az.EnvSanitizer;
 import com.microsoft.azure.agents.EmailReviewAgent;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
@@ -133,10 +134,10 @@ public class AgentChatService {
                 .buildClient();
 
         if (foundryEndpoint == null) {
-            foundryEndpoint = kv.getSecret(AzEnvNames.KV_AI_FOUNDRY_PROJECT_ENDPOINT).getValue();
+            foundryEndpoint = EnvSanitizer.sanitize(kv.getSecret(AzEnvNames.KV_AI_FOUNDRY_PROJECT_ENDPOINT).getValue());
         }
         if (tableEndpoint == null) {
-            tableEndpoint = kv.getSecret(AzEnvNames.KV_STORAGE_TABLE_ENDPOINT).getValue();
+            tableEndpoint = EnvSanitizer.sanitize(kv.getSecret(AzEnvNames.KV_STORAGE_TABLE_ENDPOINT).getValue());
         }
 
         LOG.info("Building EmailReviewAgent from Key Vault: {}", kvUrl);
@@ -144,7 +145,7 @@ public class AgentChatService {
     }
 
     private static String env(String name) {
-        String v = System.getenv(name);
+        String v = EnvSanitizer.sanitize(System.getenv(name));
         return (v != null && !v.isBlank()) ? v : null;
     }
 

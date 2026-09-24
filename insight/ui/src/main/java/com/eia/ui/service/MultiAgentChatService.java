@@ -70,26 +70,65 @@ public class MultiAgentChatService {
                     .header("Authorization", "Bearer " + getServiceToken())
                     .GET()
                     .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                String detail = response.body();
-                try {
-                    JsonNode payload = detail == null || detail.isBlank()
-                            ? objectMapper.createObjectNode() : objectMapper.readTree(detail);
-                    detail = payload.path("error").asText(detail);
-                } catch (Exception ignored) {
-                    // Keep the raw upstream body when it is not JSON.
-                }
-                throw new IllegalStateException("Multi-agent admin service returned HTTP "
-                        + response.statusCode() + (detail == null || detail.isBlank() ? "" : ": " + detail));
-            }
-            return response.body();
+            return sendAdmin(request);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Multi-agent admin request was interrupted.", e);
         } catch (Exception e) {
             throw new IllegalStateException("Multi-agent admin request failed: " + e.getMessage(), e);
         }
+    }
+
+    public String postAdmin(String path, String jsonBody) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(adminEndpoint(path)))
+                    .timeout(Duration.ofSeconds(45))
+                    .header("Authorization", "Bearer " + getServiceToken())
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(jsonBody == null ? "{}" : jsonBody))
+                    .build();
+            return sendAdmin(request);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Multi-agent admin request was interrupted.", e);
+        } catch (Exception e) {
+            throw new IllegalStateException("Multi-agent admin request failed: " + e.getMessage(), e);
+        }
+    }
+
+    public String deleteAdmin(String path) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(adminEndpoint(path)))
+                    .timeout(Duration.ofSeconds(45))
+                    .header("Authorization", "Bearer " + getServiceToken())
+                    .DELETE()
+                    .build();
+            return sendAdmin(request);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Multi-agent admin request was interrupted.", e);
+        } catch (Exception e) {
+            throw new IllegalStateException("Multi-agent admin request failed: " + e.getMessage(), e);
+        }
+    }
+
+    private String sendAdmin(HttpRequest request) throws Exception {
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            String detail = response.body();
+            try {
+                JsonNode payload = detail == null || detail.isBlank()
+                        ? objectMapper.createObjectNode() : objectMapper.readTree(detail);
+                detail = payload.path("error").asText(detail);
+            } catch (Exception ignored) {
+                // Keep the raw upstream body when it is not JSON.
+            }
+            throw new IllegalStateException("Multi-agent admin service returned HTTP "
+                    + response.statusCode() + (detail == null || detail.isBlank() ? "" : ": " + detail));
+        }
+        return response.body();
     }
 
     private String adminEndpoint(String path) {
@@ -113,7 +152,7 @@ public class MultiAgentChatService {
     }
 
     private static String requiredEnv(String name) {
-        String value = System.getenv(name);
+        String value = com.core.az.EnvSanitizer.sanitize(System.getenv(name));
         if (value == null || value.isBlank()) {
             throw new IllegalStateException(name + " is not configured.");
         }

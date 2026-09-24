@@ -28,6 +28,12 @@
 
     <p class="admin-status" id="adminStatus" role="status">Loading agent administration...</p>
 
+    <nav class="admin-tabs" role="tablist" aria-label="Admin sections">
+        <button class="admin-tab is-active" id="tabButtonAgents" type="button" role="tab" aria-selected="true" onclick="selectTab('agents')">Agents</button>
+        <button class="admin-tab" id="tabButtonMailboxes" type="button" role="tab" aria-selected="false" onclick="selectTab('mailboxes')">Mailboxes</button>
+    </nav>
+
+    <div id="tabPanelAgents" class="admin-tab-panel is-active">
     <section class="admin-section" aria-labelledby="agentsHeading">
         <div class="admin-section-heading">
             <h2 id="agentsHeading">Configured agents</h2>
@@ -81,6 +87,30 @@
         </div>
         <div class="admin-graph" id="graphContent" role="img" aria-label="Orchestration call graph"></div>
     </section>
+    </div>
+
+    <div id="tabPanelMailboxes" class="admin-tab-panel">
+    <section class="admin-section" aria-labelledby="mailboxesHeading">
+        <div class="admin-section-heading">
+            <h2 id="mailboxesHeading">Mailboxes</h2>
+            <p>Each additional mailbox is polled alongside the default mailbox and stores its extracted emails in its own isolated Cosmos DB instance.</p>
+        </div>
+        <form class="admin-mailbox-form" onsubmit="return addMailbox(event)">
+            <label for="newMailboxAddress">Add mailbox (same tenant/domain only)</label>
+            <div class="admin-mailbox-form-row">
+                <input type="email" id="newMailboxAddress" placeholder="name@yourtenant.com" required>
+                <button class="admin-refresh" type="submit">Add mailbox</button>
+            </div>
+        </form>
+        <p class="admin-status" id="mailboxStatus" role="status"></p>
+        <div class="admin-table-wrap">
+            <table class="admin-table">
+                <thead><tr><th>Email address</th><th>Type</th><th>Status</th><th>Cosmos account</th><th>Created</th><th></th></tr></thead>
+                <tbody id="mailboxRows"></tbody>
+            </table>
+        </div>
+    </section>
+    </div>
 </main>
 <div class="admin-modal-backdrop" id="tasksModal" hidden onclick="closeTasksModal(event)">
     <section class="admin-modal" role="dialog" aria-modal="true" aria-labelledby="tasksModalTitle" onclick="event.stopPropagation()">
@@ -406,6 +436,86 @@
 
     function escapeJs(value) {
         return String(value == null ? '' : value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    }
+
+    function selectTab(tab) {
+        var isAgents = tab === 'agents';
+        document.getElementById('tabButtonAgents').classList.toggle('is-active', isAgents);
+        document.getElementById('tabButtonMailboxes').classList.toggle('is-active', !isAgents);
+        document.getElementById('tabButtonAgents').setAttribute('aria-selected', String(isAgents));
+        document.getElementById('tabButtonMailboxes').setAttribute('aria-selected', String(!isAgents));
+        document.getElementById('tabPanelAgents').classList.toggle('is-active', isAgents);
+        document.getElementById('tabPanelMailboxes').classList.toggle('is-active', !isAgents);
+        if (!isAgents) loadMailboxes();
+    }
+
+    async function loadMailboxes() {
+        setStatus('Loading mailboxes...');
+        try {
+            var response = await fetch('/api/multiagent/admin/mailboxes');
+            var payload = await readAdminResponse(response, 'mailboxes', []);
+            renderMailboxes(payload || []);
+            setStatus('Updated just now.');
+        } catch (error) {
+            setStatus(error.message, true);
+        }
+    }
+
+    function renderMailboxes(mailboxes) {
+        document.getElementById('mailboxRows').innerHTML = mailboxes.map(function (mailbox) {
+            var deleteButton = mailbox.isDefault ? ''
+                : '<button class="admin-table-action" type="button" onclick="deleteMailbox(\'' + escapeJs(mailbox.emailAddress) + '\')">Remove</button>';
+            var status = mailbox.status + (mailbox.errorMessage ? ' (' + escapeHtml(mailbox.errorMessage) + ')' : '');
+            return '<tr><td>' + escapeHtml(mailbox.emailAddress) + '</td>'
+                + '<td>' + (mailbox.isDefault ? 'Default' : 'Additional') + '</td>'
+                + '<td>' + escapeHtml(status) + '</td>'
+                + '<td>' + escapeHtml(mailbox.cosmosAccountName || '') + '</td>'
+                + '<td>' + formatDate(mailbox.createdAt ? Date.parse(mailbox.createdAt) : null) + '</td>'
+                + '<td>' + deleteButton + '</td></tr>';
+        }).join('') || '<tr><td colspan="6" class="admin-empty">No mailboxes found.</td></tr>';
+    }
+
+    async function addMailbox(event) {
+        event.preventDefault();
+        var input = document.getElementById('newMailboxAddress');
+        var emailAddress = input.value.trim();
+        if (!emailAddress) return false;
+        var status = document.getElementById('mailboxStatus');
+        status.textContent = 'Adding mailbox...';
+        status.classList.remove('admin-status-error');
+        try {
+            var response = await fetch('/api/multiagent/admin/mailboxes', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({emailAddress: emailAddress})
+            });
+            var payload = await response.json().catch(function () { return {}; });
+            if (!response.ok) throw new Error(payload.error || 'Unable to add mailbox.');
+            input.value = '';
+            status.textContent = 'Mailbox registered; provisioning its Cosmos DB instance in the background.';
+            loadMailboxes();
+        } catch (error) {
+            status.textContent = error.message;
+            status.classList.add('admin-status-error');
+        }
+        return false;
+    }
+
+    async function deleteMailbox(emailAddress) {
+        if (!confirm('Remove mailbox ' + emailAddress + '? Its Cosmos DB instance and all extracted data will be deleted.')) return;
+        var status = document.getElementById('mailboxStatus');
+        status.textContent = 'Removing mailbox...';
+        status.classList.remove('admin-status-error');
+        try {
+            var response = await fetch('/api/multiagent/admin/mailboxes/' + encodeURIComponent(emailAddress), {method: 'DELETE'});
+            var payload = await response.json().catch(function () { return {}; });
+            if (!response.ok) throw new Error(payload.error || 'Unable to remove mailbox.');
+            status.textContent = 'Mailbox removal in progress.';
+            loadMailboxes();
+        } catch (error) {
+            status.textContent = error.message;
+            status.classList.add('admin-status-error');
+        }
     }
 
     document.getElementById('sinceDays').addEventListener('change', loadDashboard);

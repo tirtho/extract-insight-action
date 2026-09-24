@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Builds and provisions Azure AI Foundry agents.
@@ -184,8 +184,17 @@ function Invoke-MavenPackage {
         Write-NewLogContent -Path $stdoutLog -LineCount ([ref]$stdoutLineCount)
         Write-NewLogContent -Path $stderrLog -LineCount ([ref]$stderrLineCount)
 
-        if ($process.ExitCode -ne 0) {
-            throw "Maven build failed for $Label with exit code $($process.ExitCode)."
+        # Process.ExitCode (and even StartTime/ProcessName) can come back blank on this
+        # machine once the process has exited, with no exception raised — the handle
+        # loses query rights before we read it. Maven's own "BUILD SUCCESS"/"BUILD
+        # FAILURE" banner in the captured output is the reliable signal instead.
+        $stdoutText = if (Test-Path $stdoutLog) { Get-Content $stdoutLog -Raw -ErrorAction SilentlyContinue } else { $null }
+        if ($stdoutText -match 'BUILD SUCCESS') {
+            # Build succeeded regardless of what the process handle reports.
+        } elseif ($stdoutText -match 'BUILD FAILURE' -or $process.ExitCode -ne 0) {
+            throw "Maven build failed for $Label (exit code: $($process.ExitCode))."
+        } else {
+            throw "Maven build for $Label ended without a BUILD SUCCESS/BUILD FAILURE marker; treating as failed (exit code: $($process.ExitCode))."
         }
     } finally {
         Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue

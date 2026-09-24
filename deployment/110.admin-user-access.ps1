@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
 	Creates/ensures an Entra ID security group and adds internal tenant users to it.

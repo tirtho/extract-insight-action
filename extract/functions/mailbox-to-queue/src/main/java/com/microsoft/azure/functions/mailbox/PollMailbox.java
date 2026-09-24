@@ -22,8 +22,10 @@ import java.util.List;
 import com.core.az.*;
 
 /**
- * Azure Function that polls an email mailbox and sends email metadata to Azure Service Bus.
- * This function runs on a timer trigger based on the configured interval.
+ * Azure Function that polls one or more email mailboxes (the default mailbox
+ * configured at deployment time, plus any additional mailboxes registered via
+ * the Admin UI) and sends email metadata to Azure Service Bus. This function
+ * runs on a timer trigger based on the configured interval.
  */
 public class PollMailbox {
     
@@ -52,7 +54,7 @@ public class PollMailbox {
             // Derive the polling interval from the cron schedule so the lookback
             // window covers the full gap between invocations plus the overlap.
             int pollingIntervalSeconds = parsePollingIntervalSeconds(
-                    System.getenv("MailboxPollingSchedule"));
+                    EnvSanitizer.sanitize(System.getenv("MailboxPollingSchedule")));
             int totalLookbackSeconds = pollingIntervalSeconds + overlapSeconds;
             
             logger.info(String.format(
@@ -67,8 +69,16 @@ public class PollMailbox {
                 startTime.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
                 endTime.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)));
             
-            // Poll mailbox using Microsoft Graph API and process emails
-            pollMailboxUsingGraphAndSendToQueue(startTime, endTime);
+            // Poll every registered mailbox (default + any ACTIVE additional mailboxes)
+            List<MailboxConfig> mailboxes = azConnection.getMailboxRegistry().listPollable();
+            logger.info("Polling " + mailboxes.size() + " mailbox(es)");
+            for (MailboxConfig mailbox : mailboxes) {
+                try {
+                    pollMailboxUsingGraphAndSendToQueue(mailbox, startTime, endTime);
+                } catch (Exception e) {
+                    logger.severe("Error polling mailbox " + mailbox.getEmailAddress() + ": " + e.getMessage());
+                }
+            }
             
         } catch (Exception e) {
             logger.severe("Error in PollMailbox function: " + e.getMessage());
@@ -106,7 +116,7 @@ public class PollMailbox {
         }
     }
     
-    private void pollMailboxUsingGraphAndSendToQueue(OffsetDateTime startTime, OffsetDateTime endTime) {
+    private void pollMailboxUsingGraphAndSendToQueue(MailboxConfig mailbox, OffsetDateTime startTime, OffsetDateTime endTime) {
         try {
             if (graphServiceClient == null) {
                 logger.warning("Microsoft Graph client not configured. Skipping mailbox polling.");
@@ -115,7 +125,7 @@ public class PollMailbox {
             
             // Get the target mailbox/user — must be a user email or ID, not "me",
             // because this function authenticates with client credentials (app-only).
-            String targetMailbox = azConnection.getMailboxEmail();
+            String targetMailbox = mailbox.getEmailAddress();
             if (targetMailbox == null || targetMailbox.isBlank() || "me".equalsIgnoreCase(targetMailbox)) {
                 throw new IllegalStateException(
                     String.format("Did not find a mail box from Key Vault key %s. It must be set to a user email or object-id. " +
@@ -154,7 +164,7 @@ public class PollMailbox {
             // Process each message (extract only unique IDs)
             for (Message message : messages) {
                 try {
-                    processEmailId(message);
+                    processEmailId(message, targetMailbox);
                 } catch (Exception e) {
                     logger.warning("Error processing message ID: " + e.getMessage());
                 }
@@ -166,13 +176,14 @@ public class PollMailbox {
         }
     }
     
-    private void processEmailId(Message message) throws Exception {
+    private void processEmailId(Message message, String mailboxAddress) throws Exception {
         // Create minimal JSON with only email IDs
         ObjectNode emailData = objectMapper.createObjectNode();
         
         // Only include the unique identifiers
         emailData.put("internetMessageId", message.getInternetMessageId() != null ? message.getInternetMessageId() : "");
         emailData.put("graphMessageId", message.getId() != null ? message.getId() : "");
+        emailData.put("mailboxAddress", mailboxAddress);
         
         // Add minimal processing info
         emailData.put("processedAt", LocalDateTime.now().toString());
@@ -191,6 +202,7 @@ public class PollMailbox {
             serviceBusMessage.getApplicationProperties().put("MessageType", "EmailId");
             serviceBusMessage.getApplicationProperties().put("ProcessedAt", LocalDateTime.now().toString());
             serviceBusMessage.getApplicationProperties().put("Source", "MicrosoftGraph");
+            serviceBusMessage.getApplicationProperties().put("MailboxAddress", mailboxAddress);
             
             serviceBusSender.sendMessage(serviceBusMessage);
             logger.info("Sent email ID to Service Bus: " + 

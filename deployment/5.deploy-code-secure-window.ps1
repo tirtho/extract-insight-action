@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#!
 .SYNOPSIS
     Temporarily opens a secure deployment window for hardened environments,

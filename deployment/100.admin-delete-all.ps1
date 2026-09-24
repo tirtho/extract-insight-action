@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Deletes ALL Azure infrastructure deployed by the extract-insight-action scripts.

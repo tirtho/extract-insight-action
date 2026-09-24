@@ -7,6 +7,7 @@ package com.microsoft.azure.functions.mailbox.model;
  */
 public class ProcessAttachmentInput {
     private String graphMessageId;
+    private String mailboxAddress;
     private String attachmentId;
     private String attachmentName;
     private String contentType;
@@ -18,6 +19,9 @@ public class ProcessAttachmentInput {
 
     public String getGraphMessageId() { return graphMessageId; }
     public void setGraphMessageId(String graphMessageId) { this.graphMessageId = graphMessageId; }
+
+    public String getMailboxAddress() { return mailboxAddress; }
+    public void setMailboxAddress(String mailboxAddress) { this.mailboxAddress = mailboxAddress; }
 
     public String getAttachmentId() { return attachmentId; }
     public void setAttachmentId(String attachmentId) { this.attachmentId = attachmentId; }

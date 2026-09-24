@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <##
 .SYNOPSIS
     Administration and observability for the multi-agent framework.

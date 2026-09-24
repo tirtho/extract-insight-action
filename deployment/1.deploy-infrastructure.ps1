@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Azure Infrastructure Deployment Script for extract-insight-action
@@ -2500,6 +2500,17 @@ $kvSecrets = @{
     "UserEmailAddress"                       = $UserEmailAddress
     "PollingMailboxName"                     = $PollingMailboxName
     "ReadMailboxForPastNSeconds"             = $ReadMailboxForPastNSeconds
+    # Multi-mailbox support: used by MailboxRegistry/CosmosProvisioner to name and
+    # provision a dedicated Cosmos DB account for each additional mailbox.
+    "SubscriptionId"                         = $SubscriptionId
+    "ResourceGroupName"                       = $ResourceGroupName
+    "ProjectName"                             = $ProjectName
+    "EnvironmentName"                         = $Environment
+    "ResourceSuffix"                          = $Suffix
+    "CosmosDbVectorDimensions"                = $CosmosDbVectorDimensions
+    "CosmosDbLocation"                        = $LocationCosmosDb
+    "MailboxFunctionPrincipalId"              = $MailboxIdentity
+    "QueueDbFunctionPrincipalId"              = $QueueDbIdentity
 }
 foreach ($entry in $kvSecrets.GetEnumerator()) {
     if ([string]::IsNullOrWhiteSpace([string]$entry.Value)) {
@@ -2664,6 +2675,11 @@ $webAppSettingsPayload = @{
         "COSMOS_CONTAINER_NAME"    = $CosmosDbContainerName
         "STORAGE_ENDPOINT"         = "https://$StorageAccountName.blob.core.windows.net/"
         "STORAGE_CONTAINER_NAME"   = $StorageContainerName
+        "STORAGE_TABLE_ENDPOINT"   = $StorageTableEndpoint
+        # AI Foundry project endpoint is not secret (it's a project URL, not a credential) —
+        # set as a literal here (like the endpoints above) so AgentChatService.buildAgent()
+        # never has to fall back to a direct Key Vault read for it.
+        "AI_FOUNDRY_PROJECT_ENDPOINT" = $AiFoundryProjectEndpoint
         # Reasoning effort for the o-series model: low / medium / high / xhigh (default: medium)
         "AI_FOUNDRY_REASONING_EFFORT" = "medium"
         # Sliding TTL (hours) for agent conversations — reset on each access (default: 168 = 7 days)
@@ -2772,6 +2788,19 @@ if (-not $AgentServiceIdentity) {
     Set-RoleAssignment -Assignee $AgentServiceIdentity -Role 'Azure AI Developer' -Scope $AiFoundryId -PrincipalType 'ServicePrincipal' | Out-Null
     Write-Host "[INFO] Azure AI Developer role for agent-service — project scope" -ForegroundColor Cyan
     Set-RoleAssignment -Assignee $AgentServiceIdentity -Role 'Azure AI Developer' -Scope $AiFoundryProjectId -PrincipalType 'ServicePrincipal' | Out-Null
+
+    # Multi-mailbox support: agent-service hosts the Admin "Mailboxes" tab backend
+    # (MailboxAdminFunction), which provisions a dedicated Cosmos DB account per
+    # additional mailbox and grants the extract Function Apps data-plane access to
+    # it. This requires resource-group-scoped Contributor (create/delete Cosmos
+    # accounts) and a role that can write role assignments at that scope.
+    # NOTE: these are high-privilege grants to a web-facing Function App — review
+    # before running in a production subscription; consider a narrower custom role
+    # scoped to Microsoft.DocumentDB/* if your organization requires it.
+    $ResourceGroupId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName"
+    Write-Host "[INFO] Contributor + User Access Administrator roles for agent-service — resource group scope (multi-mailbox Cosmos provisioning)" -ForegroundColor Cyan
+    Set-RoleAssignment -Assignee $AgentServiceIdentity -Role 'Contributor' -Scope $ResourceGroupId -PrincipalType 'ServicePrincipal' | Out-Null
+    Set-RoleAssignment -Assignee $AgentServiceIdentity -Role 'User Access Administrator' -Scope $ResourceGroupId -PrincipalType 'ServicePrincipal' | Out-Null
 }
 
 # Create the Entra application used as the agent-service API audience. The UI's

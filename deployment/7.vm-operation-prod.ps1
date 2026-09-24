@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <##
 .SYNOPSIS
     Creates a private Windows 11 administration/development VM for EIA.

@@ -3,6 +3,7 @@ package com.eia.ui.config;
 import java.util.HashMap;
 import java.util.Map;
 
+import com.core.az.EnvSanitizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -65,7 +66,8 @@ public class SecurityConfig {
         if (oidcConfigured) {
             http
                     .authorizeHttpRequests(auth -> auth
-                            .requestMatchers("/error", "/logout-success", "/favicon.ico", "/*.css", "/*.js", "/webjars/**").permitAll()
+                            .requestMatchers("/error", "/logout-success", "/favicon.ico", "/*.css", "/*.js",
+                                    "/webjars/**", "/actuator/health", "/actuator/health/**").permitAll()
                             .anyRequest().authenticated())
                 .oauth2Login(oauth2 -> oauth2
                     .authorizationEndpoint(authorization -> authorization
@@ -123,7 +125,7 @@ public class SecurityConfig {
 
     private static String resolveEnv(String... names) {
         for (String name : names) {
-            String val = System.getenv(name);
+            String val = EnvSanitizer.sanitize(System.getenv(name));
             if (val != null && !val.isBlank()) {
                 return val;
             }

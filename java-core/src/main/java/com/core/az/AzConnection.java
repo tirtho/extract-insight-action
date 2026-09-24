@@ -42,6 +42,7 @@ public class AzConnection implements AutoCloseable {
     private final SecretClient secretClient;
     private final DefaultAzureCredential defaultCredential;
     private final Map<String, String> secretCache = new HashMap<>();
+    private final Map<String, CosmosClient> cosmosClientsByEndpoint = new HashMap<>();
     private CosmosClient cosmosClient;
     private ServiceBusSenderClient senderClient;
     private ServiceBusReceiverClient receiverClient;
@@ -82,12 +83,15 @@ public class AzConnection implements AutoCloseable {
 
     /**
      * Reads a secret value from Key Vault, caching the result for subsequent calls.
+     * The value is sanitized with {@link EnvSanitizer} as defense-in-depth against
+     * BOM/invisible-character corruption seen elsewhere in this codebase — cheap
+     * insurance even though direct SDK reads have not been observed to be affected.
      */
     public String getSecret(String secretName) {
         return secretCache.computeIfAbsent(secretName, name -> {
             LOG.info("Reading secret '{}' from Key Vault", name);
             try {
-                String value = secretClient.getSecret(name).getValue();
+                String value = EnvSanitizer.sanitize(secretClient.getSecret(name).getValue());
                 LOG.info("Secret '{}' retrieved successfully", name);
                 return value;
             } catch (ResourceNotFoundException e) {
@@ -155,6 +159,32 @@ public class AzConnection implements AutoCloseable {
                 .getContainer(containerName);
         LOG.info("CosmosContainer reference obtained – database: {}, container: {}", databaseName, containerName);
         return container;
+    }
+
+    /**
+     * Returns the CosmosContainer for a specific mailbox. The default mailbox uses the
+     * single cached {@link #getCosmosClient()}; additional mailboxes each have their own
+     * isolated Cosmos DB account, so a separate client is created (and cached by endpoint)
+     * per mailbox. See {@link MailboxRegistry} for how mailboxes are registered.
+     */
+    public CosmosContainer getCosmosContainerForMailbox(MailboxConfig mailbox) {
+        if (mailbox.isDefault()) {
+            return getCosmosContainer();
+        }
+        CosmosClient client = cosmosClientsByEndpoint.computeIfAbsent(mailbox.getCosmosEndpoint(), endpoint -> {
+            LOG.info("Creating CosmosClient for mailbox {} – endpoint: {}", mailbox.getEmailAddress(), endpoint);
+            return new CosmosClientBuilder()
+                    .endpoint(endpoint)
+                    .credential(defaultCredential)
+                    .gatewayMode()
+                    .buildClient();
+        });
+        return client.getDatabase(mailbox.getDatabaseName()).getContainer(mailbox.getContainerName());
+    }
+
+    /** Returns a {@link MailboxRegistry} bound to this connection's Key Vault. */
+    public MailboxRegistry getMailboxRegistry() {
+        return new MailboxRegistry(this);
     }
 
     // ---------------------------------------------------------------
@@ -426,6 +456,14 @@ public class AzConnection implements AutoCloseable {
             }
             cosmosClient = null;
         }
+        for (CosmosClient client : cosmosClientsByEndpoint.values()) {
+            try {
+                client.close();
+            } catch (Exception e) {
+                LOG.warn("Error closing mailbox CosmosClient: {}", e.getMessage());
+            }
+        }
+        cosmosClientsByEndpoint.clear();
         // OpenAIClient does not implement Closeable; just release the reference
         openAIClient = null;
         // GraphServiceClient and ClientSecretCredential do not implement Closeable

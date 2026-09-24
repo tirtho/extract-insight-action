@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Builds and deploys Azure Function apps and the Spring Boot web app to Azure.
@@ -261,8 +261,17 @@ function Invoke-MavenPackage {
         Write-NewLogContent -Path $stdoutLog -LineCount ([ref]$stdoutLineCount)
         Write-NewLogContent -Path $stderrLog -LineCount ([ref]$stderrLineCount)
 
-        if ($process.ExitCode -ne 0) {
-            throw "Maven build failed for $FunctionLabel with exit code $($process.ExitCode)."
+        # Process.ExitCode (and even StartTime/ProcessName) can come back blank on this
+        # machine once the process has exited, with no exception raised — the handle
+        # loses query rights before we read it. Maven's own "BUILD SUCCESS"/"BUILD
+        # FAILURE" banner in the captured output is the reliable signal instead.
+        $stdoutText = if (Test-Path $stdoutLog) { Get-Content $stdoutLog -Raw -ErrorAction SilentlyContinue } else { $null }
+        if ($stdoutText -match 'BUILD SUCCESS') {
+            # Build succeeded regardless of what the process handle reports.
+        } elseif ($stdoutText -match 'BUILD FAILURE' -or $process.ExitCode -ne 0) {
+            throw "Maven build failed for $FunctionLabel (exit code: $($process.ExitCode))."
+        } else {
+            throw "Maven build for $FunctionLabel ended without a BUILD SUCCESS/BUILD FAILURE marker; treating as failed (exit code: $($process.ExitCode))."
         }
     } finally {
         Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
@@ -390,8 +399,20 @@ function Invoke-AzWebAppDeploy {
         Write-NewLogContent -Path $stdoutLog -LineCount ([ref]$stdoutLineCount)
         Write-NewLogContent -Path $stderrLog -LineCount ([ref]$stderrLineCount)
 
-        if ($process.ExitCode -ne 0) {
-            throw "Web app deployment command failed with exit code $($process.ExitCode)."
+        # Process.ExitCode can come back blank with no exception on this machine once
+        # the process has exited (handle loses query rights before we read it) — see
+        # Invoke-MavenPackage above. The CLI's own status text/JSON is the reliable signal.
+        $stdoutText = if (Test-Path $stdoutLog) { Get-Content $stdoutLog -Raw -ErrorAction SilentlyContinue } else { $null }
+        $stderrText = if (Test-Path $stderrLog) { Get-Content $stderrLog -Raw -ErrorAction SilentlyContinue } else { $null }
+        $succeeded = ($stderrText -match 'Deployment has completed successfully') `
+            -or ($stdoutText -match '"status"\s*:\s*"(RuntimeSuccessful|Success)"')
+        $failed = ($stderrText -match 'Deployment failed') -or ($stdoutText -match '"status"\s*:\s*"Failed"')
+        if ($succeeded -and -not $failed) {
+            # Deployment succeeded regardless of what the process handle reports.
+        } elseif ($failed -or $process.ExitCode -ne 0) {
+            throw "Web app deployment command failed (exit code: $($process.ExitCode))."
+        } else {
+            throw "Web app deployment ended without a recognizable success/failure marker; treating as failed (exit code: $($process.ExitCode))."
         }
     } finally {
         Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
@@ -503,15 +524,27 @@ function Get-HttpStatusCodeFromException {
     }
 
     $response = $Exception.Response
-    if ($null -eq $response) {
-        return $null
+    if ($null -ne $response) {
+        try {
+            return [int]$response.StatusCode
+        } catch {
+            return $null
+        }
     }
 
-    try {
-        return [int]$response.StatusCode
-    } catch {
-        return $null
+    # On some Windows PowerShell 5.1 + .NET combinations, hitting the
+    # -MaximumRedirection limit throws a plain InvalidOperationException with no
+    # .Response object and a generic message ("Operation is not valid due to the
+    # current state of the object.") instead of the expected WebException/
+    # HttpResponseException. This still means the server answered with a 3xx
+    # redirect (e.g. an OIDC-protected app redirecting to sign-in) — i.e. it is
+    # reachable and healthy — so report a synthetic 3xx rather than treating it
+    # as an unreachable/ERR result.
+    if ($Exception -is [System.InvalidOperationException]) {
+        return 300
     }
+
+    return $null
 }
 
 function Test-ScmIpForbidden {
@@ -897,6 +930,7 @@ foreach ($target in $targets) {
                 -InFile $zipPath `
                 -ContentType "application/zip" `
                 -TimeoutSec 120 `
+                -UseBasicParsing `
                 -ErrorAction Stop
             $deployId = ($deployResp.Content | ConvertFrom-Json)
             Write-Host "[INFO] Deployment accepted (id: $deployId). Polling for completion..." -ForegroundColor Cyan

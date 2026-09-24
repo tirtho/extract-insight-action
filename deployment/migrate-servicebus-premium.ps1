@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <##
 .SYNOPSIS
     Creates a Premium Service Bus namespace for an existing EIA deployment and

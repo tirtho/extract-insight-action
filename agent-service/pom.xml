@@ -159,6 +159,10 @@
                                         <include>AdminCalls/function.json</include>
                                         <include>AdminPerformance/function.json</include>
                                         <include>AdminCallGraph/function.json</include>
+                                        <include>AdminMailboxesList/function.json</include>
+                                        <include>AdminMailboxesAdd/function.json</include>
+                                        <include>AdminMailboxesDelete/function.json</include>
+                                        <include>ProvisionMailboxes/function.json</include>
                                     </includes>
                                 </resource>
                             </resources>

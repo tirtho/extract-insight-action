@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Builds and runs local workloads for the three Azure Function apps and the Spring Boot web app.

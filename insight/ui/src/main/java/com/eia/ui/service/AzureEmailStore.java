@@ -735,12 +735,12 @@ public class AzureEmailStore implements AutoCloseable {
     }
 
     private String readSecret(String name) {
-        return secrets.computeIfAbsent(name, secretName -> secretClient.getSecret(secretName).getValue());
+        return secrets.computeIfAbsent(name, secretName -> com.core.az.EnvSanitizer.sanitize(secretClient.getSecret(secretName).getValue()));
     }
 
     private String resolveConfigValue(String secretName, String... envNames) {
         for (String envName : envNames) {
-            String value = valueOrEmpty(System.getenv(envName));
+            String value = valueOrEmpty(com.core.az.EnvSanitizer.sanitize(System.getenv(envName)));
             // App Service can expose unresolved KV references as literals; ignore those.
             if (value.startsWith("@Microsoft.KeyVault(")) {
                 continue;

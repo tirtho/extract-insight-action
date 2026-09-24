@@ -9,6 +9,8 @@ import com.core.az.AzEnvNames;
 import com.core.az.AzOpenAiEmbeddings;
 import com.core.az.AzStorageBlob;
 import com.core.az.AzStorageQueue;
+import com.core.az.MailboxConfig;
+import com.core.az.MailboxRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -119,6 +121,7 @@ public class ExtractMail {
                 }
                 ProcessAttachmentInput input = new ProcessAttachmentInput();
                 input.setGraphMessageId(emailData.getGraphMessageId());
+                input.setMailboxAddress(emailData.getMailboxAddress());
                 input.setAttachmentId(att.getAttachmentId());
                 input.setAttachmentName(att.getName());
                 input.setContentType(att.getContentType());
@@ -136,6 +139,7 @@ public class ExtractMail {
         StoreDocumentInput docInput = new StoreDocumentInput();
         docInput.setGraphMessageId(emailData.getGraphMessageId());
         docInput.setInternetMessageId(emailData.getInternetMessageId());
+        docInput.setMailboxOwner(emailData.getMailboxAddress());
         docInput.setSubject(emailData.getSubject());
         docInput.setFromAddress(emailData.getFromAddress());
         docInput.setFromName(emailData.getFromName());
@@ -167,7 +171,6 @@ public class ExtractMail {
 
         try (AzConnection azConnection = new AzConnection(System.getenv("AZURE_KEY_VAULT_URL"))) {
             GraphServiceClient graphClient = azConnection.getGraphClient();
-            String targetMailbox = azConnection.getMailboxEmail();
 
             // Durable Functions SDK may double-serialize String inputs as JSON strings;
             // unwrap if the parsed result is a TextNode rather than an ObjectNode
@@ -177,16 +180,23 @@ public class ExtractMail {
             }
             String graphMessageId    = emailRef.path("graphMessageId").asText();
             String internetMessageId = emailRef.path("internetMessageId").asText();
+            String mailboxAddress    = emailRef.path("mailboxAddress").asText();
+
+            // Resolve which mailbox (and therefore which Cosmos DB instance) this
+            // message belongs to. Older queued messages without a mailboxAddress
+            // fall back to the default mailbox for backward compatibility.
+            com.core.az.MailboxRegistry registry = azConnection.getMailboxRegistry();
+            MailboxConfig mailbox = (mailboxAddress == null || mailboxAddress.isBlank())
+                    ? registry.defaultMailbox()
+                    : registry.find(mailboxAddress).orElseGet(registry::defaultMailbox);
+            String targetMailbox = mailbox.getEmailAddress();
 
             // Short-circuit if this email was already fully processed.
             // StoreInCosmos writes the email document as its very last step, so its
             // presence in Cosmos means the complete pipeline ran at least once.
             String emailDocId = (!internetMessageId.isBlank()) ? internetMessageId : graphMessageId;
             {
-                String dbName = azConnection.getSecret(AzEnvNames.KV_COSMOS_DB_DATABASE_NAME);
-                String cName  = azConnection.getSecret(AzEnvNames.KV_COSMOS_DB_CONTAINER_NAME);
-                CosmosContainer cosmosContainer = azConnection.getCosmosClient()
-                        .getDatabase(dbName).getContainer(cName);
+                CosmosContainer cosmosContainer = azConnection.getCosmosContainerForMailbox(mailbox);
                 try {
                     cosmosContainer.readItem(emailDocId, new PartitionKey(emailDocId), ObjectNode.class);
                     logger.info("Email already processed in Cosmos, skipping: " + emailDocId);
@@ -219,6 +229,7 @@ public class ExtractMail {
             EmailData data = new EmailData();
             data.setGraphMessageId(graphMessageId);
             data.setInternetMessageId(internetMessageId);
+            data.setMailboxAddress(targetMailbox);
             data.setSubject(email.getSubject() != null ? email.getSubject() : "");
             data.setReceivedDateTime(email.getReceivedDateTime() != null
                     ? email.getReceivedDateTime().toString() : "");
@@ -311,7 +322,7 @@ public class ExtractMail {
 
         try (AzConnection azConnection = new AzConnection(System.getenv("AZURE_KEY_VAULT_URL"))) {
             GraphServiceClient graphClient = azConnection.getGraphClient();
-            String targetMailbox = azConnection.getMailboxEmail();
+            String targetMailbox = input.getMailboxAddress();
 
             // 1. Fetch this specific attachment's bytes from Graph
             Attachment attachment = graphClient.users().byUserId(targetMailbox)
@@ -401,12 +412,12 @@ public class ExtractMail {
         logger.info("StoreInCosmos activity started");
 
         try (AzConnection azConnection = new AzConnection(System.getenv("AZURE_KEY_VAULT_URL"))) {
-            String dbName = azConnection.getSecret(AzEnvNames.KV_COSMOS_DB_DATABASE_NAME);
-            String containerName = azConnection.getSecret(AzEnvNames.KV_COSMOS_DB_CONTAINER_NAME);
+            MailboxRegistry registry = azConnection.getMailboxRegistry();
+            MailboxConfig mailbox = (input.getMailboxOwner() == null || input.getMailboxOwner().isBlank())
+                    ? registry.defaultMailbox()
+                    : registry.find(input.getMailboxOwner()).orElseGet(registry::defaultMailbox);
 
-            CosmosContainer container = azConnection.getCosmosClient()
-                    .getDatabase(dbName)
-                    .getContainer(containerName);
+            CosmosContainer container = azConnection.getCosmosContainerForMailbox(mailbox);
 
             AzStorageQueue storageQueue = new AzStorageQueue(azConnection);
 
@@ -490,7 +501,7 @@ public class ExtractMail {
             doc.put("extractedAt", LocalDateTime.now().toString());
 
             // Add mailbox owner (for filtering by authenticated user in UI)
-            String mailboxOwner = azConnection.getMailboxEmail();
+            String mailboxOwner = mailbox.getEmailAddress();
             if (mailboxOwner != null && !mailboxOwner.isBlank()) {
                 doc.put("mailboxOwner", mailboxOwner);
             }
