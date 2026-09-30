@@ -560,6 +560,31 @@ function Test-ScmIpForbidden {
     return ($Exception.Message -match 'Ip Forbidden|IP Forbidden|Forbidden')
 }
 
+function New-ForwardSlashZip {
+    param(
+        [Parameter(Mandatory=$true)][string]$SourceDirectory,
+        [Parameter(Mandatory=$true)][string]$DestinationPath
+    )
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::Open(
+        $DestinationPath,
+        [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        $sourceRoot = (Resolve-Path $SourceDirectory).Path.TrimEnd('\','/') + [System.IO.Path]::DirectorySeparatorChar
+        Get-ChildItem -Path $SourceDirectory -Recurse -File | ForEach-Object {
+            $relativePath = $_.FullName.Substring($sourceRoot.Length).Replace('\', '/')
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $archive,
+                $_.FullName,
+                $relativePath,
+                [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    } finally {
+        $archive.Dispose()
+    }
+}
+
 # =============================================================================
 # STEP 1: Select which workload(s) to deploy
 # =============================================================================
@@ -876,7 +901,7 @@ foreach ($target in $targets) {
     # (validation, extraction, sync triggers) and reliably registers functions.
     $zipPath = Join-Path $env:TEMP "$TargetAppName-deployment.zip"
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-    Compress-Archive -Path "$($stagingDir.FullName)\*" -DestinationPath $zipPath -Force
+    New-ForwardSlashZip -SourceDirectory $stagingDir.FullName -DestinationPath $zipPath
     Write-Host "[INFO] Created deployment package: $zipPath" -ForegroundColor Cyan
 
     $zipHash = Get-ArtifactSha256 -Path $zipPath

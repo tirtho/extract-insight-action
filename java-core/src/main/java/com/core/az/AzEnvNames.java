@@ -24,6 +24,7 @@ public class AzEnvNames {
     public static final String KV_MAILBOX_FUNCTION_APP_NAME = "MailboxFunctionAppName";
     public static final String KV_QUEUE_DB_FUNCTION_APP_NAME = "QueueDbFunctionAppName";
     public static final String KV_COSMOS_DB_ENDPOINT = "CosmosDbEndpoint";
+    public static final String KV_COSMOS_DB_ACCOUNT_NAME = "CosmosDbAccountName";
     public static final String KV_COSMOS_DB_DATABASE_NAME = "CosmosDbDatabaseName";
     public static final String KV_COSMOS_DB_CONTAINER_NAME = "CosmosDbContainerName";
     public static final String KV_COSMOS_DB_VECTOR_DIMENSIONS = "CosmosDbVectorDimensions";

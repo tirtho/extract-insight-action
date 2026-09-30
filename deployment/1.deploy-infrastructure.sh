@@ -768,6 +768,21 @@ else
     fi
 fi
 
+# Create the tables used by email sessions and multi-agent orchestration.
+for table_name in AgentSessions OrchestrationState OrchestratorConversations; do
+    echo "[INFO] Creating storage table: $table_name"
+    existing_table=$(az storage table exists --name "$table_name" \
+        --account-name "$StorageAccountName" --auth-mode login --query exists -o tsv 2>/dev/null || true)
+    if [[ "$existing_table" == "true" ]]; then
+        echo "[WARNING] Storage table '$table_name' already exists, skipping"
+    elif az storage table create --name "$table_name" \
+            --account-name "$StorageAccountName" --auth-mode login --output none 2>/dev/null; then
+        echo "[SUCCESS] Storage table '$table_name' created"
+    else
+        DEPLOYMENT_ERRORS+=("Creating storage table: $table_name")
+    fi
+done
+
 # Create storage queue
 echo "[INFO] Creating storage queue: $StorageQueueName"
 existing_q=$(az storage queue show --name "$StorageQueueName" \
@@ -1668,6 +1683,8 @@ echo ""
 echo ">>> Step 11/12: Function Apps (Flex Consumption, Java 21)"
 AppInsightsKey=$(az monitor app-insights component show --app "$AppInsightsName" \
     --resource-group "$ResourceGroupName" --query instrumentationKey -o tsv 2>/dev/null || true)
+AppInsightsConnectionString=$(az monitor app-insights component show --app "$AppInsightsName" \
+    --resource-group "$ResourceGroupName" --query connectionString -o tsv 2>/dev/null || true)
 
 COMMON_FUNC_ARGS=(--resource-group "$ResourceGroupName"
     --storage-account "$StorageAccountName"
@@ -1970,6 +1987,7 @@ declare -A KV_SECRETS=(
     [WebAppClientId]="$WebAppClientId"
     [WebAppClientSecret]="$WebAppClientSecret"
     [CosmosDbEndpoint]="$CosmosDbEndpoint"
+    [CosmosDbAccountName]="$CosmosDbAccountName"
     [CosmosDbDatabaseName]="$CosmosDbDatabaseName"
     [CosmosDbContainerName]="$CosmosDbContainerName"
     [ContentUnderstandingEndpoint]="$ContentUnderstandingEndpoint"
@@ -2056,11 +2074,13 @@ ServiceBusHostname="$ServiceBusNamespace.servicebus.windows.net"
 set_function_app_settings "$FuncMailboxName" "$ResourceGroupName" \
     "AzureWebJobsStorage__accountName=$StorageAccountName" \
     "AZURE_KEY_VAULT_URL=$KvUrl" \
+    "APPLICATIONINSIGHTS_CONNECTION_STRING=$AppInsightsConnectionString" \
     "MailboxPollingSchedule=@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=MailboxPollingSchedule)"
 
 set_function_app_settings "$FuncQueueDbName" "$ResourceGroupName" \
     "AzureWebJobsStorage__accountName=$StorageAccountName" \
     "AZURE_KEY_VAULT_URL=$KvUrl" \
+    "APPLICATIONINSIGHTS_CONNECTION_STRING=$AppInsightsConnectionString" \
     "ServiceBusConnection__fullyQualifiedNamespace=$ServiceBusHostname" \
     "ServiceBusTopicName=$ServiceBusTopicName" \
     "ServiceBusSubscriptionName=$ServiceBusSubName"
@@ -2068,6 +2088,7 @@ set_function_app_settings "$FuncQueueDbName" "$ResourceGroupName" \
 set_function_app_settings "$FuncCuQueueDbName" "$ResourceGroupName" \
     "AzureWebJobsStorage__accountName=$StorageAccountName" \
     "AZURE_KEY_VAULT_URL=$KvUrl" \
+    "APPLICATIONINSIGHTS_CONNECTION_STRING=$AppInsightsConnectionString" \
     "StorageQueuePollingSchedule=@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=StorageQueuePollingSchedule)"
 
 echo "[SUCCESS] Function App settings configured"
@@ -2081,6 +2102,7 @@ WebAppResourceId=$(az webapp show --name "$WebAppName" --resource-group "$Resour
 web_settings_body=$(jq -n \
     --arg kvu "$KvUrl" \
     --arg kv "$KeyVaultName" \
+    --arg aics "$AppInsightsConnectionString" \
     --arg cosmos "https://${CosmosDbAccountName}.documents.azure.com:443/" \
     --arg cdb "$CosmosDbDatabaseName" \
     --arg ccont "$CosmosDbContainerName" \
@@ -2088,6 +2110,8 @@ web_settings_body=$(jq -n \
     --arg scont "$StorageContainerName" \
     '{properties: {
         AZURE_KEY_VAULT_URL: $kvu,
+        APPLICATIONINSIGHTS_CONNECTION_STRING: $aics,
+        ApplicationInsightsAgent_EXTENSION_VERSION: "~3",
         TENANT_ID:           ("@Microsoft.KeyVault(VaultName=" + $kv + ";SecretName=WebAppTenantId)"),
         WEBAPP_CLIENT_ID:    ("@Microsoft.KeyVault(VaultName=" + $kv + ";SecretName=WebAppClientId)"),
         WEBAPP_CLIENT_SECRET:("@Microsoft.KeyVault(VaultName=" + $kv + ";SecretName=WebAppClientSecret)"),

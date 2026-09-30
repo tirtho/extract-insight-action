@@ -474,6 +474,7 @@ public class ExtractMail {
                             queueMsg.put("attachmentDocId", attDocId);
                             queueMsg.put("analyzerName", att.getAnalyzerName());
                             queueMsg.put("operationId", att.getAnalyzeOperationId());
+                            queueMsg.put("mailboxAddress", mailbox.getEmailAddress());
                             storageQueue.sendMessage(queueMsg.toString());
                             logger.info("Queued CU poll message for attachment: " + attDocId);
                         }

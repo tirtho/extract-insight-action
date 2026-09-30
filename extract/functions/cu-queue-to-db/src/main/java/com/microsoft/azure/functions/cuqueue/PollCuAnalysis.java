@@ -10,6 +10,8 @@ import com.core.az.AzContentUnderstanding;
 import com.core.az.AzEnvNames;
 import com.core.az.AzOpenAiEmbeddings;
 import com.core.az.AzStorageQueue;
+import com.core.az.MailboxConfig;
+import com.core.az.MailboxRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -82,16 +84,11 @@ public class PollCuAnalysis {
 
             logger.info("Processing " + messages.size() + " CU analysis messages");
 
-            // Get Cosmos container (shared across all messages)
-            String dbName = azConnection.getSecret(AzEnvNames.KV_COSMOS_DB_DATABASE_NAME);
-            String containerName = azConnection.getSecret(AzEnvNames.KV_COSMOS_DB_CONTAINER_NAME);
-            CosmosContainer container = azConnection.getCosmosClient()
-                    .getDatabase(dbName)
-                    .getContainer(containerName);
+            MailboxRegistry registry = azConnection.getMailboxRegistry();
 
             try (AzContentUnderstanding cu = new AzContentUnderstanding(azConnection)) {
                 for (QueueMessageItem queueMsg : messages) {
-                    processMessage(queueMsg, cu, container, storageQueue);
+                    processMessage(queueMsg, cu, azConnection, registry, storageQueue);
                 }
             }
 
@@ -102,15 +99,27 @@ public class PollCuAnalysis {
     }
 
     private void processMessage(QueueMessageItem queueMsg, AzContentUnderstanding cu,
-                                CosmosContainer container, AzStorageQueue storageQueue) {
+                                AzConnection azConnection, MailboxRegistry registry,
+                                AzStorageQueue storageQueue) {
         String body = queueMsg.getBody().toString();
         try {
             JsonNode msg = objectMapper.readTree(body);
             String attachmentDocId = msg.get("attachmentDocId").asText();
             String analyzerName = msg.get("analyzerName").asText();
             String operationId = msg.get("operationId").asText();
+                String mailboxAddress = msg.path("mailboxAddress").asText("");
+                MailboxConfig mailbox = mailboxAddress.isBlank()
+                    ? registry.defaultMailbox()
+                    : registry.find(mailboxAddress).orElse(null);
+                if (mailbox == null) {
+                logger.warning("Mailbox '" + mailboxAddress + "' for attachment " + attachmentDocId
+                    + " is no longer registered; leaving the CU poll message queued.");
+                return;
+                }
+                CosmosContainer container = azConnection.getCosmosContainerForMailbox(mailbox);
 
             logger.info("Polling CU analysis – attachment: " + attachmentDocId
+                    + ", mailbox: " + mailbox.getEmailAddress()
                     + ", analyzer: " + analyzerName
                     + ", operation: " + operationId);
 

@@ -3,7 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Agent Admin | Extract Insight Action</title>
+    <meta name="_csrf" th:content="${_csrf.token}" th:if="${_csrf != null}">
+    <meta name="_csrf_header" th:content="${_csrf.headerName}" th:if="${_csrf != null}">
+    <title>Admin | Extract Insight Action</title>
     <link rel="stylesheet" th:href="@{/app.css}">
 </head>
 <body>
@@ -11,17 +13,10 @@
     <section class="top-banner admin-banner">
         <div>
             <div class="eyebrow">Extract Insight Action / Operations</div>
-            <h1>Agent Admin</h1>
-            <p>Live inventory, call activity, performance, and orchestration graphs.</p>
+            <h1>Admin</h1>
+            <p>Administration tasks</p>
         </div>
         <div class="admin-toolbar">
-            <label for="sinceDays">Window</label>
-            <select id="sinceDays" class="admin-select">
-                <option value="7">7 days</option>
-                <option value="30" selected>30 days</option>
-                <option value="90">90 days</option>
-            </select>
-            <button class="admin-refresh" type="button" onclick="loadDashboard()">Refresh</button>
             <button class="admin-close" type="button" onclick="window.close()">Close</button>
         </div>
     </section>
@@ -34,6 +29,24 @@
     </nav>
 
     <div id="tabPanelAgents" class="admin-tab-panel is-active">
+    <section class="admin-section" aria-labelledby="agentAdminHeading">
+        <div class="admin-section-heading">
+            <div>
+                <h2 id="agentAdminHeading">Agent administration</h2>
+                <p>Live inventory, call activity, performance, and orchestration graphs.</p>
+            </div>
+            <div class="admin-toolbar">
+                <label for="sinceDays">Window</label>
+                <select id="sinceDays" class="admin-select">
+                    <option value="7">7 days</option>
+                    <option value="30" selected>30 days</option>
+                    <option value="90">90 days</option>
+                </select>
+                <button class="admin-refresh" type="button" onclick="loadDashboard()">Refresh</button>
+            </div>
+        </div>
+    </section>
+
     <section class="admin-section" aria-labelledby="agentsHeading">
         <div class="admin-section-heading">
             <h2 id="agentsHeading">Configured agents</h2>
@@ -95,14 +108,20 @@
             <h2 id="mailboxesHeading">Mailboxes</h2>
             <p>Each additional mailbox is polled alongside the default mailbox and stores its extracted emails in its own isolated Cosmos DB instance.</p>
         </div>
+        <p class="admin-mailbox-help">Prerequisite: create the user in the tenant and assign an Exchange-capable Microsoft 365 mailbox license before adding the mailbox here.</p>
         <form class="admin-mailbox-form" onsubmit="return addMailbox(event)">
-            <label for="newMailboxAddress">Add mailbox (same tenant/domain only)</label>
+            <label for="newMailboxUsername">Add mailbox username</label>
             <div class="admin-mailbox-form-row">
-                <input type="email" id="newMailboxAddress" placeholder="name@yourtenant.com" required>
+                <input type="text" id="newMailboxUsername" placeholder="name" maxlength="64" pattern="[A-Za-z0-9!#$%&'*+/=?^_`{|}~\-]+(\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~\-]+)*" autocomplete="off" required>
+                <span class="admin-mailbox-domain" id="mailboxTenantDomain">@tenant</span>
                 <button class="admin-refresh" type="submit">Add mailbox</button>
             </div>
+            <p class="admin-mailbox-help">Enter only the username before @. Use a standard email username: 1-64 characters, no spaces or quotes, and dots only between characters.</p>
         </form>
-        <p class="admin-status" id="mailboxStatus" role="status"></p>
+        <div class="admin-mailbox-status-row">
+            <p class="admin-status" id="mailboxStatus" role="status"></p>
+            <button class="admin-icon-button" type="button" onclick="refreshMailboxes()" title="Refresh mailbox status" aria-label="Refresh mailbox status">&#8635;</button>
+        </div>
         <div class="admin-table-wrap">
             <table class="admin-table">
                 <thead><tr><th>Email address</th><th>Type</th><th>Status</th><th>Cosmos account</th><th>Created</th><th></th></tr></thead>
@@ -128,6 +147,7 @@
     var agentTaskCatalog = [];
     var currentGraphPayload = null;
     var currentGraphView = 'dag';
+    var mailboxTenantDomain = '';
 
     async function loadDashboard() {
         var sinceDays = document.getElementById('sinceDays').value;
@@ -452,21 +472,41 @@
     async function loadMailboxes() {
         setStatus('Loading mailboxes...');
         try {
-            var response = await fetch('/api/multiagent/admin/mailboxes');
-            var payload = await readAdminResponse(response, 'mailboxes', []);
-            renderMailboxes(payload || []);
-            setStatus('Updated just now.');
+            var response = await fetch('/api/multiagent/admin/mailboxes', {cache: 'no-store'});
+            var errors = [];
+            var payload = await readAdminResponse(response, 'mailboxes', errors);
+            var mailboxes = Array.isArray(payload) ? payload
+                : (payload && Array.isArray(payload.mailboxes) ? payload.mailboxes : []);
+            mailboxTenantDomain = Array.isArray(payload) ? mailboxTenantDomain
+                : (payload && payload.tenantDomain ? payload.tenantDomain : '');
+            renderMailboxDomain();
+            renderMailboxes(mailboxes);
+            renderMailboxStatus(mailboxes);
+            setStatus(errors.length ? errors.join(' ') : 'Updated just now.', errors.length > 0);
         } catch (error) {
             setStatus(error.message, true);
         }
     }
 
+    async function refreshMailboxes() {
+        var status = document.getElementById('mailboxStatus');
+        status.textContent = 'Refreshing mailbox status...';
+        status.classList.remove('admin-status-error');
+        await loadMailboxes();
+    }
+
+    function renderMailboxDomain() {
+        var domain = document.getElementById('mailboxTenantDomain');
+        if (domain) domain.textContent = mailboxTenantDomain ? '@' + mailboxTenantDomain : '@tenant';
+    }
+
     function renderMailboxes(mailboxes) {
         document.getElementById('mailboxRows').innerHTML = mailboxes.map(function (mailbox) {
+            var emailAddress = normalizeMailboxEmail(mailbox.emailAddress);
             var deleteButton = mailbox.isDefault ? ''
-                : '<button class="admin-table-action" type="button" onclick="deleteMailbox(\'' + escapeJs(mailbox.emailAddress) + '\')">Remove</button>';
+                : '<button class="admin-table-action" type="button" onclick="deleteMailbox(\'' + escapeJs(emailAddress) + '\')">Remove</button>';
             var status = mailbox.status + (mailbox.errorMessage ? ' (' + escapeHtml(mailbox.errorMessage) + ')' : '');
-            return '<tr><td>' + escapeHtml(mailbox.emailAddress) + '</td>'
+            return '<tr><td>' + escapeHtml(emailAddress) + '</td>'
                 + '<td>' + (mailbox.isDefault ? 'Default' : 'Additional') + '</td>'
                 + '<td>' + escapeHtml(status) + '</td>'
                 + '<td>' + escapeHtml(mailbox.cosmosAccountName || '') + '</td>'
@@ -475,24 +515,55 @@
         }).join('') || '<tr><td colspan="6" class="admin-empty">No mailboxes found.</td></tr>';
     }
 
+    function renderMailboxStatus(mailboxes) {
+        var status = document.getElementById('mailboxStatus');
+        var additional = mailboxes.filter(function (mailbox) { return !mailbox.isDefault; });
+        if (!additional.length) {
+            status.textContent = 'No additional mailboxes registered.';
+            status.classList.remove('admin-status-error');
+            return;
+        }
+        status.textContent = 'Registered additional mailboxes: ' + additional.map(function (mailbox) {
+            return normalizeMailboxEmail(mailbox.emailAddress) + ' (' + (mailbox.status || 'UNKNOWN') + ')';
+        }).join(', ');
+        status.classList.remove('admin-status-error');
+    }
+
+    function normalizeMailboxEmail(value) {
+        return String(value == null ? '' : value).replace(/^[^A-Za-z0-9]+/, '');
+    }
+
     async function addMailbox(event) {
         event.preventDefault();
-        var input = document.getElementById('newMailboxAddress');
-        var emailAddress = input.value.trim();
-        if (!emailAddress) return false;
+        var input = document.getElementById('newMailboxUsername');
+        var username = input.value.trim();
+        if (!username) return false;
         var status = document.getElementById('mailboxStatus');
+        if (!/^[A-Za-z0-9!#$%&'*+/=?^_`{|}~\-]+(\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~\-]+)*$/.test(username)) {
+            status.textContent = 'Enter a valid email username: 1-64 characters, no spaces or quotes, and dots only between characters.';
+            status.classList.add('admin-status-error');
+            return false;
+        }
+        if (!mailboxTenantDomain) {
+            status.textContent = 'Tenant domain is not available yet. Refresh the Mailboxes tab and try again.';
+            status.classList.add('admin-status-error');
+            return false;
+        }
+        var emailAddress = username + '@' + mailboxTenantDomain;
         status.textContent = 'Adding mailbox...';
         status.classList.remove('admin-status-error');
         try {
+            var headers = {'Content-Type': 'application/json'};
+            addCsrfHeader(headers);
             var response = await fetch('/api/multiagent/admin/mailboxes', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: headers,
                 body: JSON.stringify({emailAddress: emailAddress})
             });
             var payload = await response.json().catch(function () { return {}; });
             if (!response.ok) throw new Error(payload.error || 'Unable to add mailbox.');
             input.value = '';
-            status.textContent = 'Mailbox registered; provisioning its Cosmos DB instance in the background.';
+            status.textContent = 'Mailbox registered: ' + emailAddress + '; provisioning its Cosmos DB instance in the background.';
             loadMailboxes();
         } catch (error) {
             status.textContent = error.message;
@@ -507,7 +578,9 @@
         status.textContent = 'Removing mailbox...';
         status.classList.remove('admin-status-error');
         try {
-            var response = await fetch('/api/multiagent/admin/mailboxes/' + encodeURIComponent(emailAddress), {method: 'DELETE'});
+            var headers = {};
+            addCsrfHeader(headers);
+            var response = await fetch('/api/multiagent/admin/mailboxes/' + encodeURIComponent(emailAddress), {method: 'DELETE', headers: headers});
             var payload = await response.json().catch(function () { return {}; });
             if (!response.ok) throw new Error(payload.error || 'Unable to remove mailbox.');
             status.textContent = 'Mailbox removal in progress.';
@@ -516,6 +589,12 @@
             status.textContent = error.message;
             status.classList.add('admin-status-error');
         }
+    }
+
+    function addCsrfHeader(headers) {
+        var token = document.querySelector('meta[name="_csrf"]');
+        var header = document.querySelector('meta[name="_csrf_header"]');
+        if (token && header) headers[header.getAttribute('content')] = token.getAttribute('content');
     }
 
     document.getElementById('sinceDays').addEventListener('change', loadDashboard);

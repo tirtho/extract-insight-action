@@ -91,7 +91,7 @@ public class AzConnection implements AutoCloseable {
         return secretCache.computeIfAbsent(secretName, name -> {
             LOG.info("Reading secret '{}' from Key Vault", name);
             try {
-                String value = EnvSanitizer.sanitize(secretClient.getSecret(name).getValue());
+                String value = secretClient.getSecret(name).getValue();
                 LOG.info("Secret '{}' retrieved successfully", name);
                 return value;
             } catch (ResourceNotFoundException e) {
@@ -332,7 +332,7 @@ public class AzConnection implements AutoCloseable {
      * Returns the mailbox email address stored in Key Vault.
      */
     public String getMailboxEmail() {
-        return getSecret(AzEnvNames.KV_GRAPH_MAILBOX_EMAIL_ADDRESS);
+        return EnvSanitizer.sanitize(getSecret(AzEnvNames.KV_GRAPH_MAILBOX_EMAIL_ADDRESS));
     }
 
     /**

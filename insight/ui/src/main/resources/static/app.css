@@ -1363,6 +1363,35 @@ strong, b {
     font-size: 0.84rem;
 }
 
+.admin-mailbox-status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.admin-mailbox-status-row .admin-status {
+    flex: 1;
+}
+
+.admin-icon-button {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--ink);
+    cursor: pointer;
+    font: inherit;
+    font-size: 1.25rem;
+    line-height: 1;
+}
+
+.admin-icon-button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
 .admin-status-error {
     color: var(--warn);
 }
@@ -1419,9 +1448,31 @@ strong, b {
     flex: 1;
     padding: 8px 10px;
     border-radius: 8px;
-    border: 1px solid var(--border, #333);
-    background: var(--panel, #1a1a1a);
-    color: inherit;
+    border: 1px solid rgba(36, 54, 49, 0.22);
+    background: #fff;
+    color: #18211f;
+}
+
+.admin-mailbox-form-row input::placeholder {
+    color: rgba(24, 33, 31, 0.48);
+}
+
+.admin-mailbox-domain {
+    display: inline-flex;
+    align-items: center;
+    min-width: 220px;
+    padding: 8px 12px;
+    border: 1px solid rgba(36, 54, 49, 0.18);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.72);
+    color: var(--muted);
+    font-size: 0.9rem;
+}
+
+.admin-mailbox-help {
+    margin: 2px 0 0;
+    color: var(--muted);
+    font-size: 0.78rem;
 }
 
 .admin-section {

@@ -38,7 +38,7 @@ public class CosmosProvisioner {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String ARM_BASE = "https://management.azure.com";
     private static final String ACCOUNTS_API_VERSION = "2024-08-15";
-    private static final String ROLE_ASSIGNMENTS_API_VERSION = "2022-05-01-preview";
+    private static final String ROLE_ASSIGNMENTS_API_VERSION = "2024-08-15";
     // Built-in "Cosmos DB Built-in Data Contributor" role definition GUID (data plane).
     private static final String DATA_CONTRIBUTOR_ROLE_ID = "00000000-0000-0000-0000-000000000002";
 
@@ -51,10 +51,20 @@ public class CosmosProvisioner {
 
     public CosmosProvisioner(AzConnection connection) {
         this.credential = connection.getContentUnderstandingCredential();
-        this.subscriptionId = connection.getSecret(AzEnvNames.KV_SUBSCRIPTION_ID);
-        this.resourceGroupName = connection.getSecret(AzEnvNames.KV_RESOURCE_GROUP_NAME);
-        this.location = connection.getSecret(AzEnvNames.KV_COSMOS_DB_LOCATION);
-        this.vectorDimensions = Integer.parseInt(connection.getSecret(AzEnvNames.KV_COSMOS_DB_VECTOR_DIMENSIONS));
+        this.subscriptionId = EnvSanitizer.sanitize(connection.getSecret(AzEnvNames.KV_SUBSCRIPTION_ID));
+        this.resourceGroupName = EnvSanitizer.sanitize(connection.getSecret(AzEnvNames.KV_RESOURCE_GROUP_NAME));
+        this.location = EnvSanitizer.sanitize(connection.getSecret(AzEnvNames.KV_COSMOS_DB_LOCATION));
+        String dimensions = EnvSanitizer.sanitize(connection.getSecret(AzEnvNames.KV_COSMOS_DB_VECTOR_DIMENSIONS))
+                .replaceAll("^[\"']+|[\"']+$", "").trim();
+        try {
+            this.vectorDimensions = Integer.parseInt(dimensions);
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException("CosmosDbVectorDimensions must be a positive integer; received '"
+                    + dimensions + "'.", e);
+        }
+        if (this.vectorDimensions <= 0) {
+            throw new IllegalStateException("CosmosDbVectorDimensions must be a positive integer.");
+        }
     }
 
     /** Result of advancing one provisioning step. */
@@ -152,7 +162,7 @@ public class CosmosProvisioner {
         String accountId = String.format("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.DocumentDB/databaseAccounts/%s",
                 subscriptionId, resourceGroupName, config.getCosmosAccountName());
         String assignmentId = UUID.nameUUIDFromBytes((config.getCosmosAccountName() + "|" + principalId).getBytes()).toString();
-        String url = accountId + "/sqlRoleAssignments/" + assignmentId;
+        String url = ARM_BASE + accountId + "/sqlRoleAssignments/" + assignmentId;
         JsonNode existing = tryGet(url + "?api-version=" + ROLE_ASSIGNMENTS_API_VERSION);
         if (existing != null) return StepResult.ok();
 
@@ -180,11 +190,13 @@ public class CosmosProvisioner {
     }
 
     private JsonNode tryGet(String url) {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                .timeout(Duration.ofSeconds(30))
-                .header("Authorization", "Bearer " + armToken())
-                .GET().build();
         try {
+            URI uri = URI.create(url);
+            if (uri.getScheme() == null) throw new IllegalArgumentException("ARM GET URL has no scheme");
+            HttpRequest request = HttpRequest.newBuilder(uri)
+                    .timeout(Duration.ofSeconds(30))
+                    .header("Authorization", "Bearer " + armToken())
+                    .GET().build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() == 404) return null;
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
@@ -193,14 +205,15 @@ public class CosmosProvisioner {
             LOG.warn("ARM GET {} returned {}: {}", url, response.statusCode(), response.body());
             return null;
         } catch (Exception e) {
-            LOG.warn("ARM GET {} failed: {}", url, e.getMessage());
-            return null;
+            throw new IllegalStateException("ARM GET failed for " + safeUrl(url) + ": " + e.getMessage(), e);
         }
     }
 
     private void put(String url, ObjectNode body) {
         try {
-            HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+            URI uri = URI.create(url);
+            if (uri.getScheme() == null) throw new IllegalArgumentException("ARM PUT URL has no scheme");
+            HttpRequest request = HttpRequest.newBuilder(uri)
                     .timeout(Duration.ofSeconds(30))
                     .header("Authorization", "Bearer " + armToken())
                     .header("Content-Type", "application/json")
@@ -213,7 +226,16 @@ public class CosmosProvisioner {
         } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {
-            throw new IllegalStateException("ARM PUT " + url + " failed: " + e.getMessage(), e);
+            throw new IllegalStateException("ARM PUT failed for " + safeUrl(url) + ": " + e.getMessage(), e);
+        }
+    }
+
+    private String safeUrl(String url) {
+        try {
+            URI uri = URI.create(url);
+            return uri.getScheme() == null ? "<invalid ARM URL>" : uri.getScheme() + "://" + uri.getRawAuthority() + uri.getRawPath();
+        } catch (Exception e) {
+            return "<invalid ARM URL>";
         }
     }
 
@@ -230,10 +252,14 @@ public class CosmosProvisioner {
     }
 
     private String armToken() {
-        AccessToken token = credential.getToken(new TokenRequestContext()
-                        .addScopes("https://management.azure.com/.default"))
-                .block(Duration.ofSeconds(30));
-        if (token == null) throw new IllegalStateException("Failed to acquire an ARM access token");
-        return token.getToken();
+        try {
+            AccessToken token = credential.getToken(new TokenRequestContext()
+                            .addScopes("https://management.azure.com/.default"))
+                    .block(Duration.ofSeconds(30));
+            if (token == null) throw new IllegalStateException("Credential returned no token");
+            return token.getToken();
+        } catch (Exception e) {
+            throw new IllegalStateException("ARM token acquisition failed: " + e.getMessage(), e);
+        }
     }
 }

@@ -693,4 +693,5 @@ Write-Host "Profile titles set : $profileUpdated" -ForegroundColor Green
 Write-Host "Failed            : $failed" -ForegroundColor Red
 Write-Host ""
 Write-Host "[INFO] Next step: assign this group to the web app enterprise application and enforce MFA via Conditional Access." -ForegroundColor Cyan
+Write-Host "[INFO] Before adding a mailbox in the web admin page, assign each user an Exchange-capable Microsoft 365 license." -ForegroundColor Cyan
 

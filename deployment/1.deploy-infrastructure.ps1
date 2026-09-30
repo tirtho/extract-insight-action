@@ -832,18 +832,20 @@ if (-not $UserEmail) {
     }
 }
 
-# Create the AgentSessions table (idempotent – skip if exists)
-Write-Host "[INFO] Creating storage table: AgentSessions" -ForegroundColor Cyan
-$existingTable = Invoke-AzCliSilent -Arguments @('storage','table','exists','--name','AgentSessions',
-                     '--account-name',$StorageAccountName,'--auth-mode','login','--query','exists','-o','tsv')
-if ($existingTable.ExitCode -eq 0 -and $existingTable.Output -eq 'true') {
-    Write-Host "[WARNING] Storage table 'AgentSessions' already exists, skipping" -ForegroundColor Yellow
-} else {
-    $r = Invoke-AzCli -Description "Creating storage table: AgentSessions" `
-        -Arguments @('storage','table','create','--name','AgentSessions',
-                     '--account-name',$StorageAccountName,'--auth-mode','login','--output','none')
-    if ($null -ne $r) {
-        Write-Host "[SUCCESS] Storage table 'AgentSessions' created" -ForegroundColor Green
+# Create the tables used by email sessions and multi-agent orchestration.
+foreach ($tableName in @('AgentSessions', 'OrchestrationState', 'OrchestratorConversations')) {
+    Write-Host "[INFO] Creating storage table: $tableName" -ForegroundColor Cyan
+    $existingTable = Invoke-AzCliSilent -Arguments @('storage','table','exists','--name',$tableName,
+                         '--account-name',$StorageAccountName,'--auth-mode','login','--query','exists','-o','tsv')
+    if ($existingTable.ExitCode -eq 0 -and $existingTable.Output -eq 'true') {
+        Write-Host "[WARNING] Storage table '$tableName' already exists, skipping" -ForegroundColor Yellow
+    } else {
+        $r = Invoke-AzCli -Description "Creating storage table: $tableName" `
+            -Arguments @('storage','table','create','--name',$tableName,
+                         '--account-name',$StorageAccountName,'--auth-mode','login','--output','none')
+        if ($null -ne $r) {
+            Write-Host "[SUCCESS] Storage table '$tableName' created" -ForegroundColor Green
+        }
     }
 }
 
@@ -2134,6 +2136,7 @@ Write-Host ""
 Write-Host ">>> Step 11/12: Function Apps (Flex Consumption, Java 21)" -ForegroundColor White
 
 $AppInsightsKey = (Invoke-AzCliSilent -Arguments @('monitor','app-insights','component','show','--app',$AppInsightsName,'--resource-group',$ResourceGroupName,'--query','instrumentationKey','-o','tsv')).Output
+$AppInsightsConnectionString = (Invoke-AzCliSilent -Arguments @('monitor','app-insights','component','show','--app',$AppInsightsName,'--resource-group',$ResourceGroupName,'--query','connectionString','-o','tsv')).Output
 
 # Build common args for Flex Consumption function app creation
 $CommonFuncArgs = @('--resource-group',$ResourceGroupName,'--storage-account',$StorageAccountName,
@@ -2480,6 +2483,7 @@ $kvSecrets = @{
     "WebAppClientId"             = $WebAppClientId
     "WebAppClientSecret"         = $WebAppClientSecret
     "CosmosDbEndpoint"           = $CosmosDbEndpoint
+    "CosmosDbAccountName"        = $CosmosDbAccountName
     "CosmosDbDatabaseName"       = $CosmosDbDatabaseName
     "CosmosDbContainerName"               = $CosmosDbContainerName
     "ContentUnderstandingEndpoint"          = $ContentUnderstandingEndpoint
@@ -2561,7 +2565,7 @@ Write-Host "[INFO] Configuring Function App settings..." -ForegroundColor Cyan
 #   1. Delete the key-based AzureWebJobsStorage and DEPLOYMENT_STORAGE_CONNECTION_STRING app settings
 #   2. Update functionAppConfig.deployment.storage.authentication to SystemAssignedIdentity via ARM
 Write-Host "[INFO] Switching function apps to identity-based storage (runtime + deployment)" -ForegroundColor Cyan
-foreach ($funcName in @($FuncMailboxName, $FuncQueueDbName, $FuncCuQueueDbName)) {
+foreach ($funcName in @($FuncMailboxName, $FuncQueueDbName, $FuncCuQueueDbName, $FuncAgentServiceName)) {
     # Remove key-based app settings (idempotent — silently succeeds if already absent)
     Invoke-AzCliSilent -Arguments @('functionapp','config','appsettings','delete','--name',$funcName,'--resource-group',$ResourceGroupName,'--setting-names','AzureWebJobsStorage','DEPLOYMENT_STORAGE_CONNECTION_STRING','--output','none') | Out-Null
 
@@ -2602,6 +2606,7 @@ $mailboxSettings = @{
     "AzureWebJobsStorage__accountName" = $StorageAccountName
     "AzureWebJobsStorage__credential"  = "managedidentity"
     "AZURE_KEY_VAULT_URL"              = $KvUrl
+    "APPLICATIONINSIGHTS_CONNECTION_STRING" = $AppInsightsConnectionString
     "MailboxPollingSchedule"           = "@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=MailboxPollingSchedule)"
 }
 $r1 = Set-FunctionAppSettings -FunctionAppName $FuncMailboxName -ResourceGroup $ResourceGroupName -Settings $mailboxSettings
@@ -2621,6 +2626,7 @@ $queueDbSettings = @{
     "AzureWebJobsStorage__accountName"              = $StorageAccountName
     "AzureWebJobsStorage__credential"               = "managedidentity"
     "AZURE_KEY_VAULT_URL"                           = $KvUrl
+    "APPLICATIONINSIGHTS_CONNECTION_STRING"         = $AppInsightsConnectionString
     # Identity-based Service Bus connection for the @ServiceBusTopicTrigger binding
     "ServiceBusConnection__fullyQualifiedNamespace" = $ServiceBusHostname
     # Binding expressions used in the @ServiceBusTopicTrigger annotation
@@ -2638,6 +2644,7 @@ $cuQueueDbSettings = @{
     "AzureWebJobsStorage__accountName"          = $StorageAccountName
     "AzureWebJobsStorage__credential"           = "managedidentity"
     "AZURE_KEY_VAULT_URL"                       = $KvUrl
+    "APPLICATIONINSIGHTS_CONNECTION_STRING"     = $AppInsightsConnectionString
     "StorageQueuePollingSchedule"               = "@Microsoft.KeyVault(VaultName=$KeyVaultName;SecretName=StorageQueuePollingSchedule)"
 }
 $r3cu = Set-FunctionAppSettings -FunctionAppName $FuncCuQueueDbName -ResourceGroup $ResourceGroupName -Settings $cuQueueDbSettings
@@ -2662,6 +2669,8 @@ Write-Host "[INFO] Configuring Web App settings..." -ForegroundColor Cyan
 $webAppSettingsPayload = @{
     properties = @{
         "AZURE_KEY_VAULT_URL"      = $KvUrl
+        "APPLICATIONINSIGHTS_CONNECTION_STRING" = $AppInsightsConnectionString
+        "ApplicationInsightsAgent_EXTENSION_VERSION" = "~3"
         "USER_PROFILE_SECRET_NAME"  = "UserProfiles"
         # OIDC sign-in for end users (Spring Security). Renamed away from AZURE_* so
         # DefaultAzureCredential.EnvironmentCredential does NOT pick them up — the
@@ -2771,8 +2780,8 @@ if (-not $AgentServiceIdentity) {
 } else {
     # Key Vault: read framework config/tunables
     if ($KeyVaultId) {
-        Write-Host "[INFO] Key Vault Secrets User role for agent-service" -ForegroundColor Cyan
-        Set-RoleAssignment -Assignee $AgentServiceIdentity -Role 'Key Vault Secrets User' -Scope $KeyVaultId -PrincipalType 'ServicePrincipal' | Out-Null
+        Write-Host "[INFO] Key Vault Secrets Officer role for agent-service" -ForegroundColor Cyan
+        Set-RoleAssignment -Assignee $AgentServiceIdentity -Role 'Key Vault Secrets Officer' -Scope $KeyVaultId -PrincipalType 'ServicePrincipal' | Out-Null
     }
 
     # Storage: OrchestrationState / OrchestratorConversations tables
@@ -2921,6 +2930,7 @@ $agentServiceSettings = @{
     "AzureWebJobsStorage__accountName" = $StorageAccountName
     "AzureWebJobsStorage__credential"  = "managedidentity"
     "KeyVaultUrl"                      = $KvUrl
+    "APPLICATIONINSIGHTS_CONNECTION_STRING" = $AppInsightsConnectionString
 }
 $rAgentSvc = Set-FunctionAppSettings -FunctionAppName $FuncAgentServiceName -ResourceGroup $ResourceGroupName -Settings $agentServiceSettings
 if ($rAgentSvc.ExitCode -ne 0) {

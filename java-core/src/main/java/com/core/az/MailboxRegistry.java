@@ -1,9 +1,20 @@
 package com.core.az;
 
+import com.azure.core.credential.AccessToken;
+import com.azure.core.credential.TokenRequestContext;
 import com.azure.core.exception.ResourceNotFoundException;
+import com.azure.identity.DefaultAzureCredential;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.time.Instant;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -22,6 +33,8 @@ public class MailboxRegistry {
 
     private static final Logger LOG = LoggerFactory.getLogger(MailboxRegistry.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
+    private static final String ARM_BASE = "https://management.azure.com";
 
     private final AzConnection connection;
 
@@ -35,11 +48,54 @@ public class MailboxRegistry {
         config.setDefault(true);
         config.setEmailAddress(connection.getMailboxEmail());
         config.setHostname(hostnameOf(config.getEmailAddress()));
-        config.setCosmosEndpoint(connection.getSecret(AzEnvNames.KV_COSMOS_DB_ENDPOINT));
+        String endpoint = connection.getSecret(AzEnvNames.KV_COSMOS_DB_ENDPOINT);
+        config.setCosmosAccountName(defaultCosmosAccountName(endpoint));
+        config.setCosmosEndpoint(endpoint);
         config.setDatabaseName(connection.getSecret(AzEnvNames.KV_COSMOS_DB_DATABASE_NAME));
         config.setContainerName(connection.getSecret(AzEnvNames.KV_COSMOS_DB_CONTAINER_NAME));
         config.setStatus(MailboxConfig.Status.ACTIVE);
+        config.setCreatedAt(defaultCosmosCreatedAt(config.getCosmosAccountName()));
         return config;
+    }
+
+    private String defaultCosmosAccountName(String endpoint) {
+        String configured = optionalSecret(AzEnvNames.KV_COSMOS_DB_ACCOUNT_NAME);
+        if (configured != null && !configured.isBlank()) return configured;
+        try {
+            String host = URI.create(endpoint).getHost();
+            return host == null ? "" : host.split("\\.")[0];
+        } catch (Exception e) {
+            LOG.warn("Could not derive the default Cosmos account name from its endpoint", e);
+            return "";
+        }
+    }
+
+    private String defaultCosmosCreatedAt(String accountName) {
+        if (accountName == null || accountName.isBlank()) return null;
+        try {
+            String subscriptionId = connection.getSecret(AzEnvNames.KV_SUBSCRIPTION_ID);
+            String resourceGroup = connection.getSecret(AzEnvNames.KV_RESOURCE_GROUP_NAME);
+            String url = ARM_BASE + "/subscriptions/" + subscriptionId + "/resourceGroups/"
+                    + resourceGroup + "/providers/Microsoft.DocumentDB/databaseAccounts/"
+                    + accountName + "?api-version=2024-08-15";
+            AccessToken token = connection.getContentUnderstandingCredential()
+                    .getToken(new TokenRequestContext().addScopes(ARM_BASE + "/.default"))
+                    .block(Duration.ofSeconds(15));
+            if (token == null) return null;
+            HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("Authorization", "Bearer " + token.getToken())
+                    .GET().build();
+            HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                LOG.warn("Could not read default Cosmos account metadata: HTTP {}", response.statusCode());
+                return null;
+            }
+            return MAPPER.readTree(response.body()).path("systemData").path("createdAt").asText(null);
+        } catch (Exception e) {
+            LOG.warn("Could not read default Cosmos account creation metadata", e);
+            return null;
+        }
     }
 
     /** Returns the additional mailboxes registered via the Admin UI (any status). */
@@ -119,21 +175,42 @@ public class MailboxRegistry {
         return at < 0 ? "" : emailAddress.substring(at + 1).toLowerCase(Locale.ROOT);
     }
 
+    public static String localPartOf(String emailAddress) {
+        if (emailAddress == null) return "";
+        int at = emailAddress.indexOf('@');
+        return at < 0 ? emailAddress : emailAddress.substring(0, at).toLowerCase(Locale.ROOT);
+    }
+
     /**
      * Derives a valid Cosmos DB account name following the same convention as the
-     * default deployment: {@code cosmos-<project>-<hostname>-<environment>-<suffix>}.
+         * requested multi-mailbox convention: {@code cosmos-eia-<environment>-<suffix>-<username>}.
      * Cosmos account names must be 3-44 chars, lowercase letters/digits/hyphens only.
      */
-    public String cosmosAccountNameFor(String hostname) {
-        String project = connection.getSecret(AzEnvNames.KV_PROJECT_NAME);
+    public String cosmosAccountNameFor(String emailAddress) {
         String environment = connection.getSecret(AzEnvNames.KV_ENVIRONMENT_NAME);
         String suffix = connection.getSecret(AzEnvNames.KV_RESOURCE_SUFFIX);
-        String sanitizedHost = hostname.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-");
-        String name = String.format("cosmos-%s-%s-%s-%s", project, sanitizedHost, environment, suffix)
-                .replaceAll("-+", "-");
-        if (name.length() > 44) name = name.substring(0, 44);
-        name = name.replaceAll("-+$", "");
-        return name;
+        String localPart = localPartOf(emailAddress);
+        String sanitizedMailbox = localPart.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "-");
+        String base = String.format("cosmos-eia-%s-%s-%s", environment, suffix, sanitizedMailbox)
+            .replaceAll("-+", "-").replaceAll("^-|-$", "");
+        if (base.length() <= 44) return base;
+
+        String hash = shortHash(emailAddress.toLowerCase(Locale.ROOT));
+        String suffixPart = "-" + hash;
+        int prefixLength = Math.max(3, 44 - suffixPart.length());
+        String prefix = base.substring(0, Math.min(prefixLength, base.length())).replaceAll("-+$", "");
+        return (prefix + suffixPart).replaceAll("-+", "-").replaceAll("-$", "");
+    }
+
+    private static String shortHash(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (int i = 0; i < 4; i++) hex.append(String.format("%02x", digest[i]));
+            return hex.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is not available", e);
+        }
     }
 
     private String optionalSecret(String secretName) {

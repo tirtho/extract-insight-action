@@ -3,6 +3,7 @@ package com.microsoft.azure.functions.agent;
 import com.core.az.AzConnection;
 import com.core.az.AzEnvNames;
 import com.core.az.CosmosProvisioner;
+import com.core.az.EnvSanitizer;
 import com.core.az.MailboxConfig;
 import com.core.az.MailboxRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -40,6 +41,8 @@ public class MailboxAdminFunction {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int MAX_ADDITIONAL_MAILBOXES = 5;
     private static final Pattern EMAIL_PATTERN = Pattern.compile("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");
+        private static final Pattern LOCAL_PART_PATTERN = Pattern.compile(
+            "^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*$");
 
     // ================================================================
     //  HTTP – list / add / delete
@@ -51,13 +54,16 @@ public class MailboxAdminFunction {
                     route = "agent-admin/mailboxes") HttpRequestMessage<Optional<String>> request,
             ExecutionContext context) {
         try (AzConnection connection = connection()) {
-            List<MailboxConfig> mailboxes = connection.getMailboxRegistry().listAll();
-            StringBuilder json = new StringBuilder("[");
+            MailboxRegistry registry = connection.getMailboxRegistry();
+            List<MailboxConfig> mailboxes = registry.listAll();
+            StringBuilder json = new StringBuilder("{\"tenantDomain\":\"")
+                    .append(esc(registry.tenantDomain()))
+                    .append("\",\"mailboxes\":[");
             for (int i = 0; i < mailboxes.size(); i++) {
                 if (i > 0) json.append(",");
                 json.append(mailboxJson(mailboxes.get(i)));
             }
-            json.append("]");
+            json.append("]}");
             return json(request, HttpStatus.OK, json.toString());
         } catch (Exception e) {
             return error(request, e);
@@ -80,12 +86,26 @@ public class MailboxAdminFunction {
                 return error(request, HttpStatus.BAD_REQUEST, "A valid emailAddress is required.");
             }
             String hostname = MailboxRegistry.hostnameOf(emailAddress);
+            String localPart = emailAddress.substring(0, emailAddress.indexOf('@'));
+            if (!isValidLocalPart(localPart)) {
+                return error(request, HttpStatus.BAD_REQUEST,
+                        "Mailbox username must be a valid RFC 5322 dot-atom local part (1-64 chars; no spaces, quotes, consecutive dots, leading dot, or trailing dot).");
+            }
             if (!hostname.equalsIgnoreCase(registry.tenantDomain())) {
                 return error(request, HttpStatus.BAD_REQUEST,
                         "Mailbox domain must match the tenant domain '" + registry.tenantDomain()
                                 + "'. Cross-tenant mailboxes are not supported.");
             }
-            if (registry.find(emailAddress).isPresent()) {
+            Optional<MailboxConfig> existing = registry.find(emailAddress);
+            if (existing.isPresent()) {
+                MailboxConfig mailbox = existing.get();
+                if (!mailbox.isDefault() && mailbox.getStatus() == MailboxConfig.Status.FAILED) {
+                    mailbox.setStatus(MailboxConfig.Status.PENDING);
+                    mailbox.setErrorMessage(null);
+                    registry.save(mailbox);
+                    logger.info("Restarted failed mailbox provisioning for " + emailAddress);
+                    return json(request, HttpStatus.ACCEPTED, mailboxJson(mailbox));
+                }
                 return error(request, HttpStatus.CONFLICT, "Mailbox '" + emailAddress + "' is already registered.");
             }
             if (registry.listAdditional().size() >= MAX_ADDITIONAL_MAILBOXES) {
@@ -96,7 +116,7 @@ public class MailboxAdminFunction {
             MailboxConfig mailbox = new MailboxConfig();
             mailbox.setEmailAddress(emailAddress);
             mailbox.setHostname(hostname);
-            mailbox.setCosmosAccountName(registry.cosmosAccountNameFor(hostname));
+            mailbox.setCosmosAccountName(registry.cosmosAccountNameFor(emailAddress));
             mailbox.setDatabaseName(connection.getSecret(AzEnvNames.KV_COSMOS_DB_DATABASE_NAME));
             mailbox.setContainerName(connection.getSecret(AzEnvNames.KV_COSMOS_DB_CONTAINER_NAME));
             mailbox.setStatus(MailboxConfig.Status.PENDING);
@@ -144,24 +164,34 @@ public class MailboxAdminFunction {
         try (AzConnection connection = connection()) {
             MailboxRegistry registry = connection.getMailboxRegistry();
             List<MailboxConfig> mailboxes = registry.listAdditional();
+            logger.info("ProvisionMailboxes timer found " + mailboxes.size() + " additional mailbox(es).");
             if (mailboxes.isEmpty()) return;
-
-            CosmosProvisioner provisioner = new CosmosProvisioner(connection);
-            String mailboxPrincipalId = optionalSecret(connection, AzEnvNames.KV_MAILBOX_FUNCTION_PRINCIPAL_ID);
-            String queueDbPrincipalId = optionalSecret(connection, AzEnvNames.KV_QUEUE_DB_FUNCTION_PRINCIPAL_ID);
 
             for (MailboxConfig mailbox : mailboxes) {
                 try {
+                    logger.info("Advancing mailbox provisioning for " + mailbox.getEmailAddress()
+                            + " from status " + mailbox.getStatus() + ".");
+                    CosmosProvisioner provisioner = new CosmosProvisioner(connection);
+                        String mailboxPrincipalId = EnvSanitizer.sanitize(
+                            optionalSecret(connection, AzEnvNames.KV_MAILBOX_FUNCTION_PRINCIPAL_ID));
+                        String queueDbPrincipalId = EnvSanitizer.sanitize(
+                            optionalSecret(connection, AzEnvNames.KV_QUEUE_DB_FUNCTION_PRINCIPAL_ID));
                     advance(mailbox, provisioner, mailboxPrincipalId, queueDbPrincipalId, registry);
                 } catch (Exception e) {
                     logger.severe("Failed to advance provisioning for " + mailbox.getEmailAddress() + ": " + e.getMessage());
                     mailbox.setStatus(MailboxConfig.Status.FAILED);
-                    mailbox.setErrorMessage(e.getMessage());
-                    registry.save(mailbox);
+                    mailbox.setErrorMessage(e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+                    try {
+                        registry.save(mailbox);
+                    } catch (Exception saveError) {
+                        logger.severe("Failed to persist provisioning failure for " + mailbox.getEmailAddress()
+                                + ": " + saveError.getMessage());
+                    }
                 }
             }
         } catch (Exception e) {
-            logger.severe("ProvisionMailboxes failed: " + e.getMessage());
+            logger.severe("ProvisionMailboxes failed before mailbox processing: "
+                    + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
         }
     }
 
@@ -225,6 +255,10 @@ public class MailboxAdminFunction {
     private void fail(MailboxConfig mailbox, String message) {
         mailbox.setStatus(MailboxConfig.Status.FAILED);
         mailbox.setErrorMessage(message);
+    }
+
+    private boolean isValidLocalPart(String localPart) {
+        return localPart != null && localPart.length() <= 64 && LOCAL_PART_PATTERN.matcher(localPart).matches();
     }
 
     // ================================================================
