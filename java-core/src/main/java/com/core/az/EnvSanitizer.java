@@ -15,17 +15,12 @@ public final class EnvSanitizer {
 
     private EnvSanitizer() {}
 
-    /**
-     * Strips BOM/zero-width characters, surrounding whitespace, and any other
-     * leading non-alphanumeric garbage. Every value this project reads this way
-     * (tenant id, client id, endpoint URL, ...) starts with an ASCII letter or
-     * digit, so trimming leading non-alphanumeric characters is a charset-agnostic
-     * way to remove such prefixes without enumerating every possible mis-encoding.
-     */
+    /** Strips known BOM/zero-width artifacts and surrounding whitespace. */
     public static String sanitize(String value) {
         if (value == null) return null;
-        return value.replace("\uFEFF", "").replace("\u200B", "")
-                .replaceFirst("^[^A-Za-z0-9]+", "")
+        return value.replace("\uFEFF", "")
+                .replace("\u200B", "")
+                .replace("\u00EF\u00BB\u00BF", "")
                 .trim();
     }
 }

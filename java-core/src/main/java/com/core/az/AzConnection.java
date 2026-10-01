@@ -93,7 +93,7 @@ public class AzConnection implements AutoCloseable {
             try {
                 String value = secretClient.getSecret(name).getValue();
                 LOG.info("Secret '{}' retrieved successfully", name);
-                return value;
+                return EnvSanitizer.sanitize(value);
             } catch (ResourceNotFoundException e) {
                 LOG.warn("Secret '{}' was not found in Key Vault", name);
                 throw e;

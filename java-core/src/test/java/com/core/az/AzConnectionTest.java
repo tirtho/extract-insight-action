@@ -117,6 +117,17 @@ class AzConnectionTest {
         verify(secretClient, times(1)).getSecret(AzEnvNames.KV_AI_FOUNDRY_MODEL_NAME);
     }
 
+    @Test
+    void getSecret_stripsBomAndMojibakeBeforeCaching() {
+        stubSecret("bom", "\uFEFFvalue");
+        stubSecret("mojibake", "\u00EF\u00BB\u00BFvalue");
+        stubSecret("json", "\uFEFF[{\"emailAddress\":\"sales@example.com\"}]");
+
+        assertEquals("value", connection.getSecret("bom"));
+        assertEquals("value", connection.getSecret("mojibake"));
+        assertEquals("[{\"emailAddress\":\"sales@example.com\"}]", connection.getSecret("json"));
+    }
+
     // ---------------------------------------------------------------
     //  Cosmos DB – verify correct secrets are read
     // ---------------------------------------------------------------

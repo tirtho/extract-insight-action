@@ -566,6 +566,7 @@ function New-ForwardSlashZip {
         [Parameter(Mandatory=$true)][string]$DestinationPath
     )
 
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [System.IO.Compression.ZipFile]::Open(
         $DestinationPath,

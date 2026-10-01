@@ -1,18 +1,12 @@
 package com.eia.ui.config;
 
-import java.util.HashMap;
-import java.util.Map;
-
 import com.core.az.EnvSanitizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.oauth2.client.web.DefaultOAuth2AuthorizationRequestResolver;
-import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestResolver;
 import org.springframework.security.oauth2.client.registration.ClientRegistration;
 import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
 import org.springframework.security.oauth2.client.registration.InMemoryClientRegistrationRepository;
-import org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest;
 import org.springframework.security.oauth2.core.AuthorizationGrantType;
 import org.springframework.security.oauth2.core.oidc.IdTokenClaimNames;
 import org.springframework.security.web.SecurityFilterChain;
@@ -69,9 +63,7 @@ public class SecurityConfig {
                             .requestMatchers("/error", "/logout-success", "/favicon.ico", "/*.css", "/*.js",
                                     "/webjars/**", "/actuator/health", "/actuator/health/**").permitAll()
                             .anyRequest().authenticated())
-                .oauth2Login(oauth2 -> oauth2
-                    .authorizationEndpoint(authorization -> authorization
-                        .authorizationRequestResolver(forcePromptLoginResolver(clientRegistrationRepository))))
+                            .oauth2Login(oauth2 -> {})
                     .logout(logout -> logout
                             .invalidateHttpSession(true)
                             .clearAuthentication(true)
@@ -86,41 +78,6 @@ public class SecurityConfig {
         }
 
         return http.build();
-    }
-
-    private OAuth2AuthorizationRequestResolver forcePromptLoginResolver(
-            ClientRegistrationRepository clientRegistrationRepository) {
-        DefaultOAuth2AuthorizationRequestResolver defaultResolver =
-                new DefaultOAuth2AuthorizationRequestResolver(
-                        clientRegistrationRepository,
-                        "/oauth2/authorization");
-
-        // OAuth2AuthorizationRequestResolver has two resolve() overloads so it
-        // is NOT a functional interface — use an anonymous class, not a lambda.
-        return new OAuth2AuthorizationRequestResolver() {
-            @Override
-            public OAuth2AuthorizationRequest resolve(jakarta.servlet.http.HttpServletRequest request) {
-                return addPromptLogin(defaultResolver.resolve(request));
-            }
-
-            @Override
-            public OAuth2AuthorizationRequest resolve(
-                    jakarta.servlet.http.HttpServletRequest request, String clientRegistrationId) {
-                return addPromptLogin(defaultResolver.resolve(request, clientRegistrationId));
-            }
-
-            private OAuth2AuthorizationRequest addPromptLogin(OAuth2AuthorizationRequest original) {
-                if (original == null) {
-                    return null;
-                }
-                Map<String, Object> extraParams = new HashMap<>(original.getAdditionalParameters());
-                extraParams.put("prompt", "login");
-                extraParams.put("max_age", "0");
-                return OAuth2AuthorizationRequest.from(original)
-                        .additionalParameters(extraParams)
-                        .build();
-            }
-        };
     }
 
     private static String resolveEnv(String... names) {

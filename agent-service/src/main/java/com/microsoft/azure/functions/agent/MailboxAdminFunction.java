@@ -100,6 +100,10 @@ public class MailboxAdminFunction {
             if (existing.isPresent()) {
                 MailboxConfig mailbox = existing.get();
                 if (!mailbox.isDefault() && mailbox.getStatus() == MailboxConfig.Status.FAILED) {
+                    mailbox.setCosmosAccountName(registry.cosmosAccountNameFor(emailAddress));
+                    mailbox.setCosmosEndpoint(null);
+                    mailbox.setDatabaseName(connection.getSecret(AzEnvNames.KV_COSMOS_DB_DATABASE_NAME));
+                    mailbox.setContainerName(connection.getSecret(AzEnvNames.KV_COSMOS_DB_CONTAINER_NAME));
                     mailbox.setStatus(MailboxConfig.Status.PENDING);
                     mailbox.setErrorMessage(null);
                     registry.save(mailbox);
