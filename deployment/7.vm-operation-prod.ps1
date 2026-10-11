@@ -105,10 +105,23 @@ if ($operation -eq '1') {
     $tunnel = $null
     $tunnelStdOut = $null
     $tunnelStdErr = $null
+    $tunnelPortStart = 55000
+    $tunnelPortEnd = 55100
+    function Test-LocalTcpPortAvailable {
+        param([int]$Port)
+        $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $Port)
+        try {
+            $listener.Start()
+            return $true
+        } catch {
+            return $false
+        } finally {
+            $listener.Stop()
+        }
+    }
     try {
-        for ($candidatePort = 55000; $candidatePort -le 55020 -and -not $tunnel; $candidatePort++) {
-            $portInUse = @(Get-NetTCPConnection -LocalPort $candidatePort -ErrorAction SilentlyContinue).Count -gt 0
-            if ($portInUse) { continue }
+        for ($candidatePort = $tunnelPortStart; $candidatePort -le $tunnelPortEnd -and -not $tunnel; $candidatePort++) {
+            if (-not (Test-LocalTcpPortAvailable -Port $candidatePort)) { continue }
             $localRdpPort = $candidatePort
             $credentialTargets = @(
                 "TERMSRV/127.0.0.1:$localRdpPort",
@@ -146,7 +159,7 @@ if ($operation -eq '1') {
             }
         }
         if (-not $tunnel) {
-            throw 'Could not open a local Bastion tunnel on ports 55000-55020. Check local firewall, VPN, or excluded TCP ports.'
+            throw "Could not open a local Bastion tunnel on ports $tunnelPortStart-$tunnelPortEnd. Check local firewall, VPN, or excluded TCP ports."
         }
         Write-Host "[INFO] Bastion tunnel is ready on localhost:$localRdpPort." -ForegroundColor Green
         $rdpFile = Join-Path $env:TEMP "eia-bastion-$localRdpPort.rdp"
