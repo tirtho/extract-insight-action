@@ -76,7 +76,18 @@ if ($operation -eq '1') {
         finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordBstr) }
     }
     Write-Host "[INFO] Preparing RDP connection to $VmName through Bastion $BastionName..." -ForegroundColor Cyan
-    $vmState = ((& az vm get-instance-view --name $VmName --resource-group $ResourceGroupName --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code | [0]" --output tsv 2>$null) -join '').Trim()
+    function Get-VmPowerState {
+        $stateOutput = @(& az vm get-instance-view --name $VmName --resource-group $ResourceGroupName --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code | [0]" --output tsv 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            $cliError = ($stateOutput -join ' ').Trim()
+            if ($cliError -match "az login|Please run") {
+                throw "Azure CLI is not authenticated. Run 'az login' and retry. Details: $cliError"
+            }
+            throw "Could not read the power state for VM '$VmName'. Details: $cliError"
+        }
+        return (($stateOutput -join '').Trim())
+    }
+    $vmState = Get-VmPowerState
     if ($vmState -in @('PowerState/stopped','PowerState/deallocated')) {
         Write-Host "[INFO] VM is $($vmState.Split('/')[1]); starting it..." -ForegroundColor Cyan
         & az vm start --name $VmName --resource-group $ResourceGroupName --output none
@@ -87,7 +98,7 @@ if ($operation -eq '1') {
 
     $elapsed = 0
     do {
-        $vmState = ((& az vm get-instance-view --name $VmName --resource-group $ResourceGroupName --query "instanceView.statuses[?starts_with(code, 'PowerState/')].code | [0]" --output tsv 2>$null) -join '').Trim()
+        $vmState = Get-VmPowerState
         if ($vmState -ne 'PowerState/running') {
             Write-Host "  Waiting for VM to run: $vmState" -ForegroundColor DarkCyan
             Start-Sleep -Seconds 10
