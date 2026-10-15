@@ -201,6 +201,22 @@ function Invoke-MavenPackage {
     }
 }
 
+function Invoke-JavaWithAzureCliCredential {
+    param(
+        [Parameter(Mandatory=$true)][string]$JavaPath,
+        [Parameter(Mandatory=$true)][string[]]$JavaArguments
+    )
+
+    $previousTokenCredentials = $env:AZURE_TOKEN_CREDENTIALS
+    try {
+        $env:AZURE_TOKEN_CREDENTIALS = 'AzureCliCredential'
+        & $JavaPath @JavaArguments
+        $script:LASTEXITCODE = $LASTEXITCODE
+    } finally {
+        $env:AZURE_TOKEN_CREDENTIALS = $previousTokenCredentials
+    }
+}
+
 function Get-ArtifactSha256 {
     param([Parameter(Mandatory=$true)][string]$Path)
     if (-not (Test-Path $Path)) { return "" }
@@ -377,7 +393,8 @@ if ($selections -contains '3') {
     if (-not (Test-Path $WorkerDefinitionsPath)) {
         throw "Worker definitions manifest not found: $WorkerDefinitionsPath"
     }
-    $workerDefinitions = @(Get-Content -Path $WorkerDefinitionsPath -Raw | ConvertFrom-Json)
+    $parsedWorkerDefinitions = Get-Content -Path $WorkerDefinitionsPath -Raw | ConvertFrom-Json
+    $workerDefinitions = @($parsedWorkerDefinitions | ForEach-Object { $_ })
     foreach ($worker in $workerDefinitions) {
         if ([string]::IsNullOrWhiteSpace($worker.agentType) -or
             [string]::IsNullOrWhiteSpace($worker.instructions)) {
@@ -398,6 +415,37 @@ if ($selections -contains '3') {
     }
 }
 
+Write-Host ""
+Write-Host "Optional: skip agents that are already provisioned" -ForegroundColor White
+for ($targetIndex = 0; $targetIndex -lt $targets.Count; $targetIndex++) {
+    $target = $targets[$targetIndex]
+    $displayName = if ($target.IsConfigured) { $target.AgentType } else { $target.Label }
+    Write-Host "  $($targetIndex + 1). $displayName"
+}
+Write-Host ""
+do {
+    $skipInput = (Read-Host "Enter agent number(s) to skip, comma-separated, or press [Enter] for none").Trim()
+    $skipIndexes = @($skipInput -split ',' |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -ne '' })
+    $validSkipSelection = [string]::IsNullOrWhiteSpace($skipInput) -or
+        (($skipIndexes | Where-Object { $_ -notmatch '^\d+$' -or [int]$_ -lt 1 -or [int]$_ -gt $targets.Count }).Count -eq 0)
+    if (-not $validSkipSelection) {
+        Write-Host "[ERROR] Enter only listed agent numbers, separated by commas." -ForegroundColor Red
+    }
+} while (-not $validSkipSelection)
+
+foreach ($skipIndex in ($skipIndexes | Select-Object -Unique)) {
+    $target = $targets[[int]$skipIndex - 1]
+    $target.SkipProvision = $true
+    Write-Host "[SKIPPED] $($target.Label) will not be rebuilt or provisioned." -ForegroundColor Yellow
+}
+
+if (@($targets | Where-Object { -not $_.SkipProvision }).Count -eq 0) {
+    Write-Host "[INFO] All selected agents were skipped. Nothing to provision." -ForegroundColor Yellow
+    exit 0
+}
+
 # Confirm the resource group before querying existing project connections.
 $confirmRg = Read-Host "Press [Enter] to accept Resource Group '$ResourceGroupName', or type a new name to override"
 $confirmRg = $confirmRg.Trim()
@@ -413,7 +461,7 @@ if ($selections -contains '3' -and $workerDefinitions.Count -gt 0) {
     Write-Host ""
     Write-Host ">>> Step 2: Configure worker instructions and tools" -ForegroundColor White
     Write-Host "[INFO] Existing project connections are listed as available Foundry tools." -ForegroundColor DarkCyan
-    $existingConnections = @(Get-ExistingFoundryConnections)
+    $existingConnections = $null
     foreach ($worker in $workerDefinitions) {
         $target = $targets | Where-Object { $_.AgentType -eq [string]$worker.agentType } | Select-Object -First 1
         $existingAgent = Get-ExistingFoundryAgent -AgentName ([string]$worker.agentType)
@@ -423,6 +471,13 @@ if ($selections -contains '3' -and $workerDefinitions.Count -gt 0) {
             $target.Instructions = $existingAgent.Instructions
             $target.Tools = @($existingAgent.Tools)
             $target.FoundryExists = $true
+        }
+        if ($target.SkipProvision) {
+            Write-Host "[SKIPPED] Worker '$($worker.agentType)' configuration and provisioning." -ForegroundColor Yellow
+            continue
+        }
+        if ($null -eq $existingConnections) {
+            $existingConnections = @(Get-ExistingFoundryConnections)
         }
         Write-Host ""
         Write-Host "Worker '$($worker.agentType)'" -ForegroundColor White
@@ -487,7 +542,11 @@ if ($selections -contains '3' -and $workerDefinitions.Count -gt 0) {
                     Write-Host "[ERROR] Enter 0 or a listed tool number." -ForegroundColor Red
                 }
             } while (-not $validChoice)
-            if ([int]$choice -gt 0) { $currentReference = $existingConnections[[int]$choice - 1].Reference }
+            if ([int]$choice -gt 0) {
+                $selectedConnection = $existingConnections[[int]$choice - 1]
+                $currentReference = $selectedConnection.Reference
+                $currentServerUrl = $selectedConnection.Target
+            }
             if ([string]::IsNullOrWhiteSpace($currentReference)) {
                 Write-Host "[INFO] Leaving '$toolName' unbound" -ForegroundColor DarkCyan
             } else {
@@ -517,6 +576,9 @@ $defaultInstructionsByAgent = @{
 }
 
 foreach ($target in $targets) {
+    if ($target.SkipProvision) {
+        continue
+    }
     if ($target.IsConfigured) {
         Write-Host "[INFO] '$($target.Label)' loaded from worker manifest; instructions were configured in Step 2." -ForegroundColor DarkCyan
         continue
@@ -552,6 +614,10 @@ Write-Host ""
 Write-Host "[INFO] ============================================================" -ForegroundColor Cyan
 Write-Host "[INFO] About to provision:"                                            -ForegroundColor Cyan
 foreach ($t in $targets) {
+    if ($t.SkipProvision) {
+        Write-Host "  $($t.Label) [SKIPPED]" -ForegroundColor Yellow
+        continue
+    }
     Write-Host "  $($t.Label)" -ForegroundColor Cyan
     Write-Host "    Instructions: $($t.Instructions)" -ForegroundColor DarkCyan
     foreach ($tool in @($t.Tools)) {
@@ -586,7 +652,7 @@ Write-Host "[OK] Key Vault URL: $kvUrl" -ForegroundColor Green
 # =============================================================================
 # STEP 4b: Ensure current-user AI Foundry RBAC (self-sufficient provisioning)
 # =============================================================================
-# The provisioner runs as the signed-in user (DefaultAzureCredential) and
+# The provisioner runs as the signed-in Azure CLI user and
 # registers the agent via the AI Foundry agents API. These are the data-plane
 # roles that API needs, so this script does NOT depend on 6.operation-dev.ps1.
 Write-Host ""
@@ -712,6 +778,11 @@ foreach ($target in $targets) {
     $SourceDir    = $target.SourceDir
     $Instructions = $target.Instructions
 
+    if ($target.SkipProvision) {
+        Write-Host "[SKIPPED] Agent: $Label" -ForegroundColor Yellow
+        continue
+    }
+
     Write-Host ""
     Write-Host "[INFO] ---- Agent: $Label ----" -ForegroundColor White
 
@@ -827,13 +898,16 @@ foreach ($target in $targets) {
             $workerArgs += @('--foundry-tool', $reference, [string]$tool.name, [string]$tool.description, $serverUrl)
         }
         $workerArgs += $Instructions
-        & $javaExe -cp $jarFile.FullName $target.MainClass $workerArgs
+        Invoke-JavaWithAzureCliCredential -JavaPath $javaExe `
+            -JavaArguments (@('-cp', $jarFile.FullName, $target.MainClass) + $workerArgs)
     } elseif ($target.MainClass) {
         # Multi-agent system JAR has no single Main-Class (two agents share one module);
         # invoke the specific agent's static main() explicitly via -cp.
-        & $javaExe -cp $jarFile.FullName $target.MainClass $kvUrl $Instructions
+        Invoke-JavaWithAzureCliCredential -JavaPath $javaExe `
+            -JavaArguments @('-cp', $jarFile.FullName, $target.MainClass, $kvUrl, $Instructions)
     } else {
-        & $javaExe -jar $jarFile.FullName $kvUrl $Instructions
+        Invoke-JavaWithAzureCliCredential -JavaPath $javaExe `
+            -JavaArguments @('-jar', $jarFile.FullName, $kvUrl, $Instructions)
     }
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[ERROR] Provisioning failed for $Label (exit code $LASTEXITCODE)" -ForegroundColor Red

@@ -132,10 +132,19 @@ WebAppAuthAppName="${WEBAPP_AUTH_APP_NAME:-${ProjectName}-webapp-auth-${Environm
 WebAppClientId="${WEBAPP_CLIENT_ID:-}"
 WebAppClientSecret="${WEBAPP_CLIENT_SECRET:-}"
 AppInsightsName="${APP_INSIGHTS_NAME:-ai-${ProjectName}-${Environment}}"
-CosmosDbAccountName="${COSMOS_DB_ACCOUNT_NAME:-cosmos-${ProjectName}-${Environment}-${SUFFIX}}"
+UserEmailAddress="${USER_EMAIL_ADDRESS:-}"
+if [[ "$Environment" == "ins" ]]; then
+    CosmosMailboxNamePart="$(printf '%s' "${UserEmailAddress%%@*}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-|-$//g')"
+    if [[ -z "${COSMOS_DB_ACCOUNT_NAME:-}" && -z "$CosmosMailboxNamePart" ]]; then
+        echo "[ERROR] Cannot derive Cosmos account suffix from USER_EMAIL_ADDRESS." >&2
+        exit 1
+    fi
+    CosmosDbAccountName="${COSMOS_DB_ACCOUNT_NAME:-cosmos-${ProjectName}-${Environment}-${SUFFIX}-${CosmosMailboxNamePart}}"
+else
+    CosmosDbAccountName="${COSMOS_DB_ACCOUNT_NAME:-cosmos-${ProjectName}-${Environment}-${SUFFIX}}"
+fi
 StorageQueueName="${STORAGE_QUEUE_NAME:-cu-analyze-ops-${ProjectName}-${Environment}-${SUFFIX}}"
 StorageQueuePollingSchedule="${STORAGE_QUEUE_POLLING_SCHEDULE:-0 */1 * * * *}"
-UserEmailAddress="${USER_EMAIL_ADDRESS:-}"
 PollingMailboxName="${POLLING_MAILBOX_NAME:-Inbox}"
 ReadMailboxForPastNSeconds="${READ_MAILBOX_FOR_PAST_N_SECONDS:-3600}"
 CosmosDbDatabaseName="DocAIDatabase"

@@ -299,7 +299,12 @@ if (-not [string]::IsNullOrWhiteSpace($env:LOCATION)) {
 
 Write-Host "[INFO] Location: $Location" -ForegroundColor Cyan
 $StorageAccountName = "st$ProjClean$Environment$StorageClean"
-$CosmosDbAccountName = "cosmos-$ProjectName-$Environment-$Suffix"
+$CosmosDbAccountName = if ($Environment -eq 'ins') {
+    $configuredCosmosAccount = ((& az keyvault secret show --vault-name "kv-$ProjectName-$Environment-$Suffix" --name CosmosDbAccountName --query value -o tsv 2>$null) -join '').Trim()
+    if ($configuredCosmosAccount) { $configuredCosmosAccount } else { "cosmos-$ProjectName-$Environment-$Suffix-company" }
+} else {
+    "cosmos-$ProjectName-$Environment-$Suffix"
+}
 $ContentUnderstandingName = "cu-$ProjectName-$Environment-$Suffix"
 $AiFoundryName       = "oai-$ProjectName-$Environment-$Suffix"
 $KeyVaultName        = "kv-$ProjectName-$Environment-$Suffix"

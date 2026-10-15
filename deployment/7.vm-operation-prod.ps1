@@ -219,7 +219,12 @@ $FunctionApps = @(
     "func-cuqueuedb-$ProjectName-$Environment-$Suffix"
 )
 $StorageAccountName = "st$($ProjectName -replace '-','')$Environment$Suffix"
-$CosmosAccountName = "cosmos-$ProjectName-$Environment-$Suffix"
+$CosmosAccountName = if ($Environment -eq 'ins') {
+    $configuredCosmosAccount = ((& az keyvault secret show --vault-name "kv-$ProjectName-$Environment-$Suffix" --name CosmosDbAccountName --query value -o tsv 2>$null) -join '').Trim()
+    if ($configuredCosmosAccount) { $configuredCosmosAccount } else { "cosmos-$ProjectName-$Environment-$Suffix-company" }
+} else {
+    "cosmos-$ProjectName-$Environment-$Suffix"
+}
 $KeyVaultName = "kv-$ProjectName-$Environment-$Suffix"
 $FoundryName = "oai-$ProjectName-$Environment-$Suffix"
 $ContentUnderstandingName = "cu-$ProjectName-$Environment-$Suffix"

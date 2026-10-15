@@ -456,6 +456,14 @@ strong, b {
     margin-top: 18px;
 }
 
+.email-list-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 34px;
+    align-items: stretch;
+    gap: 4px;
+    min-width: 0;
+}
+
 .email-link {
     display: flex;
     flex-direction: column;
@@ -469,6 +477,49 @@ strong, b {
     transition: border-color 160ms ease, transform 160ms ease, background 160ms ease;
     min-width: 0;
     overflow: hidden;
+}
+
+.email-delete-form {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.email-delete-btn {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: #8b3b32;
+    cursor: pointer;
+}
+
+.email-delete-btn:hover,
+.email-delete-btn:focus-visible {
+    border-color: rgba(139, 59, 50, 0.28);
+    background: rgba(139, 59, 50, 0.09);
+    outline: none;
+}
+
+.email-delete-feedback {
+    margin: 10px 0 0;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 0.82rem;
+}
+
+.email-delete-success {
+    color: #155b3e;
+    background: rgba(21, 91, 62, 0.09);
+}
+
+.email-delete-error {
+    color: #8b3b32;
+    background: rgba(139, 59, 50, 0.09);
 }
 
 .email-link:hover,

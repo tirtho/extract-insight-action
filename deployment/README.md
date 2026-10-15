@@ -138,6 +138,21 @@ place between deployments.
 .\deployment\6.operation-dev.ps1 -Environment dev -Suffix 1
 ```
 
+When `3.deploy-agents.ps1` lists the selected agents, enter the numbers of any
+agents that are already in place and should be skipped. Skipped agents are not
+rebuilt or provisioned, so their existing Foundry definitions are left intact.
+
+Java provisioning in `3.deploy-agents.ps1` uses the signed-in Azure CLI user,
+matching the identity granted Foundry RBAC by the script. It temporarily sets
+`AZURE_TOKEN_CREDENTIALS=AzureCliCredential` for each Java invocation and restores
+the previous value afterward. This requires Azure Identity 1.17.0 or later.
+Runtime services retain their normal credential configuration.
+
+If provisioning logs show `ManagedIdentityCredential` followed by a Foundry 403,
+the provisioner is using a host identity instead of the CLI user. Rerun the
+updated script; the authentication logs should show `AzureCliCredential`.
+New role assignments can still require time to propagate.
+
 ### Adding a multi-agent worker
 
 Add a worker definition to `deployment/multiagent-workers.json`. The `agentType`

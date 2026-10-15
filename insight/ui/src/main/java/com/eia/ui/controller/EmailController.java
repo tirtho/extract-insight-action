@@ -357,6 +357,34 @@ public class EmailController {
         return "redirect:/emails?emailId=" + emailId;
     }
 
+    @PostMapping("/emails/{emailId}/delete")
+    public String deleteEmail(@PathVariable String emailId,
+                              @RequestParam(value = "filterEmail", defaultValue = "") String filterEmail,
+                              @RequestParam(value = "filterSubject", defaultValue = "") String filterSubject,
+                              @RequestParam(value = "searchMode", defaultValue = "fields") String searchMode,
+                              @RequestParam(value = "searchQuery", defaultValue = "") String searchQuery,
+                              @RequestParam(value = "topN", defaultValue = "3") int topN,
+                              @RequestParam(value = "rerank", defaultValue = "false") boolean rerank,
+                              Authentication authentication,
+                              RedirectAttributes redirectAttributes) {
+        if (!isUserAuthenticated(authentication)) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Authentication required");
+        }
+
+        if (azureEmailStore.deleteEmail(emailId)) {
+            redirectAttributes.addFlashAttribute("emailDeleteMessage", "Email and its stored attachments were deleted.");
+        } else {
+            redirectAttributes.addFlashAttribute("emailDeleteError", "Email was not found or has already been deleted.");
+        }
+        redirectAttributes.addAttribute("filterEmail", filterEmail);
+        redirectAttributes.addAttribute("filterSubject", filterSubject);
+        redirectAttributes.addAttribute("searchMode", searchMode);
+        redirectAttributes.addAttribute("searchQuery", searchQuery);
+        redirectAttributes.addAttribute("topN", topN);
+        redirectAttributes.addAttribute("rerank", rerank);
+        return "redirect:/emails";
+    }
+
     @GetMapping("/emails/{emailId}/attachments/{attachmentId}/download")
     public ResponseEntity<ByteArrayResource> downloadAttachment(
             @PathVariable("emailId") String emailId,

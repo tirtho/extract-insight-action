@@ -1,6 +1,7 @@
 package com.microsoft.azure.functions.cuqueue;
 
 import com.azure.cosmos.CosmosContainer;
+import com.azure.cosmos.CosmosException;
 import com.azure.cosmos.models.CosmosItemRequestOptions;
 import com.azure.cosmos.models.CosmosItemResponse;
 import com.azure.cosmos.models.PartitionKey;
@@ -117,6 +118,17 @@ public class PollCuAnalysis {
                 return;
                 }
                 CosmosContainer container = azConnection.getCosmosContainerForMailbox(mailbox);
+
+                try {
+                    container.readItem(attachmentDocId, new PartitionKey(attachmentDocId), ObjectNode.class);
+                } catch (CosmosException exception) {
+                    if (exception.getStatusCode() == 404) {
+                        storageQueue.deleteMessage(queueMsg.getMessageId(), queueMsg.getPopReceipt());
+                        logger.info("Discarded CU poll message for deleted attachment " + attachmentDocId);
+                        return;
+                    }
+                    throw exception;
+                }
 
             logger.info("Polling CU analysis – attachment: " + attachmentDocId
                     + ", mailbox: " + mailbox.getEmailAddress()

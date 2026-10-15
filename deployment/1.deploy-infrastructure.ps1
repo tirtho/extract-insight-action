@@ -61,14 +61,15 @@ $tenantFqdn = if ($signedInIdentity -match '@(.+)$') {
     "contoso.onmicrosoft.com"
 }
 
-$userNamePartInput = Read-Host "Enter user email name part [default: fsi-demo, example: fsi-demo]"
+$defaultUserNamePart = if ($Environment -eq 'ins') { 'company' } else { 'fsi-demo' }
+$userNamePartInput = Read-Host "Enter user email name part [default: $defaultUserNamePart, example: $defaultUserNamePart]"
 $userNamePart = if ([string]::IsNullOrWhiteSpace($userNamePartInput)) {
-    "fsi-demo"
+    $defaultUserNamePart
 } else {
     ($userNamePartInput.Trim().ToLowerInvariant() -replace '[^a-z0-9._-]', '')
 }
 if ([string]::IsNullOrWhiteSpace($userNamePart)) {
-    $userNamePart = "fsi-demo"
+    $userNamePart = $defaultUserNamePart
 }
 $UserEmailAddress = "$userNamePart@$tenantFqdn"
 
@@ -82,6 +83,10 @@ $ContentUnderstandingRequestedLocation = if ([string]::IsNullOrWhiteSpace($conte
 Write-Host "[INFO] Deployment key: $ProjectName-$Environment-$Suffix" -ForegroundColor Cyan
 Write-Host "[INFO] User email    : $UserEmailAddress" -ForegroundColor Cyan
 Write-Host "[INFO] Content Understanding region: $ContentUnderstandingRequestedLocation" -ForegroundColor Cyan
+
+$serviceBusTierInput = Read-Host "Use Premium Service Bus for private-endpoint hardening, or Standard to save cost? [Standard] (P/S)"
+$ServiceBusSku = if ($serviceBusTierInput.Trim() -match '^(p|premium)$') { 'Premium' } else { 'Standard' }
+Write-Host "[INFO] Service Bus tier: $ServiceBusSku$(if ($ServiceBusSku -eq 'Premium') { ' (private-endpoint hardening supported)' } else { ' (lower cost; no private endpoint)' })" -ForegroundColor Cyan
 
 # Derived: SUFFIX / KEY_VAULT_NAME / AZURE_KEY_VAULT_URL exported for downstream scripts.
 # Also write env.bat at the repo root so cmd-based tools can pick up AZURE_KEY_VAULT_URL.
@@ -141,7 +146,12 @@ $WebAppAuthAppName    = "$ProjectName-webapp-auth-$Environment"
 $WebAppClientId       = $env:WEBAPP_CLIENT_ID
 $WebAppClientSecret   = $env:WEBAPP_CLIENT_SECRET
 $AppInsightsName      = "ai-$ProjectName-$Environment"
-$CosmosDbAccountName  = "cosmos-$ProjectName-$Environment-$Suffix"
+$CosmosMailboxNamePart = ($defaultUserNamePart.ToLowerInvariant() -replace '[^a-z0-9]+', '-').Trim('-')
+$CosmosDbAccountName  = if ($Environment -eq 'ins') {
+    "cosmos-$ProjectName-$Environment-$Suffix-$CosmosMailboxNamePart"
+} else {
+    "cosmos-$ProjectName-$Environment-$Suffix"
+}
 $StorageQueueName     = "cu-analyze-ops-$ProjectName-$Environment-$Suffix"
 $StorageQueuePollingSchedule = "0 */1 * * * *"
 
@@ -1060,17 +1070,22 @@ Write-Host ">>> Step 5/12: Service Bus" -ForegroundColor White
 
 if (Test-AzResource -Arguments @('servicebus','namespace','show','--name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','name','-o','tsv')) {
     $existingServiceBusSku = (Invoke-AzCliSilent -Arguments @('servicebus','namespace','show','--name',$ServiceBusNamespace,'--resource-group',$ResourceGroupName,'--query','sku.name','-o','tsv')).Output
-    if ($existingServiceBusSku -eq 'Standard') {
-        Write-Host "[WARNING] Service Bus namespace $ServiceBusNamespace is Standard and cannot be upgraded in place to Premium." -ForegroundColor Yellow
-        Write-Host "          Create a new Premium namespace, migrate entities/messages, then update application configuration." -ForegroundColor Yellow
+    if ($existingServiceBusSku -ne $ServiceBusSku) {
+        Write-Host "[WARNING] Service Bus namespace $ServiceBusNamespace already uses '$existingServiceBusSku'; requested tier is '$ServiceBusSku'." -ForegroundColor Yellow
+        if ($existingServiceBusSku -eq 'Premium' -and $ServiceBusSku -eq 'Standard') {
+            Write-Host "          Premium cannot be downgraded in place. Create a Standard namespace and migrate/reconfigure clients." -ForegroundColor Yellow
+        } elseif ($existingServiceBusSku -eq 'Standard' -and $ServiceBusSku -eq 'Premium') {
+            Write-Host "          Standard cannot be upgraded in place. Create a Premium namespace and migrate/reconfigure clients." -ForegroundColor Yellow
+        }
+        Write-Host "          The existing namespace is unchanged; hardening follows its actual tier." -ForegroundColor Yellow
     } else {
-        Write-Host "[WARNING] Service Bus namespace $ServiceBusNamespace already exists with SKU '$existingServiceBusSku', skipping" -ForegroundColor Yellow
+        Write-Host "[WARNING] Service Bus namespace $ServiceBusNamespace already exists with requested SKU '$existingServiceBusSku', skipping" -ForegroundColor Yellow
     }
 } else {
     $result = Invoke-AzCli -Description "Creating Service Bus namespace: $ServiceBusNamespace" `
         -Arguments @('servicebus','namespace','create','--name',$ServiceBusNamespace,
                      '--resource-group',$ResourceGroupName,'--location',$LocationServiceBus,
-                     '--sku','Premium',
+                     '--sku',$ServiceBusSku,
                      '--tags',"project=$ProjectName","environment=$Environment",$SecurityControlTag,'--output','table')
     if ($null -ne $result) {
         Write-Host "[SUCCESS] Service Bus namespace $ServiceBusNamespace created" -ForegroundColor Green
@@ -2313,6 +2328,8 @@ foreach ($identity in @($MailboxIdentity, $QueueDbIdentity, $CuQueueDbIdentity))
 Write-Host "[INFO] Storage roles for web app" -ForegroundColor Cyan
 if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Blob Data Reader'        -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Table Data Contributor' -Scope $StorageAccountId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
+$StorageContainerId = "$StorageAccountId/blobServices/default/containers/$StorageContainerName"
+if (-not (Set-RoleAssignment -Assignee $WebAppIdentity -Role 'Storage Blob Data Contributor' -Scope $StorageContainerId -PrincipalType 'ServicePrincipal')) { $newAssignments++ }
 
 # Admin user needs blob access for container creation and direct blob operations
 if ($CurrentUserId) {
@@ -3085,6 +3102,7 @@ if ($script:DeploymentErrors.Count -gt 0) {
     Write-Host "  Key Vault           : $KeyVaultName"
     Write-Host "  Storage Account     : $StorageAccountName"
     Write-Host "  Service Bus NS      : $ServiceBusNamespace"
+    Write-Host "  Service Bus SKU     : $ServiceBusSku (existing namespace may differ)"
     Write-Host "  Service Bus Topic   : $ServiceBusTopicName"
     Write-Host "  Cosmos DB Account   : $CosmosDbAccountName"
     Write-Host "  Cosmos DB Database  : $CosmosDbDatabaseName"
@@ -3111,6 +3129,7 @@ if ($script:DeploymentErrors.Count -gt 0) {
     Write-Host "  Key Vault           : $KeyVaultName"
     Write-Host "  Storage Account     : $StorageAccountName"
     Write-Host "  Service Bus NS      : $ServiceBusNamespace"
+    Write-Host "  Service Bus SKU     : $ServiceBusSku (private endpoint available only for Premium)"
     Write-Host "  Service Bus Topic   : $ServiceBusTopicName"
     Write-Host "  Cosmos DB Account   : $CosmosDbAccountName"
     Write-Host "  Cosmos DB Database  : $CosmosDbDatabaseName"
@@ -3139,7 +3158,7 @@ if ($script:DeploymentErrors.Count -gt 0) {
     Write-Host "  5. Choose the environment posture (run last, after everything is deployed):"
     Write-Host "       - Dev  : open access + grant the signed-in user data-plane RBAC for local testing"
     Write-Host "                .\6.operation-dev.ps1 -Suffix $Suffix"
-    Write-Host "       - Prod : harden the network (private endpoints, disable public access)"
+    Write-Host "       - Prod : harden the network (Service Bus private endpoint only when its actual SKU is Premium)"
     Write-Host "                .\6.operation-prod.ps1 -Suffix $Suffix"
     Write-Host "  6. Test the deployment with sample data"
 }

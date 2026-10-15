@@ -23,7 +23,12 @@ PROJ_CLEAN="${PROJECT_NAME//-/}"
 STORAGE_CLEAN="${SUFFIX//-/}"
 ResourceGroupName="${RESOURCE_GROUP_NAME:-rg-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
 StorageAccountName="${STORAGE_ACCOUNT_NAME:-st${PROJ_CLEAN}${ENVIRONMENT}${STORAGE_CLEAN}}"
-CosmosDbAccountName="${COSMOS_DB_ACCOUNT_NAME:-cosmos-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
+if [[ "$ENVIRONMENT" == "ins" ]]; then
+    CosmosDbAccountName="${COSMOS_DB_ACCOUNT_NAME:-$(az keyvault secret show --vault-name "${KEY_VAULT_NAME:-kv-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}" --name CosmosDbAccountName --query value -o tsv 2>/dev/null || true)}"
+    CosmosDbAccountName="${CosmosDbAccountName:-cosmos-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}-company}"
+else
+    CosmosDbAccountName="${COSMOS_DB_ACCOUNT_NAME:-cosmos-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
+fi
 ContentUnderstandingName="${CONTENT_UNDERSTANDING_NAME:-cu-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
 AiFoundryName="${AI_FOUNDRY_NAME:-oai-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"
 KeyVaultName="${KEY_VAULT_NAME:-kv-${PROJECT_NAME}-${ENVIRONMENT}-${SUFFIX}}"

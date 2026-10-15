@@ -3,6 +3,8 @@ package com.eia.ui.service;
 import com.azure.cosmos.CosmosClient;
 import com.azure.cosmos.CosmosClientBuilder;
 import com.azure.cosmos.CosmosContainer;
+import com.azure.cosmos.CosmosException;
+import com.azure.cosmos.models.CosmosItemRequestOptions;
 import com.azure.cosmos.models.CosmosQueryRequestOptions;
 import com.azure.cosmos.models.PartitionKey;
 import com.azure.cosmos.models.SqlParameter;
@@ -23,6 +25,8 @@ import com.azure.core.util.BinaryData;
 import com.azure.storage.blob.BlobContainerClient;
 import com.azure.storage.blob.BlobServiceClient;
 import com.azure.storage.blob.BlobServiceClientBuilder;
+import com.azure.storage.blob.models.BlobItem;
+import com.azure.storage.blob.models.ListBlobsOptions;
 import com.eia.ui.model.AttachmentView;
 import com.eia.ui.model.EmailDetailView;
 import com.eia.ui.model.EmailSummaryView;
@@ -503,6 +507,99 @@ public class AzureEmailStore implements AutoCloseable {
         }
 
         return Optional.of(toEmailDetail(emailDoc.get(), loadAttachmentDetails(emailDoc.get())));
+    }
+
+    public boolean deleteEmail(String emailId) {
+        if (cosmosContainer == null || emailId == null || emailId.isBlank()) {
+            return false;
+        }
+
+        ObjectNode emailDoc;
+        try {
+            emailDoc = cosmosContainer.readItem(emailId, new PartitionKey(emailId), ObjectNode.class).getItem();
+        } catch (CosmosException exception) {
+            if (exception.getStatusCode() == 404) {
+                return false;
+            }
+            throw exception;
+        }
+
+        String docType = text(emailDoc, "type");
+        if (!"email-deleted".equals(docType) && !isEmailDocument(emailDoc)) {
+            return false;
+        }
+
+        Map<String, ObjectNode> attachmentDocs = new LinkedHashMap<>();
+        SqlQuerySpec attachmentQuery = new SqlQuerySpec(
+                "SELECT * FROM c WHERE c.type = 'attachment' AND c.emailId = @emailId",
+                List.of(new SqlParameter("@emailId", emailId))
+        );
+        for (ObjectNode attachment : queryItems(attachmentQuery, new CosmosQueryRequestOptions())) {
+            attachmentDocs.put(text(attachment, "id"), attachment);
+        }
+
+        JsonNode refs = emailDoc.path("attachments");
+        if (refs.isArray()) {
+            for (JsonNode ref : refs) {
+                String attachmentId = text(ref, "attachmentId");
+                if (attachmentId.isBlank() || attachmentDocs.containsKey(attachmentId)) {
+                    continue;
+                }
+                try {
+                    ObjectNode attachment = cosmosContainer.readItem(
+                            attachmentId, new PartitionKey(attachmentId), ObjectNode.class).getItem();
+                    attachmentDocs.put(attachmentId, attachment);
+                } catch (CosmosException exception) {
+                    if (exception.getStatusCode() != 404) {
+                        throw exception;
+                    }
+                }
+            }
+        }
+
+        String blobFolder = text(emailDoc, "blobFolder");
+        if (blobFolder.isBlank()) {
+            blobFolder = sanitizeBlobPath(text(emailDoc, "graphMessageId"));
+        }
+
+        ObjectNode tombstone = objectMapper.createObjectNode();
+        tombstone.put("id", emailId);
+        tombstone.put("type", "email-deleted");
+        tombstone.put("deletedAt", java.time.Instant.now().toString());
+        if (!blobFolder.isBlank()) {
+            tombstone.put("blobFolder", blobFolder);
+        }
+        cosmosContainer.upsertItem(tombstone, new PartitionKey(emailId), new CosmosItemRequestOptions());
+
+        if (blobContainerClient != null) {
+            if (!blobFolder.isBlank()) {
+                ListBlobsOptions options = new ListBlobsOptions().setPrefix(blobFolder + "/");
+                blobContainerClient.listBlobs(options, null)
+                        .forEach(blob -> blobContainerClient.getBlobClient(blob.getName()).deleteIfExists());
+            }
+            for (ObjectNode attachment : attachmentDocs.values()) {
+                String blobName = extractBlobName(text(attachment, "blobUrl"));
+                if (!blobName.isBlank()) {
+                    blobContainerClient.getBlobClient(blobName).deleteIfExists();
+                }
+            }
+        }
+
+        for (String attachmentId : attachmentDocs.keySet()) {
+            cosmosContainer.deleteItem(attachmentId, new PartitionKey(attachmentId), new CosmosItemRequestOptions());
+        }
+        return true;
+    }
+
+    private String sanitizeBlobPath(String value) {
+        if (value == null || value.isEmpty()) {
+            return "";
+        }
+        String sanitized = value;
+        for (char invalid : new char[]{'<', '>', ':', '"', '|', '?', '*', '\\'}) {
+            sanitized = sanitized.replace(invalid, '_');
+        }
+        return sanitized.trim();
     }
 
     public Optional<AttachmentDownload> downloadAttachment(String emailId, String attachmentId) {
