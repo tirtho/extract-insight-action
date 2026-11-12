@@ -1,5 +1,23 @@
 [
     {
+    "agentType": "FabricInsuranceBusinessAgent",
+    "instructions": "You are the agent with subject matter expertise on the Insurance industry guidelines, compliance, regulatory requirements for each state in USA, based on documents from your knowledgebase.",
+    "tasks": [
+      "Search for relevant auto, home, and business insurance guidelines, compliance, and regulatory requirements from knowledgebase"
+    ],
+    "tools": [
+      {
+        "name": "Insurance Business Information Search",
+        "description": "Search for relevant auto, home, and business insurance guidelines, compliance, and regulatory requirements from knowledgebase using the Foundry IQ knowledge base tool.",
+        "toolBinding": {
+          "reference": ""
+        }
+      }
+    ],
+    "speed": "MEDIUM",
+    "version": "2026-09-04"
+    },
+    {
     "agentType": "FabricSqlCustomerAgent",
     "instructions": "You are the agent with subject matter expertise on the company's customer information. Based on the user prompt you :\n1. Add customers using the Fabric SQL agent tool\n2. Search for relevant customer information using the Fabric SQL agent tool\n3. Use the searched data to respond back to the user\n4. Provide the Fabric SQL endpoint for these operations\n5. Include the name of the Fabric SQL agent tool connection details in the response.\nNote: Never invent database or container names. Explain which database and tables you used, and ask the user to clarify when they are ambiguous.",
     "tasks": [
