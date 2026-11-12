@@ -5,7 +5,10 @@ Creates a Foundry IQ knowledge base with managed OneLake ingestion.
 .DESCRIPTION
 Uses the Azure CLI login, Azure AI Search Basic or higher, and the stable
 2026-04-01 Search API. Search manages PDF text extraction, chunking, and indexing.
-Uses extractive retrieval without embedding or chat model deployments.
+Uses the 2026-08-01-preview API for Foundry-compatible model-backed retrieval.
+Reuses an existing chat model deployment (gpt-5.6-luna by default); ingestion
+does not require embedding or chat models. Grants the Foundry project identity
+Search reader access and the Search identity model access on the Foundry account.
 Existing resources are reused only when their configuration matches.
 Fabric Contributor access is requested explicitly before it is granted.
 .EXAMPLE
@@ -22,6 +25,9 @@ param(
     [guid]$WorkspaceId = [guid]::Empty,
     [guid]$LakehouseId = [guid]::Empty,
     [string]$SearchServiceName,
+    [string]$AiFoundryName,
+    [string]$AiFoundryProjectName,
+    [string]$ModelDeploymentName = 'gpt-5.6-luna',
     [string]$Location,
     [ValidateSet('basic', 'standard', 'standard2', 'standard3')][string]$Sku = 'basic',
     [guid]$CallerObjectId = [guid]::Empty,
@@ -36,6 +42,7 @@ $knowledgeBaseName = 'fou-iq-kb-business'
 $knowledgeSourceName = 'insurance-business-onelake'
 $targetPath = 'InsuranceBusinessKnowledge'
 $searchApiVersion = '2026-04-01'
+$knowledgeBaseApiVersion = '2026-08-01-preview'
 $tokenCache = @{}
 
 function Invoke-KnowledgeCli {
@@ -156,10 +163,17 @@ function New-KnowledgeSourceDefinition {
 }
 
 function New-KnowledgeBaseDefinition {
+    param([string]$ModelResourceUri, [string]$DeploymentName, [string]$ModelName)
     @{
         name = $knowledgeBaseName
         description = 'Insurance business documents. Regulatory items are unverified review tasks, not verified legal requirements.'
         knowledgeSources = @(@{ name = $knowledgeSourceName })
+        models = @(@{
+            kind = 'azureOpenAI'
+            azureOpenAIParameters = @{
+                resourceUri = $ModelResourceUri; deploymentId = $DeploymentName; modelName = $ModelName
+            }
+        })
     }
 }
 
@@ -181,8 +195,10 @@ function Grant-KnowledgeSearchRole {
 
 if (-not $ResourceGroupName) { $ResourceGroupName = "rg-eia-$Environment-$Suffix" }
 if (-not $SearchServiceName) { $SearchServiceName = "aais-bzkb-eia-$Environment-$Suffix" }
+if (-not $AiFoundryName) { $AiFoundryName = "oai-eia-$Environment-$Suffix" }
+if (-not $AiFoundryProjectName) { $AiFoundryProjectName = "proj-eia-$Environment-$Suffix" }
 if ($WhatIfPreference) {
-    $null = $PSCmdlet.ShouldProcess("$ResourceGroupName/$SearchServiceName/$knowledgeBaseName", 'Create managed OneLake knowledge source and Foundry IQ knowledge base')
+    $null = $PSCmdlet.ShouldProcess("$ResourceGroupName/$SearchServiceName/$knowledgeBaseName", "Create managed OneLake knowledge source and model-backed Foundry IQ knowledge base using $AiFoundryName/$ModelDeploymentName; grant project Search reader and Search model access")
     return
 }
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw 'Azure CLI is required. Install it and run az login.' }
@@ -198,6 +214,18 @@ if ($SubscriptionId -eq [guid]::Empty) { $SubscriptionId = [guid]$account.id }
 $groupUri = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/${ResourceGroupName}?api-version=2021-04-01"
 $group = Invoke-KnowledgeRequest $groupUri
 if (-not $Location) { $Location = $group.location }
+$foundryScope = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.CognitiveServices/accounts/$AiFoundryName"
+$foundry = Invoke-KnowledgeRequest "https://management.azure.com${foundryScope}?api-version=2025-06-01"
+$project = Invoke-KnowledgeRequest "https://management.azure.com$foundryScope/projects/${AiFoundryProjectName}?api-version=2025-06-01"
+if (-not $project.identity.principalId) { throw 'The Foundry project requires a system-assigned managed identity. Enable it before rerunning.' }
+$model = Invoke-KnowledgeRequest "https://management.azure.com$foundryScope/deployments/$([uri]::EscapeDataString($ModelDeploymentName))?api-version=2025-06-01"
+if ($model.properties.provisioningState -ne 'Succeeded' -or $model.properties.model.format -ne 'OpenAI' -or
+    $model.properties.model.name -notlike 'gpt-*') {
+    throw "Model deployment '$ModelDeploymentName' must be an existing, successfully provisioned OpenAI GPT model. No model was deployed."
+}
+$modelResourceUri = $foundry.properties.endpoints.'OpenAI Language Model Instance API'
+if (-not $modelResourceUri) { $modelResourceUri = "https://$AiFoundryName.openai.azure.com" }
+$desiredBase = New-KnowledgeBaseDefinition $modelResourceUri $ModelDeploymentName $model.properties.model.name
 if ($WorkspaceId -eq [guid]::Empty) {
     $workspaces = @(Get-KnowledgeFabricCollection 'https://api.fabric.microsoft.com/v1/workspaces')
     for ($index = 0; $index -lt $workspaces.Count; $index++) { Write-Host "$($index + 1). $($workspaces[$index].displayName) [$($workspaces[$index].id)]" }
@@ -228,8 +256,10 @@ if ($CallerObjectId -eq [guid]::Empty) {
 }
 Write-Host "Knowledge base: $knowledgeBaseName; Search: $SearchServiceName; location: $Location; SKU: $Sku"
 Write-Host "Source: $WorkspaceId/$LakehouseId/Files/$targetPath (all descendants); hourly refresh."
+Write-Host "Retrieval model: $AiFoundryName/$ModelDeploymentName; Foundry project: $AiFoundryProjectName."
 Write-Warning 'New Azure AI Search resources incur ongoing charges. This script uses public endpoints with Entra authentication; it does not configure private networking or document-level ACL trimming.'
-if (-not $PSCmdlet.ShouldProcess("$scope -> $WorkspaceId/$LakehouseId/Files/$targetPath", 'Provision Search, assign caller roles, and create managed knowledge ingestion')) { return }
+Write-Warning 'Knowledge-base retrieval invokes the existing chat model and incurs model usage charges. Project Search reader and Search model-invocation roles will be assigned at resource scope.'
+if (-not $PSCmdlet.ShouldProcess("$scope -> $WorkspaceId/$LakehouseId/Files/$targetPath", 'Provision Search, assign caller/project/model roles, and configure managed knowledge ingestion and retrieval')) { return }
 if (-not $service) {
     $null = Invoke-KnowledgeRequest $serviceUri 'PUT' @{
         location = $Location; sku = @{ name = $Sku }; identity = @{ type = 'SystemAssigned' }
@@ -252,6 +282,8 @@ if ($service.sku.name -eq 'free' -or -not $service.identity.principalId) { throw
 if ($service.properties.publicNetworkAccess -eq 'disabled') { throw 'This script requires an accessible public Search endpoint; it does not change existing network restrictions.' }
 Grant-KnowledgeSearchRole $scope $CallerObjectId '7ca78c08-252a-4471-8644-bb5ff32d4ba0' $(if ($account.user.type -eq 'user') { 'User' } else { 'ServicePrincipal' })
 Grant-KnowledgeSearchRole $scope $CallerObjectId '8ebe5a00-799e-43f5-93ac-243d3dce84a7' $(if ($account.user.type -eq 'user') { 'User' } else { 'ServicePrincipal' })
+Grant-KnowledgeSearchRole $scope ([guid]$project.identity.principalId) '1407120a-92aa-4202-b7e9-c0e197c71c8f' 'ServicePrincipal'
+Grant-KnowledgeSearchRole $foundryScope ([guid]$service.identity.principalId) 'a97b65f3-24c7-4388-baec-2e87135dc908' 'ServicePrincipal'
 $assignments = @(Get-KnowledgeFabricCollection "https://api.fabric.microsoft.com/v1/workspaces/$WorkspaceId/roleAssignments")
 $existingAccess = @($assignments | Where-Object { $_.principal.id -eq $service.identity.principalId -and $_.role -in @('Admin', 'Member', 'Contributor') })
 if (-not $existingAccess) {
@@ -277,7 +309,7 @@ for ($attempt = 0; $attempt -lt 30; $attempt++) {
     }
 }
 $sourceUri = "$searchRoot/knowledgesources/${knowledgeSourceName}?api-version=$searchApiVersion"
-$baseUri = "$searchRoot/knowledgebases/${knowledgeBaseName}?api-version=$searchApiVersion"
+$baseUri = "$searchRoot/knowledgebases/${knowledgeBaseName}?api-version=$knowledgeBaseApiVersion"
 $existingSource = Invoke-KnowledgeRequest $sourceUri -AllowNotFound
 if ($existingSource) {
     $sourceParameters = $existingSource.indexedOneLakeParameters
@@ -297,8 +329,24 @@ if ($existingBase) {
     if (@($existingBase.knowledgeSources).Count -ne 1 -or $existingBase.knowledgeSources[0].name -ne $knowledgeSourceName) {
         throw 'Existing knowledge base references different sources. It was not overwritten.'
     }
+    if (@($existingBase.models | Where-Object { $null -ne $_ }).Count -eq 0) {
+        if (-not $existingBase.'@odata.etag') { throw 'Existing knowledge base has no ETag; refusing an unguarded model update.' }
+        $etag = $existingBase.'@odata.etag'
+        $existingBase.PSObject.Properties.Remove('@odata.etag')
+        $existingBase | Add-Member -NotePropertyName models -NotePropertyValue $desiredBase.models -Force
+        $null = Invoke-KnowledgeRequest $baseUri 'PUT' $existingBase @{ 'If-Match' = $etag }
+    } else {
+        $existingModel = $existingBase.models[0]
+        $parameters = $existingModel.azureOpenAIParameters
+        if (@($existingBase.models).Count -ne 1 -or $existingModel.kind -ne 'azureOpenAI' -or
+            ([string]$parameters.resourceUri).TrimEnd('/') -ine $modelResourceUri.TrimEnd('/') -or
+            $parameters.deploymentId -ne $ModelDeploymentName -or $parameters.modelName -ne $model.properties.model.name -or
+            $parameters.apiKey -or $parameters.authIdentity) {
+            throw 'Existing knowledge base uses different model settings. It was not overwritten. Select the matching Foundry account and -ModelDeploymentName or update it explicitly.'
+        }
+    }
 } else {
-    $null = Invoke-KnowledgeRequest $baseUri 'PUT' (New-KnowledgeBaseDefinition) @{ 'If-None-Match' = '*' }
+    $null = Invoke-KnowledgeRequest $baseUri 'PUT' $desiredBase @{ 'If-None-Match' = '*' }
 }
 $statusUri = "$searchRoot/knowledgesources/$knowledgeSourceName/status?api-version=$searchApiVersion"
 $ingestionStatus = Invoke-KnowledgeRequest $statusUri
@@ -360,5 +408,7 @@ if ($null -ne $verifiedFileCount) {
     WorkspaceId = $WorkspaceId; LakehouseId = $LakehouseId; Folder = "Files/$targetPath"
     KnowledgeBaseUrl = $baseUri; IngestionStatusUrl = $statusUri
     IndexerStatusUrl = $indexerStatusUri; VerifiedFileCount = $verifiedFileCount
-    RetrieveUrl = "$searchRoot/knowledgebases/$knowledgeBaseName/retrieve?api-version=$searchApiVersion"
+    RetrieveUrl = "$searchRoot/knowledgebases/$knowledgeBaseName/retrieve?api-version=$knowledgeBaseApiVersion"
+    McpUrl = "$searchRoot/knowledgebases/$knowledgeBaseName/mcp?api-version=$knowledgeBaseApiVersion"
+    ModelDeploymentName = $ModelDeploymentName; FoundryProjectName = $AiFoundryProjectName
 }

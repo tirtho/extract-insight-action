@@ -21,8 +21,9 @@ Assert-True ($source.kind -eq 'indexedOneLake') 'Must use managed OneLake ingest
 Assert-True ($source.indexedOneLakeParameters.targetPath -ceq 'InsuranceBusinessKnowledge') 'Must scope to the current document root.'
 Assert-True ($source.indexedOneLakeParameters.ingestionParameters.ingestionSchedule.interval -eq 'PT1H') 'Must refresh incrementally.'
 Assert-True ($source.indexedOneLakeParameters.ingestionParameters.contentExtractionMode -eq 'minimal') 'PDF text extraction must not require model deployments.'
-$base = New-KnowledgeBaseDefinition
+$base = New-KnowledgeBaseDefinition 'https://oai-eia-ins-1.openai.azure.com' 'gpt-5.6-luna' 'gpt-5.6-luna'
 Assert-True ($base.name -ceq 'fou-iq-kb-business' -and $base.knowledgeSources[0].name -eq $source.name) 'Knowledge base name or source binding mismatch.'
+Assert-True ($base.models[0].azureOpenAIParameters.deploymentId -eq 'gpt-5.6-luna') 'Foundry retrieval requires the existing chat model.'
 $roundTrip = $source | ConvertTo-Json -Depth 20 | ConvertFrom-Json
 Assert-True ($roundTrip.indexedOneLakeParameters.fabricWorkspaceId -eq 'bfdbced0-16ef-4af2-b335-8635f8d75af3') 'Workspace must survive JSON serialization.'
 Write-Host 'PASS: Managed source, knowledge base naming, source binding, schedule, and JSON contracts.'
@@ -89,12 +90,28 @@ function Invoke-WebRequest {
         '/items$' { $content = @{ value = @(@{ id = '073ecfd3-8b1e-4ef6-a4a2-acb19a32f004'; type = 'Lakehouse'; displayName = 'InsuranceBusinessDocuments' }, @{ id = '22222222-2222-2222-2222-222222222222'; type = 'SQLEndpoint'; displayName = 'InsuranceBusinessDocuments' }) }; break }
         '/items/[^/]+$' { $content = @{ type = 'Lakehouse' }; break }
         '/v1.0/me$' { $content = @{ id = '33333333-3333-3333-3333-333333333333' }; break }
+        '/accounts/[^/]+$' { $content = @{ properties = @{ endpoints = @{ 'OpenAI Language Model Instance API' = 'https://oai-eia-ins-1.openai.azure.com/' } } }; break }
+        '/projects/[^/]+$' {
+            $content = @{ identity = @{ principalId = '55555555-5555-5555-5555-555555555555' } }
+            if ($state.MissingProjectIdentity) { $content.identity = @{} }
+            break
+        }
+        '/deployments/[^/]+$' {
+            $content = @{ properties = @{ provisioningState = 'Succeeded'; model = @{ format = 'OpenAI'; name = 'gpt-5.6-luna' } } }
+            if ($state.InvalidModel) { $content.properties.model.name = 'text-embedding-3-small' }
+            break
+        }
         '/roleAssignments$' {
             if ($Method -eq 'POST') { $state.FabricGrants++ }
             $content = @{ value = @() }
+            if ($address.Host -eq 'management.azure.com') { $content.value = @($state.AzureRoles) }
             break
         }
-        '/roleAssignments/[^/]+$' { break }
+        '/roleAssignments/[^/]+$' {
+            if (-not $state.AzureRoles) { $state.AzureRoles = [Collections.Generic.List[object]]::new() }
+            $state.AzureRoles.Add($payload)
+            break
+        }
         '/searchServices/[^/]+$' {
             if ($Method -eq 'PUT') { $state.ServiceCreated = $true }
             if (-not $state.ServiceCreated) { $status = 404 } else {
@@ -136,8 +153,12 @@ function Invoke-WebRequest {
             if ($Method -eq 'GET') {
                 if ($state.Base) { $content = $state.Base } else { $status = 404 }
             } else {
+                if ($state.Base) {
+                    Assert-True ($Headers['If-Match'] -eq '"test-etag"') 'Existing base model updates must use an ETag guard.'
+                } else {
+                    Assert-True ($Headers['If-None-Match'] -eq '*') 'Base creation must be conditional.'
+                }
                 $state.Base = $payload; $content = $payload
-                Assert-True ($Headers['If-None-Match'] -eq '*') 'Base creation must be conditional.'
             }
             break
         }
@@ -157,7 +178,46 @@ Assert-True ($result.VerifiedFileCount -eq 1) 'Default monitoring must verify ac
 Assert-True ($result.KnowledgeBaseName -eq 'fou-iq-kb-business' -and $result.SearchServiceName -eq 'aais-bzkb-eia-ins-1') 'Default naming failed.'
 Assert-True ($global:KnowledgeTestState.Waits -eq 2 -and $global:KnowledgeTestState.FabricGrants -eq 1) 'RBAC readiness, ingestion completion, or explicit Fabric grant failed.'
 Assert-True ($global:KnowledgeTestState.Source.indexedOneLakeParameters.lakehouseId -eq '073ecfd3-8b1e-4ef6-a4a2-acb19a32f004') 'Must ignore same-name SQL endpoint.'
+Assert-True ($result.McpUrl -like '*api-version=2026-08-01-preview') 'Foundry MCP must use the model-capable preview API.'
+$roleWrites = @($global:KnowledgeTestState.Requests | Where-Object { $_.Method -eq 'PUT' -and $_.Uri -match '/roleAssignments/' })
+Assert-True (@($roleWrites | Where-Object { $_.Body.properties.principalId -eq '55555555-5555-5555-5555-555555555555' -and $_.Body.properties.roleDefinitionId -like '*/1407120a-92aa-4202-b7e9-c0e197c71c8f' -and $_.Uri -match '/searchServices/' }).Count -eq 1) 'Foundry project identity must receive Search Index Data Reader on Search.'
+Assert-True (@($roleWrites | Where-Object { $_.Body.properties.principalId -eq '44444444-4444-4444-4444-444444444444' -and $_.Body.properties.roleDefinitionId -like '*/a97b65f3-24c7-4388-baec-2e87135dc908' -and $_.Uri -match '/accounts/oai-eia-ins-1/providers/' }).Count -eq 1) 'Search identity must receive Cognitive Services User on the model account.'
+Assert-True (@($global:KnowledgeTestState.Requests | Where-Object { $_.Uri -match '/knowledgesources/' -and $_.Uri -notlike '*api-version=2026-04-01' }).Count -eq 0) 'Ingestion must remain on the stable API.'
 Write-Host 'PASS: Full mocked provisioning, naming prompt, lakehouse selection, managed identity, roles, RBAC propagation and ingestion status.'
+$global:KnowledgeTestState.Requests.Clear()
+$null = Invoke-TestKnowledgeWorkflow
+Assert-True (@($global:KnowledgeTestState.Requests | Where-Object { $_.Method -eq 'PUT' -and $_.Uri -match '/roleAssignments/' }).Count -eq 0) 'Existing Azure role assignments must be reused.'
+foreach ($scenario in @('MissingProjectIdentity', 'InvalidModel')) {
+    $global:KnowledgeTestState[$scenario] = $true
+    $global:KnowledgeTestState.Requests.Clear()
+    $failed = $false
+    try { $null = Invoke-TestKnowledgeWorkflow } catch {
+        $failed = $_.Exception.Message -like '*system-assigned managed identity*' -or $_.Exception.Message -like '*existing, successfully provisioned OpenAI GPT model*'
+    }
+    Assert-True $failed "$scenario must fail during preflight."
+    Assert-True (@($global:KnowledgeTestState.Requests | Where-Object { $_.Method -ne 'GET' }).Count -eq 0) 'Invalid Foundry prerequisites must fail before cloud mutations.'
+    $global:KnowledgeTestState[$scenario] = $false
+}
+$global:KnowledgeTestState.Base.models = @()
+$global:KnowledgeTestState.Base | Add-Member -NotePropertyName '@odata.etag' -NotePropertyValue '"test-etag"' -Force
+$global:KnowledgeTestState.Base | Add-Member -NotePropertyName retrievalInstructions -NotePropertyValue 'Preserve these retrieval instructions.' -Force
+$global:KnowledgeTestState.Requests.Clear()
+$null = Invoke-TestKnowledgeWorkflow
+Assert-True ($global:KnowledgeTestState.Base.models[0].azureOpenAIParameters.deploymentId -eq 'gpt-5.6-luna') 'Rerunning must repair an existing model-free base.'
+Assert-True ($global:KnowledgeTestState.Base.retrievalInstructions -eq 'Preserve these retrieval instructions.') 'Model upgrades must preserve unrelated knowledge-base settings.'
+Assert-True (@($global:KnowledgeTestState.Requests | Where-Object { $_.Method -eq 'PUT' -and $_.Uri -match '/knowledgebases/' }).Count -eq 1) 'Model-free upgrade must update the knowledge base exactly once.'
+$savedModels = $global:KnowledgeTestState.Base.models
+$global:KnowledgeTestState.Base.models = $null
+$failed = $false
+try { $null = Invoke-TestKnowledgeWorkflow } catch { $failed = $_.Exception.Message -like '*no ETag*' }
+Assert-True $failed 'A legacy base without models and an ETag must not be overwritten.'
+$global:KnowledgeTestState.Base.models = $savedModels
+$global:KnowledgeTestState.Base.models[0].azureOpenAIParameters.deploymentId = 'different-model'
+$failed = $false
+try { $null = Invoke-TestKnowledgeWorkflow } catch { $failed = $_.Exception.Message -like '*different model settings*' }
+Assert-True $failed 'Conflicting model bindings must not be overwritten.'
+$global:KnowledgeTestState.Base.models[0].azureOpenAIParameters.deploymentId = 'gpt-5.6-luna'
+Write-Host 'PASS: Foundry prerequisite validation, idempotent Azure roles, guarded model-free upgrade, preserved settings, and conflicting-model protection.'
 $global:KnowledgeTestState.ProvisioningPendingReads = 63
 $waitsBefore = $global:KnowledgeTestState.Waits
 $null = Invoke-TestKnowledgeWorkflow

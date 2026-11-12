@@ -212,6 +212,17 @@ when it is not already bound; when it is already bound, its configured name and
 description are updated if either value changed. This flow uses existing
 Foundry project connections; it does not create project connections.
 
+For `FabricInsuranceBusinessAgent`, first run
+[`fabric/create-insurance-business-knowledgebase.ps1`](fabric/create-insurance-business-knowledgebase.ps1)
+with the same environment and suffix. It configures the knowledge-base retrieval
+model (existing `gpt-5.6-luna` by default), grants the Foundry project identity
+Search Index Data Reader on Search, and grants the Search identity Cognitive
+Services User on the Foundry model account. Rerunning repairs an existing
+model-free business knowledge base without recreating ingestion resources.
+See the [business knowledge-base setup](fabric/README.insurance-customer-base.md#create-the-business-knowledge-base)
+for prerequisites and overrides. Binding a knowledge base in the portal or agent
+deployer alone does not configure these retrieval dependencies.
+
 After the restart, the runtime loads the worker manifest from Key Vault, constructs
 the workers, and registers them in the local orchestrator. A Function App
 restart is required after changing an existing manifest because configuration is

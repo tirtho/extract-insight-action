@@ -176,6 +176,14 @@ to select an accessible workspace. The default resource group is
 `rg-eia-<environment>-<suffix>`; `-ResourceGroupName` and `-Location` override
 the group and its default location.
 
+Retrieval reuses the existing `gpt-5.6-luna` deployment in
+`oai-eia-<environment>-<suffix>` and grants Search access to
+`proj-eia-<environment>-<suffix>`. Use `-AiFoundryName`,
+`-AiFoundryProjectName`, and `-ModelDeploymentName` to select other existing
+resources in the same resource group. The model name is read from the deployment;
+the script does not create or deploy models. The Foundry project must already
+have a system-assigned managed identity.
+
 It creates or reuses Azure AI Search (Basic by default) and creates the
 **fou-iq-kb-business** knowledge base with the managed `insurance-business-onelake`
 knowledge source. Foundry IQ knowledge bases are Search data-plane objects,
@@ -194,15 +202,24 @@ Prerequisites and scope:
   list files in the selected OneLake folder for coverage verification.
 - The script assigns the caller Search Service Contributor and Search Index
   Data Contributor. For service-principal logins, supply `-CallerObjectId`.
+- The script assigns **Search Index Data Reader** to the Foundry project's
+  system-assigned identity on the Search service, and **Cognitive Services User**
+  to the Search system-assigned identity on the Foundry account. The caller needs
+  role-assignment permission on both resources. These grants are idempotent and
+  use the project identity, not the Function App identity or deploying user's
+  identity. Azure RBAC propagation can delay the first successful tool call.
 - The Search system-assigned identity requires Fabric workspace Contributor.
   The script asks before granting this workspace-wide write permission.
   `-GrantFabricAccess` explicitly approves that grant without the prompt.
 - New Search services incur ongoing charges. Existing services require Basic
   or higher, a system-assigned identity, Entra data-plane authentication, and
   endpoint connectivity. Existing service configuration is not changed.
-- The stable `2026-04-01` API provides text ingestion and extractive retrieval
-  without embedding or chat deployments. It does not configure LLM planning,
-  answer synthesis, private networking, or document-level ACL trimming.
+- The stable `2026-04-01` API provides text ingestion without embedding or chat
+  deployments. The knowledge base uses `2026-08-01-preview` and the selected chat
+  deployment for retrieval query planning, avoiding the missing-model error
+  when the Foundry knowledge-base tool invokes non-minimal reasoning. Retrieval
+  incurs chat model usage charges in addition to Search charges.
+  The script does not configure private networking or document-level ACL trimming.
   Restrict Search access accordingly: retrieval does not filter documents by
   each caller's OneLake permissions. No Foundry project or agent connection is
   created by this script.
@@ -225,13 +242,19 @@ confirms file coverage, not that every byte of text was extracted without trunca
 
 Rerunning with the same Search name reuses matching resources and monitors any
 active indexing run. It never creates a second managed indexer or runs/resets
-the existing indexer. Once coverage is verified, the script exits and reports
+the existing indexer. A matching model-free knowledge base is upgraded to use
+the selected deployment with an ETag-guarded update that preserves other settings.
+Existing conflicting model bindings or sources are rejected rather than overwritten.
+Once coverage is verified, the script exits and reports
 `VerifiedFileCount`; hourly scheduled indexing remains enabled. Missing files
 continue to be polled until the timeout, which reports progress and leaves all
 resources unchanged. New uploads may require waiting for the next hourly run.
 `-WaitForIngestion:$false` explicitly skips monitoring and makes no completion
-claim. The output includes the ingestion/indexer status, knowledge-base, and
-retrieve URLs. Use `-WhatIf` for an offline preview without authentication,
+claim. The output includes the ingestion/indexer status, knowledge-base, retrieve,
+and MCP URLs, along with the model deployment and Foundry project names.
+Attach this knowledge base to the agent in Foundry using a project-managed-identity
+connection targeting the returned MCP URL with audience `https://search.azure.com`.
+Use `-WhatIf` for an offline preview without authentication,
 prompts, or cloud changes.
 
 Offline regression checks (all cloud calls are mocked):
